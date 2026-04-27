@@ -1,0 +1,26 @@
+{
+  "print": {
+    "command": "push_status",
+    "gcode_state": "PAUSE",
+    "mc_percent": 14,
+    "mc_remaining_time": 40,
+    "task_id": "synthetic-task-1",
+    "ams": {
+      "ams": [
+        {
+          "id": "1",
+          "tray": [
+            {
+              "id": "2",
+              "tray_uuid": "",
+              "tag_uid": "",
+              "tray_type": "TPU",
+              "tray_color": "222222",
+              "remain": 50
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

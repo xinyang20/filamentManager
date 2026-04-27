@@ -1,0 +1,33 @@
+{
+  "print": {
+    "command": "push_status",
+    "gcode_state": "RUNNING",
+    "print_type": "local",
+    "mc_percent": 12,
+    "mc_remaining_time": 42,
+    "gcode_file": "synthetic-print.gcode.3mf",
+    "subtask_name": "Synthetic print",
+    "task_id": "synthetic-task-1",
+    "ams": {
+      "ams": [
+        {
+          "id": "0",
+          "humidity": "3",
+          "temp": "25.1",
+          "tray": [
+            {
+              "id": "0",
+              "tray_uuid": "11111111-2222-3333-4444-555555555555",
+              "tag_uid": "ABCDEF0123456789",
+              "tray_type": "PLA",
+              "tray_sub_brands": "Basic",
+              "tray_color": "FF6600",
+              "remain": 88,
+              "tray_state": "idle"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

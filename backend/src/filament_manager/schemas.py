@@ -1,0 +1,590 @@
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class PrinterCreate(BaseModel):
+    name: str = Field(default="Printer", min_length=1, max_length=120)
+    host: str = Field(min_length=1, max_length=255)
+    port: int = Field(default=8883, ge=1, le=65535)
+    serial: str = Field(min_length=1, max_length=128)
+    access_code: str = Field(min_length=1, max_length=255)
+    tls_enabled: bool = True
+    certificate_verify: bool = False
+    enabled: bool = True
+    print_hours_offset: float = Field(default=0.0, ge=0)
+
+
+class PrinterUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    host: str | None = Field(default=None, min_length=1, max_length=255)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    serial: str | None = Field(default=None, min_length=1, max_length=128)
+    access_code: str | None = Field(default=None, max_length=255)
+    tls_enabled: bool | None = None
+    certificate_verify: bool | None = None
+    enabled: bool | None = None
+    print_hours_offset: float | None = Field(default=None, ge=0)
+
+
+class PrinterRead(BaseModel):
+    id: int
+    name: str
+    host: str
+    port: int
+    serial: str
+    access_code: str | None
+    tls_enabled: bool
+    certificate_verify: bool
+    enabled: bool
+    connection_status: str
+    last_sync_at: datetime | None
+    last_error: str | None
+    print_hours_offset: float = 0.0
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PrinterStateRead(BaseModel):
+    id: int
+    printer_id: int
+    gcode_state: str | None
+    print_type: str | None
+    mc_percent: int | None
+    mc_remaining_time: int | None
+    gcode_file: str | None
+    subtask_name: str | None
+    project_id: str | None
+    profile_id: str | None
+    task_id: str | None
+    error_code: str | None
+    payload: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AmsUnitRead(BaseModel):
+    id: int
+    printer_id: int
+    ams_id: str
+    humidity: str | None
+    temperature: str | None
+    humidity_raw: Any | None = None
+    serial_number: Any | None = None
+    sw_ver: Any | None = None
+    module_type: Any | None = None
+    dry_time: Any | None = None
+    dry_status: Any | None = None
+    dry_sub_status: Any | None = None
+    dry_sf_reason: Any | None = None
+    is_ams_ht: bool = False
+    ams_type_name: str = "unknown"
+    dry_status_name: str | None = None
+    dry_sub_status_name: str | None = None
+    dry_sf_reason_names: list[str] = []
+    raw: dict[str, Any]
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AmsSlotRead(BaseModel):
+    id: int
+    printer_id: int
+    ams_id: str
+    tray_id: str
+    slot_state: str | None
+    material: str | None
+    series: str | None
+    color: str | None
+    remain: int | None
+    tray_uuid: str | None
+    tag_uid: str | None
+    identity_key: str | None
+    identity_source: str
+    identity_confidence: float
+    identity_warning: str | None
+    is_transitioning: bool
+    spool_id: int | None
+    user_tray_id: int | None = None
+    slot_label: str | None = None
+    global_tray_id: str | None = None
+    location_label: str | None = None
+    is_active: bool = False
+    tray_id_name: Any | None = None
+    tray_info_idx: Any | None = None
+    nozzle_temp_min: Any | None = None
+    nozzle_temp_max: Any | None = None
+    drying_temp: Any | None = None
+    drying_time: Any | None = None
+    cali_idx: Any | None = None
+    k: Any | None = None
+    state_code: Any | None = None
+    state_name: str | None = None
+    tray_state_name: str | None = None
+    raw: dict[str, Any]
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AmsOverviewSummaryRead(BaseModel):
+    ams_count: int
+    slot_count: int
+    loaded_count: int
+    empty_count: int
+    transitioning_count: int
+    unknown_type_count: int
+    active_slot: dict[str, Any] | None = None
+
+
+class AmsUnitOverviewRead(BaseModel):
+    ams_id: str
+    display_name: str | None = None
+    ams_type_name: str
+    module_type: Any | None = None
+    sw_ver: Any | None = None
+    serial_number: Any | None = None
+    humidity: str | None = None
+    humidity_raw: Any | None = None
+    temperature: str | None = None
+    dry_time: Any | None = None
+    dry_status: Any | None = None
+    dry_status_name: str | None = None
+    dry_sub_status: Any | None = None
+    dry_sub_status_name: str | None = None
+    dry_sf_reason: Any | None = None
+    dry_sf_reason_names: list[str] = Field(default_factory=list)
+    active_slot: dict[str, Any] | None = None
+    updated_at: datetime
+    raw: dict[str, Any] = Field(default_factory=dict)
+    slots: list[AmsSlotRead] = Field(default_factory=list)
+
+
+class AmsOverviewRead(BaseModel):
+    summary: AmsOverviewSummaryRead
+    units: list[AmsUnitOverviewRead]
+
+
+class AmsSlotHistorySampleRead(BaseModel):
+    id: int
+    printer_id: int
+    ams_id: str
+    tray_id: str
+    state_name: str | None
+    material: str | None
+    color: str | None
+    remain: int | None
+    k: str | None
+    cali_idx: str | None
+    rfid_status: str | None
+    sampled_at: datetime
+    raw_message_id: int | None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AmsLabelUpdate(BaseModel):
+    display_name: str = Field(min_length=1, max_length=120)
+
+
+class AmsLabelRead(BaseModel):
+    id: int
+    printer_id: int
+    ams_id: str
+    display_name: str
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AmsSensorHistoryPointRead(BaseModel):
+    sampled_at: datetime
+    temperature: float | None = None
+    humidity: float | None = None
+
+
+class SensorStatsRead(BaseModel):
+    min: float | None = None
+    max: float | None = None
+    avg: float | None = None
+
+
+class AmsSensorHistoryRead(BaseModel):
+    printer_id: int
+    ams_id: str
+    hours: int
+    points: list[AmsSensorHistoryPointRead]
+    temperature: SensorStatsRead
+    humidity: SensorStatsRead
+
+
+class SpoolCreate(BaseModel):
+    display_name: str = Field(min_length=1, max_length=160)
+    brand: str | None = Field(default=None, max_length=120)
+    material: str | None = Field(default=None, max_length=80)
+    series: str | None = Field(default=None, max_length=120)
+    color: str | None = Field(default=None, max_length=80)
+    sealed_quantity: int = Field(default=1, ge=0)
+    status: str = Field(default="sealed", pattern="^(sealed|opened|active|archived)$")
+
+
+class SpoolUpdate(BaseModel):
+    display_name: str | None = Field(default=None, min_length=1, max_length=160)
+    brand: str | None = Field(default=None, max_length=120)
+    material: str | None = Field(default=None, max_length=80)
+    series: str | None = Field(default=None, max_length=120)
+    color: str | None = Field(default=None, max_length=80)
+    sealed_quantity: int | None = Field(default=None, ge=0)
+    status: str | None = Field(default=None, pattern="^(sealed|opened|active|archived)$")
+
+
+class SpoolRead(BaseModel):
+    id: int
+    identity_key: str | None
+    identity_source: str
+    display_name: str
+    brand: str | None
+    material: str | None
+    series: str | None
+    color: str | None
+    status: str
+    sealed_quantity: int
+    opened_at: datetime | None
+    current_printer_id: int | None
+    current_ams_id: str | None
+    current_tray_id: str | None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SlotBindRequest(BaseModel):
+    spool_id: int
+
+
+class RawMqttMessageRead(BaseModel):
+    id: int
+    printer_id: int
+    topic: str | None
+    command: str | None
+    payload: dict[str, Any]
+    received_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PrinterEventRead(BaseModel):
+    id: int
+    printer_id: int
+    event_type: str
+    severity: str
+    message: str
+    dedupe_key: str | None
+    data: dict[str, Any] | None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class InventoryEventRead(BaseModel):
+    id: int
+    spool_id: int
+    event_type: str
+    quantity_delta: int | None
+    message: str
+    data: dict[str, Any] | None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class UnifiedEventRead(BaseModel):
+    id: int
+    source: str
+    printer_id: int | None = None
+    spool_id: int | None = None
+    type: str
+    event_type: str
+    severity: str
+    active: bool | None = None
+    message: str
+    dedupe_key: str | None = None
+    data: dict[str, Any] | None = None
+    created_at: datetime
+
+
+class PrintLogEntryRead(BaseModel):
+    id: int
+    printer_id: int
+    printer_name_snapshot: str | None
+    task_id: str | None
+    print_name: str | None
+    gcode_file: str | None
+    status: str
+    started_at: datetime | None
+    finished_at: datetime | None
+    duration_seconds: int | None
+    max_progress: int | None
+    final_progress: int | None
+    layer_current: int | None
+    layer_total: int | None
+    filament_summary: dict[str, Any]
+    hms_summary: list[dict[str, Any]]
+    failure_reason: str | None
+    raw_refs: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PrintLogListRead(BaseModel):
+    total: int
+    limit: int
+    offset: int
+    items: list[PrintLogEntryRead]
+
+
+class PrintLogSummaryRead(BaseModel):
+    from_: datetime | None = Field(default=None, alias="from")
+    to: datetime | None = None
+    total: int
+    running: int
+    succeeded: int
+    failed: int
+    cancelled: int
+    total_duration_seconds: int
+    by_printer: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class MaintenanceTypeRead(BaseModel):
+    id: int
+    code: str
+    name: str
+    description: str | None
+    interval_type: str
+    default_interval: float
+    icon: str | None
+    wiki_url: str | None
+    is_system_default: bool
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PrinterMaintenanceRead(BaseModel):
+    id: int
+    printer_id: int
+    printer_name: str | None = None
+    maintenance_type: MaintenanceTypeRead
+    enabled: bool
+    custom_interval: float | None
+    interval: float
+    last_performed_at: datetime | None
+    last_performed_print_hours: float
+    current_print_hours: float
+    hours_since_last: float
+    hours_until_due: float
+    due_status: str
+    history_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class MaintenanceOverviewRead(BaseModel):
+    total_items: int
+    due_count: int
+    soon_count: int
+    ok_count: int
+    printers: list[dict[str, Any]] = Field(default_factory=list)
+    items: list[PrinterMaintenanceRead] = Field(default_factory=list)
+
+
+class PrinterMaintenanceUpdate(BaseModel):
+    enabled: bool | None = None
+    custom_interval: float | None = Field(default=None, ge=0)
+    last_performed_at: datetime | None = None
+    last_performed_print_hours: float | None = Field(default=None, ge=0)
+
+
+class MaintenancePerformRequest(BaseModel):
+    note: str | None = Field(default=None, max_length=2000)
+    performed_at: datetime | None = None
+    print_hours: float | None = Field(default=None, ge=0)
+
+
+class MaintenanceHistoryRead(BaseModel):
+    id: int
+    maintenance_item_id: int
+    performed_at: datetime
+    print_hours: float
+    note: str | None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SystemInfoRead(BaseModel):
+    app_version: str
+    uptime_seconds: float
+    database_size_bytes: int
+    storage_size_bytes: int
+    cpu_percent: float | None = None
+    memory: dict[str, Any]
+    configured_printers: int
+    online_printers: int
+
+
+class SupportBundleRead(BaseModel):
+    generated_at: datetime
+    system: SystemInfoRead
+    recent_events: list[dict[str, Any]]
+    recent_mqtt: list[dict[str, Any]]
+    config_summary: dict[str, Any]
+    privacy: dict[str, Any]
+
+
+class HmsCodeInfoRead(BaseModel):
+    short_code: str
+    module: str
+    severity: str
+    message_zh: str
+    message_en: str
+    suggestion_zh: str
+    suggestion_en: str
+    wiki_url: str | None = None
+    known: bool = True
+    actionable: bool = True
+
+
+class DeviceStatusSnapshotRead(BaseModel):
+    id: int
+    printer_id: int
+    print_status: dict[str, Any]
+    derived_status: dict[str, Any]
+    temperatures: dict[str, Any]
+    fans: dict[str, Any]
+    network: dict[str, Any]
+    hardware: dict[str, Any]
+    nozzles: dict[str, Any]
+    storage: dict[str, Any]
+    camera: dict[str, Any]
+    camera_options: dict[str, Any]
+    lights: dict[str, Any]
+    speed: dict[str, Any]
+    calibration: dict[str, Any]
+    ams_status: dict[str, Any]
+    hms_errors: list[dict[str, Any]]
+    firmware: dict[str, Any]
+    accessories: dict[str, Any]
+    external_slots: list[dict[str, Any]]
+    unsupported_features: dict[str, Any]
+    data_coverage: dict[str, Any]
+    raw_refs: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PrinterDashboardRead(BaseModel):
+    printer: PrinterRead
+    state: PrinterStateRead | None
+    device_snapshot: DeviceStatusSnapshotRead | None
+    ams_units: list[AmsUnitRead]
+    ams_slots: list[AmsSlotRead]
+    recent_events: list[PrinterEventRead]
+    recent_print_logs: list[PrintLogEntryRead] = Field(default_factory=list)
+    maintenance_due_count: int = 0
+
+
+class DashboardSummaryItemRead(BaseModel):
+    printer: PrinterRead
+    state: PrinterStateRead | None
+    device_snapshot: DeviceStatusSnapshotRead | None
+    recent_print_logs: list[PrintLogEntryRead] = Field(default_factory=list)
+    maintenance_due_count: int = 0
+
+
+class DeviceMetricSampleRead(BaseModel):
+    id: int
+    printer_id: int
+    metric: str
+    value_float: float | None
+    value_text: str | None
+    unit: str | None
+    raw_message_id: int | None
+    details: dict[str, Any]
+    sampled_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PrinterStorageFileRead(BaseModel):
+    id: int
+    printer_id: int
+    path: str
+    name: str
+    size: int | None
+    modified_at: datetime | None
+    type: str | None
+    source: str
+    raw: dict[str, Any]
+    last_scanned_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class StorageSummaryRead(BaseModel):
+    printer_id: int
+    file_count: int
+    total_size: int
+    by_type: dict[str, int]
+    recent_files: list[PrinterStorageFileRead] = Field(default_factory=list)
+    timelapse_files: list[PrinterStorageFileRead] = Field(default_factory=list)
+    last_scan_event: UnifiedEventRead | None = None
+    last_scan: dict[str, Any] | None = None
+
+
+class StorageScanResultRead(BaseModel):
+    success: bool
+    error: str | None = None
+    scanned_count: int = 0
+    new_count: int = 0
+    existing_count: int = 0
+    failed_count: int = 0
+    files: list[PrinterStorageFileRead] = Field(default_factory=list)
+
+
+class MqttPayloadIn(BaseModel):
+    topic: str | None = None
+    payload: dict[str, Any]
+
+
+class DiscoveryCandidateRead(BaseModel):
+    host: str
+    hostname: str | None
+    open_ports: list[int]
+    confidence: float
+    reason: str
+    serial: str | None
+    device_name: str | None
+    model: str | None
+    connection_mode: str | None
+    bind_state: str | None
+    secure_link: str | None
+    firmware_version: str | None
+    has_basic_info: bool
+    validation_source: str | None
+    validation_message: str | None
+    ssdp: dict[str, str]

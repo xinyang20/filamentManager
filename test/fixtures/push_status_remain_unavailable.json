@@ -1,0 +1,24 @@
+{
+  "print": {
+    "command": "push_status",
+    "gcode_state": "RUNNING",
+    "ams": {
+      "ams": [
+        {
+          "id": "0",
+          "tray": [
+            {
+              "id": "3",
+              "tray_uuid": "99999999-8888-7777-6666-555555555555",
+              "tag_uid": "REMAINUNAVAILABLE",
+              "tray_type": "PLA",
+              "tray_color": "FFFFFF",
+              "remain": -1,
+              "tray_state": "loading"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

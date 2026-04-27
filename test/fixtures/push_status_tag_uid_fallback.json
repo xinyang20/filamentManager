@@ -1,0 +1,27 @@
+{
+  "print": {
+    "command": "push_status",
+    "gcode_state": "RUNNING",
+    "mc_percent": 14,
+    "mc_remaining_time": 40,
+    "task_id": "synthetic-task-1",
+    "ams": {
+      "ams": [
+        {
+          "id": "0",
+          "tray": [
+            {
+              "id": "1",
+              "tray_uuid": "00000000-0000-0000-0000-000000000000",
+              "tag_uid": "TAGUID1234567890",
+              "tray_type": "PETG",
+              "tray_info_idx": "Generic PETG",
+              "tray_color": "00AAFF",
+              "remain": 73
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

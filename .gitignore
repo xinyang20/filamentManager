@@ -1,0 +1,62 @@
+# macOS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Python cache and test output
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyre/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.hypothesis/
+
+# Python build output
+build/
+dist/
+*.egg-info/
+
+# Project Python environments
+.venv/
+backend/.venv/
+
+# Node / pnpm
+node_modules/
+frontend/vue/node_modules/
+.pnpm-store/
+
+# Frontend build output
+frontend/vue/dist/
+
+# Local runtime data
+backend/filament_manager.db
+backend/*.db
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+
+# Reference projects copied for local comparison
+reference
+
+.docs/local_bambu_test_environment.md

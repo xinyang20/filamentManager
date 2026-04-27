@@ -1,0 +1,50 @@
+[
+  {
+    "short_code": "0500_8001",
+    "module": "print_control",
+    "severity": "error",
+    "message_zh": "打印控制模块报告错误。",
+    "message_en": "The print-control module reported an error.",
+    "suggestion_zh": "检查屏幕或 Bambu Handy 中的提示；若没有弹屏提示，保留原始 HMS 码用于排查。",
+    "suggestion_en": "Check the printer screen or Bambu Handy prompt. If no prompt is shown, keep the raw HMS code for troubleshooting.",
+    "wiki_url": "https://wiki.bambulab.com/en/x1/troubleshooting/hmscode/0500_8001",
+    "known": true,
+    "actionable": true
+  },
+  {
+    "short_code": "0700_8001",
+    "module": "network",
+    "severity": "warning",
+    "message_zh": "网络模块报告连接或服务异常。",
+    "message_en": "The network module reported a connection or service issue.",
+    "suggestion_zh": "检查局域网、WiFi 信号、打印机在线状态和云服务状态。",
+    "suggestion_en": "Check LAN connectivity, WiFi signal, printer online state, and cloud service status.",
+    "wiki_url": "https://wiki.bambulab.com/en/x1/troubleshooting/hmscode/0700_8001",
+    "known": true,
+    "actionable": true
+  },
+  {
+    "short_code": "0400_8001",
+    "module": "ams",
+    "severity": "warning",
+    "message_zh": "AMS 模块报告异常。",
+    "message_en": "The AMS module reported an issue.",
+    "suggestion_zh": "检查 AMS 槽位、耗材路径、RFID 识别状态和干燥盒状态。",
+    "suggestion_en": "Check AMS slots, filament path, RFID status, and drying status.",
+    "wiki_url": "https://wiki.bambulab.com/en/x1/troubleshooting/hmscode/0400_8001",
+    "known": true,
+    "actionable": true
+  },
+  {
+    "short_code": "0000_4000",
+    "module": "system",
+    "severity": "info",
+    "message_zh": "设备报告非行动项 HMS 信息。",
+    "message_en": "The printer reported a non-actionable HMS information item.",
+    "suggestion_zh": "通常无需处理；仅作为状态记录保留。",
+    "suggestion_en": "No action is usually required; this is kept as a status record.",
+    "wiki_url": "https://wiki.bambulab.com/en/x1/troubleshooting/hmscode/0000_4000",
+    "known": true,
+    "actionable": false
+  }
+]
