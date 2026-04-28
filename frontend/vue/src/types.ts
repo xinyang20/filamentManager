@@ -24,6 +24,22 @@ export interface Dashboard {
   maintenance_due_count?: number;
 }
 
+export interface DeviceCapabilities {
+  model_family: string;
+  model_hint?: string | null;
+  known: boolean;
+  supports_ams?: boolean | null;
+  supports_ams_ht?: boolean | null;
+  supports_chamber_temperature?: boolean | null;
+  supports_aux_fan?: boolean | null;
+  supports_camera_fields?: boolean | null;
+  has_carbon_rods?: boolean | null;
+  xy_motion?: string | null;
+  recommended_maintenance: string[];
+  visible_fields: string[];
+  evidence: Record<string, any>;
+}
+
 export interface AmsOverviewSummary {
   ams_count: number;
   slot_count: number;
@@ -96,6 +112,20 @@ export interface HmsCodeInfo {
   actionable: boolean;
 }
 
+export interface HmsCodeStats {
+  short_code: string;
+  printer_id?: number | null;
+  days: number;
+  recent_count: number;
+  active_count: number;
+  recovered_count: number;
+  affected_printers: number[];
+  last_seen_at?: string | null;
+  last_recovered_at?: string | null;
+  high_frequency: boolean;
+  recent_events: Record<string, any>[];
+}
+
 export interface UnifiedEvent {
   id: number;
   source: string;
@@ -153,7 +183,20 @@ export interface PrintLogSummary {
   failed: number;
   cancelled: number;
   total_duration_seconds: number;
+  average_duration_seconds?: number | null;
+  longest_duration_seconds?: number | null;
+  success_rate?: number;
+  failure_rate?: number;
+  cancelled_rate?: number;
   by_printer: Record<string, any>[];
+  by_date?: Record<string, any>[];
+  by_failure_reason?: Record<string, any>[];
+  by_hms?: Record<string, any>[];
+}
+
+export interface PrintLogAnalytics extends PrintLogSummary {
+  bucket: string;
+  printer_id?: number | null;
 }
 
 export interface MaintenanceType {
@@ -171,6 +214,8 @@ export interface PrinterMaintenance {
   id: number;
   printer_id: number;
   printer_name?: string | null;
+  target_type?: string;
+  target_label?: string | null;
   maintenance_type: MaintenanceType;
   enabled: boolean;
   custom_interval?: number | null;
@@ -224,11 +269,74 @@ export interface StorageFile {
   source: string;
 }
 
+export interface TimelapseNote {
+  id: number;
+  printer_id: number;
+  path: string;
+  favorite: boolean;
+  note?: string | null;
+  cached_metadata: Record<string, any>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface NotificationTarget {
+  id: number;
+  channel: string;
+  name: string;
+  enabled: boolean;
+  config: Record<string, any>;
+  display_config: Record<string, any>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface NotificationRule {
+  id: number;
+  name: string;
+  enabled: boolean;
+  event_types: string[];
+  printer_ids: number[];
+  severities: string[];
+  quiet_policy: Record<string, any>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface NotificationDelivery {
+  id: number;
+  target_id?: number | null;
+  rule_id?: number | null;
+  event_id?: number | null;
+  printer_id?: number | null;
+  event_type: string;
+  status: string;
+  error_summary?: string | null;
+  response_status?: number | null;
+  sent_at?: string | null;
+  created_at: string;
+}
+
+export interface StorageUsageArea {
+  total_bytes?: number | null;
+  free_bytes?: number | null;
+  used_bytes?: number | null;
+  used_percent?: number | null;
+}
+
 export interface StorageSummary {
   printer_id: number;
   file_count: number;
   total_size: number;
   by_type: Record<string, number>;
+  storage_usage?: {
+    internal?: StorageUsageArea;
+    external?: StorageUsageArea;
+    timelapse_path?: string | null;
+    store_path_type?: string | number | null;
+    store_hpd_type?: string | number | null;
+    current_target?: string | null;
+  };
   recent_files: StorageFile[];
   timelapse_files: StorageFile[];
   last_scan?: Record<string, any> | null;

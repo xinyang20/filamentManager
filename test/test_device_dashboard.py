@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from filament_manager.api import routes as api_routes
 from filament_manager.api.routes import _sanitize_camera_response
 from filament_manager.db.models import AmsSlot
 from filament_manager.db import session as db_session
@@ -64,6 +65,11 @@ def _dashboard_push_status() -> dict:
                 "resolution": "1080p",
                 "rtsp_url": "disable",
                 "timelapse": "disable",
+                "tl_external_free_kb": 2048,
+                "tl_external_total_kb": 4096,
+                "tl_internal_free_kb": 256,
+                "tl_internal_total_kb": 1024,
+                "tl_store_path_type": 2,
             },
             "xcam": {
                 "ipcam_record": "enable",
@@ -105,7 +111,7 @@ def _dashboard_push_status() -> dict:
                     ],
                 },
                 "plate": {"id": "plate_2"},
-                "cam": {"state": "ready"},
+                "cam": {"state": "ready", "timelapse_path": "/userdata/media/timelapse/demo.mp4"},
                 "extruder": {
                     "info": [
                         {"id": 0, "temp": 215},
@@ -388,18 +394,19 @@ def test_events_metrics_history_and_storage_summary(api_client, printer_payload,
 
     def fake_list_storage_files(_printer, _directories):
         return [
-            {"path": "/model/demo.3mf", "name": "demo.3mf", "size": 100, "modified_at": None, "type": "model", "raw": {}},
+            {"path": "/timelapse/demo.mp4", "name": "demo.mp4", "size": 100, "modified_at": None, "type": "timelapse", "raw": {}},
             {"path": "/cache/demo.gcode", "name": "demo.gcode", "size": 200, "modified_at": None, "type": "gcode", "raw": {}},
             {"path": "/record/clip.mp4", "name": "clip.mp4", "size": 300, "modified_at": None, "type": "recording", "raw": {}},
         ]
 
     monkeypatch.setattr(storage_service, "_list_storage_files", fake_list_storage_files)
     scan = api_client.post(f"/api/printers/{printer_id}/storage/scan").json()
-    assert scan["new_count"] == 3
+    assert scan["new_count"] == 1
     summary = api_client.get(f"/api/printers/{printer_id}/storage/summary").json()
-    assert summary["by_type"]["model"] == 1
-    assert summary["by_type"]["gcode"] == 1
-    assert summary["by_type"]["recording"] == 1
+    assert summary["by_type"] == {"timelapse": 1}
+    assert summary["storage_usage"]["external"]["total_bytes"] == 4096 * 1024
+    assert summary["storage_usage"]["internal"]["free_bytes"] == 256 * 1024
+    assert summary["storage_usage"]["current_target"] == "external"
 
 
 def test_hms_error_becomes_inactive_when_absent_from_next_hms_frame(api_client, printer_payload) -> None:
@@ -444,6 +451,7 @@ def test_storage_scan_api_upserts_read_only_file_records(api_client, printer_pay
     printer_id = _create_printer(api_client, printer_payload)
 
     def fake_list_storage_files(_printer, _directories):
+        assert _directories == ("/timelapse", "/timelapse/video")
         return [
             {
                 "path": "/timelapse/demo.mp4",
@@ -452,7 +460,15 @@ def test_storage_scan_api_upserts_read_only_file_records(api_client, printer_pay
                 "modified_at": None,
                 "type": "timelapse",
                 "raw": {"perm": "read"},
-            }
+            },
+            {
+                "path": "/model/demo.gcode.3mf",
+                "name": "demo.gcode.3mf",
+                "size": 2048,
+                "modified_at": None,
+                "type": "gcode",
+                "raw": {"perm": "read"},
+            },
         ]
 
     monkeypatch.setattr(storage_service, "_list_storage_files", fake_list_storage_files)
@@ -463,8 +479,89 @@ def test_storage_scan_api_upserts_read_only_file_records(api_client, printer_pay
     assert scan.json()["scanned_count"] == 1
 
     files = api_client.get(f"/api/printers/{printer_id}/storage/files").json()
+    assert len(files) == 1
     assert files[0]["path"] == "/timelapse/demo.mp4"
     assert files[0]["type"] == "timelapse"
+
+    summary = api_client.get(f"/api/printers/{printer_id}/storage/summary").json()
+    assert summary["by_type"] == {"timelapse": 1}
+
+    stream_calls = []
+
+    def fake_stream(_printer, path, start=None, end=None):
+        assert path == "/timelapse/demo.mp4"
+        stream_calls.append((start, end))
+        if start is not None and end is not None:
+            yield b"x" * (end - start + 1)
+            return
+        yield b"video-bytes"
+
+    monkeypatch.setattr(api_routes, "stream_printer_storage_file", fake_stream)
+    download = api_client.get(
+        f"/api/printers/{printer_id}/storage/files/download",
+        params={"path": "/timelapse/demo.mp4"},
+    )
+    assert download.status_code == 200, download.text
+    assert download.content == b"video-bytes"
+    assert download.headers["content-disposition"].startswith("attachment;")
+    assert download.headers["content-type"].startswith("video/")
+    assert download.headers["accept-ranges"] == "bytes"
+    assert stream_calls[-1] == (None, None)
+
+    inline = api_client.get(
+        f"/api/printers/{printer_id}/storage/files/download",
+        params={"path": "/timelapse/demo.mp4", "inline": "true"},
+    )
+    assert inline.status_code == 200, inline.text
+    assert inline.headers["content-disposition"].startswith("inline;")
+
+    partial = api_client.get(
+        f"/api/printers/{printer_id}/storage/files/download",
+        params={"path": "/timelapse/demo.mp4", "inline": "true"},
+        headers={"Range": "bytes=10-19"},
+    )
+    assert partial.status_code == 206, partial.text
+    assert partial.headers["content-range"] == "bytes 10-19/1024"
+    assert partial.headers["content-length"] == "10"
+    assert stream_calls[-1] == (10, 19)
+
+    missing = api_client.get(
+        f"/api/printers/{printer_id}/storage/files/download",
+        params={"path": "/model/not-scanned.3mf"},
+    )
+    assert missing.status_code == 404
+
+
+def test_implicit_ftps_reuses_control_tls_session_for_data_connections(monkeypatch) -> None:
+    control_session = object()
+    data_socket = object()
+    wrap_calls = []
+
+    class FakeControlSocket:
+        session = control_session
+
+    class FakeContext:
+        def wrap_socket(self, conn, **kwargs):
+            wrap_calls.append(kwargs)
+            return conn
+
+    def fake_ntransfercmd(self, cmd, rest=None):
+        assert cmd == "MLSD /model"
+        assert rest is None
+        return data_socket, 128
+
+    monkeypatch.setattr(storage_service.ftplib.FTP, "ntransfercmd", fake_ntransfercmd)
+
+    ftp = storage_service.ImplicitFTP_TLS(context=FakeContext())
+    ftp.host = "192.0.2.10"
+    ftp.sock = FakeControlSocket()
+    ftp._prot_p = True
+
+    conn, size = ftp.ntransfercmd("MLSD /model")
+
+    assert conn is data_socket
+    assert size == 128
+    assert wrap_calls == [{"server_hostname": "192.0.2.10", "session": control_session}]
 
 
 def test_camera_response_sanitizer_removes_stale_raw_objects() -> None:

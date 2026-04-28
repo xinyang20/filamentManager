@@ -14,25 +14,29 @@ import {
   Download,
   Eye,
   EyeOff,
-  FolderSearch,
+  FileDown,
   Gauge,
   HardDrive,
   LineChart,
   Loader2,
   Network,
+  PencilLine,
   PlugZap,
   RefreshCw,
   Save,
   Search,
+  Send,
   Settings,
   ShieldAlert,
+  Star,
   Thermometer,
   Trash2,
   Unplug,
   Wrench,
   X,
 } from "lucide-vue-next";
-import { apiRequest, formatCell, formatUnit, numeric } from "./api";
+import { API_BASE, apiRequest, formatCell, formatUnit, numeric } from "./api";
+import AppSelect from "./components/AppSelect.vue";
 import MetricChart from "./components/MetricChart.vue";
 import translations from "./i18n.json";
 import type {
@@ -41,12 +45,18 @@ import type {
   AmsSlotHistorySample,
   Dashboard,
   DashboardSummaryItem,
+  DeviceCapabilities,
   DiscoveryCandidate,
   HmsCodeInfo,
+  HmsCodeStats,
   MaintenanceOverview,
   MetricSample,
+  NotificationDelivery,
+  NotificationRule,
+  NotificationTarget,
   Printer,
   PrinterMaintenance,
+  PrintLogAnalytics,
   PrintLogEntry,
   PrintLogList,
   PrintLogSummary,
@@ -54,10 +64,11 @@ import type {
   StorageFile,
   StorageSummary,
   SystemInfo,
+  TimelapseNote,
   UnifiedEvent,
 } from "./types";
 
-const viewKeys = ["overview", "dashboard", "events", "metrics", "printLog", "storage", "ams", "inventory", "maintenance", "printers", "debug"] as const;
+const viewKeys = ["overview", "dashboard", "events", "metrics", "printLog", "storage", "ams", "inventory", "maintenance", "notifications", "printers", "debug"] as const;
 type ViewKey = (typeof viewKeys)[number];
 type Locale = keyof typeof translations;
 type NavGroupKey = "monitoring" | "assets" | "system";
@@ -74,6 +85,7 @@ const navItems = [
   { key: "ams", labelKey: "nav.ams", icon: Boxes, group: "assets" },
   { key: "inventory", labelKey: "nav.inventory", icon: Archive, group: "assets" },
   { key: "storage", labelKey: "nav.storage", icon: HardDrive, group: "assets" },
+  { key: "notifications", labelKey: "nav.notifications", icon: Bell, group: "system" },
   { key: "printers", labelKey: "nav.printers", icon: Settings, group: "system" },
   { key: "debug", labelKey: "nav.debug", icon: Database, group: "system" },
 ] as const;
@@ -84,18 +96,33 @@ const navGroups: { key: NavGroupKey; labelKey: string }[] = [
   { key: "system", labelKey: "navGroup.system" },
 ];
 const slotChangeKinds = ["material", "remain", "rfid", "calibration"] as const;
+const experimentalFeatureDefaults = {
+  timelapse: false,
+  maintenance: false,
+  printLog: false,
+  notifications: false,
+};
+type ExperimentalFeatureKey = keyof typeof experimentalFeatureDefaults;
+const experimentalFeatureViews: Partial<Record<ViewKey, ExperimentalFeatureKey>> = {
+  storage: "timelapse",
+  maintenance: "maintenance",
+  printLog: "printLog",
+  notifications: "notifications",
+};
 
 const locale = ref<Locale>("zh-CN");
-const activeView = ref<ViewKey>(viewKeys.includes(storedView as ViewKey) ? (storedView as ViewKey) : "overview");
+const experimentalFeatures = reactive<Record<ExperimentalFeatureKey, boolean>>(loadExperimentalFeatureSettings());
+const activeView = ref<ViewKey>(resolveInitialView(storedView));
 const printers = ref<Printer[]>([]);
 const selectedPrinterId = ref<number | null>(null);
 const dashboardSummary = ref<DashboardSummaryItem[]>([]);
 const dashboard = ref<Dashboard | null>(null);
+const deviceCapabilities = ref<DeviceCapabilities | null>(null);
 const metrics = ref<MetricSample[]>([]);
 const metricRange = ref("6h");
-const metricGroup = ref("temperature");
 const printLogs = ref<PrintLogEntry[]>([]);
 const printLogSummary = ref<PrintLogSummary | null>(null);
+const printLogAnalytics = ref<PrintLogAnalytics | null>(null);
 const printLogTotal = ref(0);
 const printLogFilters = reactive({
   printer_id: "",
@@ -108,6 +135,12 @@ const printLogFilters = reactive({
 });
 const storageFiles = ref<StorageFile[]>([]);
 const storageSummary = ref<StorageSummary | null>(null);
+const storageSearch = ref("");
+const storageSort = ref("modified_desc");
+const storagePage = ref(1);
+const storagePageSize = ref(12);
+const timelapseNotes = ref<Record<string, TimelapseNote>>({});
+const timelapseNoteDrafts = reactive<Record<string, string>>({});
 const stateSnapshot = ref<Record<string, any> | null>(null);
 const amsSlots = ref<Record<string, any>[]>([]);
 const amsOverview = ref<AmsOverview | null>(null);
@@ -126,14 +159,13 @@ const eventFilters = reactive({
   active: "",
 });
 const hmsCodes = ref<HmsCodeInfo[]>([]);
+const selectedHmsStats = ref<HmsCodeStats | null>(null);
 const selectedHms = ref<Record<string, any> | null>(null);
 const selectedSlot = ref<Record<string, any> | null>(null);
 const selectedSlotHistory = ref<AmsSlotHistorySample[]>([]);
-const selectedPrinterDetails = ref<Dashboard | null>(null);
 const rawMqtt = ref<Record<string, any>[]>([]);
 const systemInfo = ref<SystemInfo | null>(null);
 const discovery = ref<DiscoveryCandidate[]>([]);
-const loading = ref(false);
 const scanning = ref(false);
 const scanProgress = ref(0);
 const scanPhase = ref("");
@@ -141,9 +173,14 @@ const message = ref("");
 const error = ref("");
 const storageResult = ref<Record<string, any> | null>(null);
 const realtimeDisconnected = ref(false);
+const activeLoadingCount = ref(0);
+const loading = computed(() => activeLoadingCount.value > 0);
 const sectionLayouts = ref<Record<string, Record<string, { hidden?: boolean; collapsed?: boolean; order?: number }>>>(loadSectionLayouts());
+const transientCollapsedSections = ref<Record<string, boolean>>({});
 let eventSource: EventSource | null = null;
 let pollingTimer: number | null = null;
+let loadingTokenSeq = 0;
+const activeLoadingTokens = new Set<number>();
 
 const printerForm = reactive({
   name: "Printer",
@@ -155,6 +192,34 @@ const printerForm = reactive({
   certificate_verify: false,
 });
 const accessCodeVisible = ref(false);
+const accessCodeRevealLoading = ref(false);
+const overviewControls = reactive(loadOverviewControls());
+const notificationTargets = ref<NotificationTarget[]>([]);
+const notificationRules = ref<NotificationRule[]>([]);
+const notificationDeliveries = ref<NotificationDelivery[]>([]);
+const notificationTargetForm = reactive({
+  id: "",
+  channel: "webhook",
+  name: "",
+  url: "",
+  token: "",
+  enabled: true,
+});
+const notificationRuleForm = reactive({
+  id: "",
+  name: "",
+  event_types: "",
+  printer_ids: "",
+  severities: "",
+  quiet_start: "",
+  quiet_end: "",
+  repeat_suppression_minutes: 30,
+  enabled: true,
+});
+const exportOptions = reactive({
+  type: "json",
+  sections: ["config", "print_logs", "ams_history", "maintenance_history", "events", "notifications"] as string[],
+});
 
 const spoolForm = reactive({
   display_name: "",
@@ -172,6 +237,116 @@ const bindForm = reactive({
 });
 
 const selectedPrinter = computed(() => printers.value.find((item) => item.id === selectedPrinterId.value) || null);
+const printerSelectOptions = computed(() =>
+  printers.value.length
+    ? printers.value.map((printer) => ({ label: `${printer.name} · ${printer.host}`, value: printer.id }))
+    : [{ label: t("common.noPrinter"), value: null, disabled: true }],
+);
+const localeOptions = computed(() => [
+  { label: "简体中文", value: "zh-CN" },
+  { label: "English", value: "en-US" },
+]);
+const eventSeverityOptions = computed(() => [
+  { label: t("events.allSeverities"), value: "" },
+  { label: t("values.info"), value: "info" },
+  { label: t("values.warning"), value: "warning" },
+  { label: t("values.error"), value: "error" },
+]);
+const eventActiveOptions = computed(() => [
+  { label: t("events.allStates"), value: "" },
+  { label: t("common.unresolved"), value: "active" },
+  { label: t("common.resolved"), value: "inactive" },
+]);
+const printLogPrinterOptions = computed(() => [
+  { label: t("printLog.allPrinters"), value: "" },
+  ...printers.value.map((printer) => ({ label: printer.name, value: String(printer.id) })),
+]);
+const printLogStatusOptions = computed(() => [
+  { label: t("printLog.allStatuses"), value: "" },
+  { label: t("values.running"), value: "running" },
+  { label: t("values.paused"), value: "paused" },
+  { label: t("values.succeeded"), value: "succeeded" },
+  { label: t("values.failed"), value: "failed" },
+  { label: t("values.cancelled"), value: "cancelled" },
+]);
+const overviewFilterOptions = computed(() => [
+  { label: t("overview.filterAll"), value: "all" },
+  { label: t("overview.filterOnline"), value: "online" },
+  { label: t("overview.filterOffline"), value: "offline" },
+  { label: t("overview.filterPrinting"), value: "printing" },
+  { label: t("overview.filterAttention"), value: "attention" },
+  { label: t("overview.filterHms"), value: "hms" },
+]);
+const overviewSortOptions = computed(() => [
+  { label: t("overview.sortAttention"), value: "attention" },
+  { label: t("overview.sortPrinting"), value: "printing" },
+  { label: t("overview.sortName"), value: "name" },
+  { label: t("overview.sortLastSync"), value: "last_sync" },
+]);
+const overviewDensityOptions = computed(() => [
+  { label: t("overview.densityCompact"), value: "compact" },
+  { label: t("overview.densityStandard"), value: "standard" },
+  { label: t("overview.densityDetailed"), value: "detailed" },
+]);
+const notificationChannelOptions = computed(() => [
+  { label: "Webhook", value: "webhook" },
+  { label: "ntfy", value: "ntfy" },
+]);
+const exportSectionItems = computed(() => [
+  { key: "config", label: t("export.sectionConfig") },
+  { key: "print_logs", label: t("export.sectionPrintLogs") },
+  { key: "ams_history", label: t("export.sectionAmsHistory") },
+  { key: "maintenance_history", label: t("export.sectionMaintenance") },
+  { key: "events", label: t("export.sectionEvents") },
+  { key: "notifications", label: t("export.sectionNotifications") },
+]);
+const metricRangeOptions = computed(() => [
+  { label: t("metrics.range1h"), value: "1h" },
+  { label: t("metrics.range6h"), value: "6h" },
+  { label: t("metrics.range24h"), value: "24h" },
+  { label: t("metrics.range7d"), value: "7d" },
+  { label: t("metrics.range30d"), value: "30d" },
+]);
+const storageSortOptions = computed(() => [
+  { label: t("storage.sortModifiedDesc"), value: "modified_desc" },
+  { label: t("storage.sortModifiedAsc"), value: "modified_asc" },
+  { label: t("storage.sortSizeDesc"), value: "size_desc" },
+  { label: t("storage.sortSizeAsc"), value: "size_asc" },
+  { label: t("storage.sortNameAsc"), value: "name_asc" },
+  { label: t("storage.sortNameDesc"), value: "name_desc" },
+]);
+const amsSensorRangeOptions = computed(() => [
+  { label: "24h", value: "24" },
+  { label: "7d", value: "168" },
+]);
+const spoolStatusOptions = computed(() => [
+  { label: displayCell("sealed"), value: "sealed" },
+  { label: displayCell("opened"), value: "opened" },
+  { label: displayCell("active"), value: "active" },
+  { label: displayCell("archived"), value: "archived" },
+]);
+const experimentalFeatureItems = computed(() => [
+  {
+    key: "timelapse" as const,
+    label: t("debug.experimentalTimelapse"),
+    description: t("debug.experimentalTimelapseHint"),
+  },
+  {
+    key: "maintenance" as const,
+    label: t("debug.experimentalMaintenance"),
+    description: t("debug.experimentalMaintenanceHint"),
+  },
+  {
+    key: "printLog" as const,
+    label: t("debug.experimentalPrintLog"),
+    description: t("debug.experimentalPrintLogHint"),
+  },
+  {
+    key: "notifications" as const,
+    label: t("debug.experimentalNotifications"),
+    description: t("debug.experimentalNotificationsHint"),
+  },
+]);
 const snapshot = computed(() => dashboard.value?.device_snapshot || {});
 const state = computed(() => dashboard.value?.state || stateSnapshot.value || {});
 const derived = computed(() => record(snapshot.value.derived_status));
@@ -183,6 +358,10 @@ const fanRows = computed(() => dashboardFanRows(fans.value, hardware.value));
 const readableNetworkHardware = computed(() => networkHardwareRows(network.value, hardware.value));
 const camera = computed(() => record(snapshot.value.camera));
 const cameraOptions = computed(() => record(snapshot.value.camera_options));
+const capabilityVisibleFields = computed(() => new Set(deviceCapabilities.value?.visible_fields || []));
+const shouldShowDashboardAms = computed(() => dashboardAmsSummaryRows.value.some(([, value]) => value !== "--" && value !== 0) || capabilityVisibleFields.value.has("ams"));
+const shouldShowDashboardCamera = computed(() => cameraStatusRows.value.length > 0 || capabilityVisibleFields.value.has("camera"));
+const shouldShowChamberTemperature = computed(() => capabilityVisibleFields.value.has("chamber_temperature") || temperatures.value.chamber !== undefined);
 const readableCamera = computed(() => cameraRows(camera.value, cameraOptions.value));
 const detectionRows = computed(() => {
   const keys = new Set([
@@ -210,7 +389,6 @@ const coverageStatusRows = computed(() => entries(coverage.value).map(([key, ite
 })));
 const hmsErrors = computed(() => arrayOfRecord(snapshot.value.hms_errors));
 const recentEvents = computed(() => dashboard.value?.recent_events || events.value);
-const recentImportantEvents = computed(() => events.value.filter((item) => item.severity !== "info").slice(0, 5));
 const activeDerivedStatuses = computed(() => {
   const rows = entries(derived.value).filter(([key, value]) => {
     if (typeof value !== "boolean") return false;
@@ -233,58 +411,92 @@ const remainingTimeLabel = computed(() => {
   if (!dashboardHasActiveTask()) return "";
   return formatDurationMinutes(record(snapshot.value.print_status).mc_remaining_time ?? state.value.mc_remaining_time);
 });
-const overviewItems = computed<DashboardSummaryItem[]>(() => {
+const rawOverviewItems = computed<DashboardSummaryItem[]>(() => {
   if (dashboardSummary.value.length) return dashboardSummary.value;
   return printers.value.map((printer) => ({ printer, state: null, device_snapshot: null }));
 });
+const overviewItems = computed<DashboardSummaryItem[]>(() => {
+  const query = String(overviewControls.search || "").trim().toLowerCase();
+  const filtered = rawOverviewItems.value.filter((item) => {
+    const haystack = [
+      item.printer.name,
+      item.printer.host,
+      summaryStatusLabel(item),
+      record(summarySnapshot(item).hardware).model,
+      record(summarySnapshot(item).firmware).hardware_version,
+    ].join(" ").toLowerCase();
+    if (query && !haystack.includes(query)) return false;
+    if (overviewControls.filter === "online") return item.printer.connection_status === "connected";
+    if (overviewControls.filter === "offline") return item.printer.connection_status !== "connected";
+    if (overviewControls.filter === "printing") return summaryDerived(item).printing === true || summaryDerived(item).actual_printing === true;
+    if (overviewControls.filter === "attention") return summaryHasAttention(item);
+    if (overviewControls.filter === "hms") return summaryActiveHmsCount(item) > 0;
+    return true;
+  });
+  return filtered.sort(compareOverviewItems);
+});
 const overviewStats = computed(() => {
-  const items = overviewItems.value;
+  const items = rawOverviewItems.value;
   const total = items.length;
   const connected = items.filter((item) => item.printer.connection_status === "connected").length;
   const printing = items.filter((item) => summaryDerived(item).printing === true).length;
   const attention = items.filter((item) => summaryHasAttention(item)).length;
-  const maintenanceDue = items.reduce((sum, item) => sum + (item.maintenance_due_count || 0), 0);
   return [
     { label: t("overview.totalPrinters"), value: total, foot: t("overview.totalPrintersFoot") },
     { label: t("overview.connected"), value: connected, foot: t("overview.connectedFoot", { total }) },
     { label: t("overview.printing"), value: printing, foot: t("overview.printingFoot") },
     { label: t("overview.needsAttention"), value: attention, foot: t("overview.needsAttentionFoot") },
-    { label: t("maintenance.due"), value: maintenanceDue, foot: t("maintenance.dueFoot") },
   ];
 });
-const recentPrintLogItems = computed(() => {
-  return overviewItems.value
-    .flatMap((item) => (item.recent_print_logs || []).map((log) => ({ ...log, printer_name_snapshot: log.printer_name_snapshot || item.printer.name })))
-    .sort((a, b) => String(b.started_at || "").localeCompare(String(a.started_at || "")))
-    .slice(0, 5);
-});
-
 const metricGroups = computed(() => ({
   temperatures: metrics.value.filter((item) => item.metric.startsWith("temperature.")),
-  fans: metrics.value.filter((item) => item.metric.startsWith("fan.")),
+  fans: metrics.value.filter((item) => item.metric.startsWith("fan.") && item.metric !== "fan.fan_gear.percent"),
   wifi: metrics.value.filter((item) => item.metric === "network.wifi_signal"),
   ams: metrics.value.filter((item) => item.metric.startsWith("ams.")),
 }));
-const selectedMetricItems = computed(() => {
-  const groups = metricGroups.value as Record<string, MetricSample[]>;
-  if (metricGroup.value === "temperature") return groups.temperatures;
-  if (metricGroup.value === "fan") return groups.fans;
-  if (metricGroup.value === "wifi") return groups.wifi;
-  if (metricGroup.value === "ams") return groups.ams;
-  return groups.temperatures;
-});
+const metricTooltipLabels = computed(() => ({
+  time: t("table.time"),
+  value: t("table.value"),
+}));
 
 const storageStats = computed(() => {
-  const totalSize = storageFiles.value.reduce((sum, item) => sum + (item.size || 0), 0);
-  const timelapseCount = storageFiles.value.filter((item) => item.type === "timelapse" || item.path.includes("/timelapse/")).length;
-  return [
+  const files = timelapseFiles.value;
+  const totalSize = files.reduce((sum, item) => sum + (item.size || 0), 0);
+  const usage = storageSummary.value?.storage_usage || {};
+  const cards: { label: string; value: string | number; foot?: string }[] = [
     { label: t("storage.fileCount"), value: storageFiles.value.length },
     { label: t("storage.totalSize"), value: formatBytes(totalSize) },
-    { label: t("storage.timelapseCount"), value: timelapseCount },
+    { label: t("storage.timelapseCount"), value: files.length },
   ];
+  cards.push(storageUsageCard("internal", usage.internal));
+  cards.push(storageUsageCard("external", usage.external));
+  if (usage.current_target) {
+    cards.push({ label: t("storage.currentTarget"), value: storageTargetLabel(usage.current_target) });
+  }
+  return cards;
 });
-const storageTypeRows = computed(() => Object.entries(storageSummary.value?.by_type || {}).sort((a, b) => b[1] - a[1]));
-const timelapseFiles = computed(() => storageSummary.value?.timelapse_files || storageFiles.value.filter((item) => item.type === "timelapse"));
+const timelapseFiles = computed(() => storageFiles.value.filter((item) => isTimelapseStorageFile(item)));
+const filteredTimelapseFiles = computed(() => {
+  const query = storageSearch.value.trim().toLowerCase();
+  const items = query
+    ? timelapseFiles.value.filter((item) => `${item.name} ${item.path}`.toLowerCase().includes(query))
+    : timelapseFiles.value;
+  return [...items].sort((a, b) => compareStorageFiles(a, b, storageSort.value));
+});
+const storageTotalPages = computed(() => Math.max(1, Math.ceil(filteredTimelapseFiles.value.length / storagePageSize.value)));
+const storagePreviewFiles = computed(() => {
+  const start = (storagePage.value - 1) * storagePageSize.value;
+  return filteredTimelapseFiles.value.slice(start, start + storagePageSize.value);
+});
+const groupedTimelapseFiles = computed(() => {
+  const groups: Record<string, StorageFile[]> = {};
+  for (const file of filteredTimelapseFiles.value) {
+    const key = String(file.modified_at || "").slice(0, 10) || t("common.none");
+    groups[key] = groups[key] || [];
+    groups[key].push(file);
+  }
+  return Object.entries(groups).map(([date, files]) => ({ date, files }));
+});
 const amsStats = computed(() => {
   const summary = amsOverview.value?.summary;
   return [
@@ -375,6 +587,27 @@ watch(selectedPrinter, (printer) => {
   if (printer) populatePrinterForm(printer);
 });
 
+watch([storageSearch, storageSort, () => storageFiles.value.length], () => {
+  storagePage.value = 1;
+});
+
+watch(overviewControls, () => {
+  window.localStorage.setItem("filamentManager.overviewControls", JSON.stringify(overviewControls));
+}, { deep: true });
+
+watch(storageTotalPages, (pages) => {
+  if (storagePage.value > pages) storagePage.value = pages;
+});
+
+watch(experimentalFeatures, () => {
+  saveExperimentalFeatureSettings();
+  if (!isViewEnabled(activeView.value)) {
+    activeView.value = "overview";
+    window.localStorage.setItem("filamentManager.activeView", "overview");
+    void withLoading(loadCurrent);
+  }
+}, { deep: true });
+
 onMounted(async () => {
   await bootstrap();
   connectEventStream();
@@ -392,6 +625,10 @@ async function bootstrap() {
 }
 
 async function loadCurrent() {
+  if (!isViewEnabled(activeView.value)) {
+    activeView.value = "overview";
+    window.localStorage.setItem("filamentManager.activeView", "overview");
+  }
   if (activeView.value === "overview") {
     await loadOverview();
     return;
@@ -406,6 +643,10 @@ async function loadCurrent() {
   }
   if (activeView.value === "maintenance") {
     await loadMaintenance();
+    return;
+  }
+  if (activeView.value === "notifications") {
+    await loadNotifications();
     return;
   }
   if (activeView.value === "inventory") {
@@ -423,8 +664,37 @@ async function loadCurrent() {
   if (activeView.value === "ams") await loadAms();
 }
 
+async function refreshCurrentView() {
+  if (activeView.value === "dashboard") {
+    await requestRefreshFull();
+    return;
+  }
+  if (activeView.value === "storage") {
+    await scanStorage();
+    return;
+  }
+  await withLoading(async () => {
+    if (activeView.value === "overview") {
+      await refreshPrinters();
+      await loadOverview();
+      return;
+    }
+    if (activeView.value === "printers") {
+      await refreshPrinters();
+      if (selectedPrinter.value) populatePrinterForm(selectedPrinter.value);
+      return;
+    }
+    await loadCurrent();
+  });
+}
+
 async function switchView(key: ViewKey) {
+  if (!isViewEnabled(key)) {
+    await switchView("overview");
+    return;
+  }
   activeView.value = key;
+  resetTransientCollapsedSections(key);
   window.localStorage.setItem("filamentManager.activeView", key);
   await withLoading(loadCurrent);
 }
@@ -478,6 +748,7 @@ function populatePrinterForm(printer: Printer) {
   printerForm.tls_enabled = printer.tls_enabled;
   printerForm.certificate_verify = printer.certificate_verify;
   accessCodeVisible.value = false;
+  accessCodeRevealLoading.value = false;
 }
 
 function resetPrinterForm() {
@@ -489,6 +760,32 @@ function resetPrinterForm() {
   printerForm.tls_enabled = true;
   printerForm.certificate_verify = false;
   accessCodeVisible.value = false;
+  accessCodeRevealLoading.value = false;
+}
+
+function isMaskedAccessCode(value: string) {
+  return value.startsWith("****");
+}
+
+async function toggleAccessCodeVisibility() {
+  if (accessCodeVisible.value) {
+    accessCodeVisible.value = false;
+    return;
+  }
+  if (selectedPrinterId.value && isMaskedAccessCode(printerForm.access_code)) {
+    accessCodeRevealLoading.value = true;
+    error.value = "";
+    try {
+      const result = await apiRequest<{ access_code: string }>(`/printers/${selectedPrinterId.value}/access-code`);
+      printerForm.access_code = result.access_code || "";
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : String(err);
+      return;
+    } finally {
+      accessCodeRevealLoading.value = false;
+    }
+  }
+  accessCodeVisible.value = true;
 }
 
 async function scanDevices() {
@@ -584,7 +881,7 @@ async function deletePrinterConfig(printer: Printer) {
 async function requestRefreshFull() {
   if (!selectedPrinterId.value) return;
   if (!canRequestFullRefresh.value) {
-    await loadDashboard();
+    await withLoading(loadDashboard);
     error.value = t("error.fullRefreshNotConnected");
     return;
   }
@@ -603,17 +900,18 @@ async function fetchDashboard() {
 }
 
 async function loadDashboard() {
-  const result = await fetchDashboard();
+  if (!selectedPrinterId.value) return;
+  const [result, capabilities] = await Promise.all([
+    fetchDashboard(),
+    apiRequest<DeviceCapabilities>(`/printers/${selectedPrinterId.value}/capabilities`),
+  ]);
   if (result) dashboard.value = result;
+  deviceCapabilities.value = capabilities;
 }
 
 async function loadOverview() {
-  const [summaryResult, eventResult] = await Promise.all([
-    apiRequest<DashboardSummaryItem[]>("/dashboard/summary"),
-    apiRequest<UnifiedEvent[]>("/events?limit=20"),
-  ]);
+  const summaryResult = await apiRequest<DashboardSummaryItem[]>("/dashboard/summary");
   dashboardSummary.value = summaryResult;
-  events.value = eventResult;
   if (!selectedPrinterId.value && dashboardSummary.value.length) {
     selectedPrinterId.value = dashboardSummary.value[0].printer.id;
   }
@@ -643,13 +941,19 @@ async function loadPrintLog() {
   if (printLogFilters.search) params.set("search", printLogFilters.search);
   if (printLogFilters.date_from) params.set("date_from", new Date(printLogFilters.date_from).toISOString());
   if (printLogFilters.date_to) params.set("date_to", new Date(printLogFilters.date_to).toISOString());
-  const [listResult, summaryResult] = await Promise.all([
+  const analyticsParams = new URLSearchParams();
+  if (printLogFilters.printer_id) analyticsParams.set("printer_id", printLogFilters.printer_id);
+  if (printLogFilters.date_from) analyticsParams.set("from", new Date(printLogFilters.date_from).toISOString());
+  if (printLogFilters.date_to) analyticsParams.set("to", new Date(printLogFilters.date_to).toISOString());
+  const [listResult, summaryResult, analyticsResult] = await Promise.all([
     apiRequest<PrintLogList>(`/print-log?${params.toString()}`),
     apiRequest<PrintLogSummary>("/print-log/summary"),
+    apiRequest<PrintLogAnalytics>(`/print-log/analytics?${analyticsParams.toString()}`),
   ]);
   printLogs.value = listResult.items;
   printLogTotal.value = listResult.total;
   printLogSummary.value = summaryResult;
+  printLogAnalytics.value = analyticsResult;
 }
 
 async function applyPrintLogFilters() {
@@ -665,12 +969,15 @@ async function changePrintLogPage(delta: number) {
 
 async function loadStorage() {
   if (!selectedPrinterId.value) return;
-  const [filesResult, summaryResult] = await Promise.all([
+  const [filesResult, summaryResult, notesResult] = await Promise.all([
     apiRequest<StorageFile[]>(`/printers/${selectedPrinterId.value}/storage/files`),
     apiRequest<StorageSummary>(`/printers/${selectedPrinterId.value}/storage/summary`),
+    apiRequest<TimelapseNote[]>(`/printers/${selectedPrinterId.value}/timelapse/notes`),
   ]);
   storageFiles.value = filesResult;
   storageSummary.value = summaryResult;
+  timelapseNotes.value = Object.fromEntries(notesResult.map((note) => [note.path, note]));
+  for (const note of notesResult) timelapseNoteDrafts[note.path] = note.note || "";
 }
 
 async function scanStorage() {
@@ -815,14 +1122,163 @@ async function loadDebug() {
   systemInfo.value = infoResult;
 }
 
+async function loadNotifications() {
+  const [targets, rules, deliveries] = await Promise.all([
+    apiRequest<NotificationTarget[]>("/notifications/targets"),
+    apiRequest<NotificationRule[]>("/notifications/rules"),
+    apiRequest<NotificationDelivery[]>("/notifications/deliveries?limit=50"),
+  ]);
+  notificationTargets.value = targets;
+  notificationRules.value = rules;
+  notificationDeliveries.value = deliveries;
+}
+
+async function saveNotificationTarget() {
+  const payload = {
+    channel: notificationTargetForm.channel,
+    name: notificationTargetForm.name || notificationTargetForm.channel,
+    enabled: notificationTargetForm.enabled,
+    config: {
+      url: notificationTargetForm.url,
+      token: notificationTargetForm.token || undefined,
+    },
+  };
+  await withLoading(async () => {
+    const id = notificationTargetForm.id;
+    await apiRequest(id ? `/notifications/targets/${id}` : "/notifications/targets", {
+      method: id ? "PATCH" : "POST",
+      body: JSON.stringify(payload),
+    });
+    resetNotificationTargetForm();
+    await loadNotifications();
+    message.value = t("notifications.saved");
+  });
+}
+
+function editNotificationTarget(target: NotificationTarget) {
+  notificationTargetForm.id = String(target.id);
+  notificationTargetForm.channel = target.channel;
+  notificationTargetForm.name = target.name;
+  notificationTargetForm.url = String(target.display_config?.url || target.display_config?.topic_url || target.config?.url || "");
+  notificationTargetForm.token = "";
+  notificationTargetForm.enabled = target.enabled;
+}
+
+function resetNotificationTargetForm() {
+  notificationTargetForm.id = "";
+  notificationTargetForm.channel = "webhook";
+  notificationTargetForm.name = "";
+  notificationTargetForm.url = "";
+  notificationTargetForm.token = "";
+  notificationTargetForm.enabled = true;
+}
+
+async function deleteNotificationTarget(target: NotificationTarget) {
+  await withLoading(async () => {
+    await apiRequest(`/notifications/targets/${target.id}`, { method: "DELETE" });
+    await loadNotifications();
+  });
+}
+
+async function testNotificationTarget(target: NotificationTarget) {
+  await withLoading(async () => {
+    await apiRequest(`/notifications/targets/${target.id}/test`, { method: "POST" });
+    await loadNotifications();
+    message.value = t("notifications.testSent");
+  });
+}
+
+async function saveNotificationRule() {
+  const policy: Record<string, unknown> = {};
+  if (notificationRuleForm.quiet_start) policy.quiet_start = notificationRuleForm.quiet_start;
+  if (notificationRuleForm.quiet_end) policy.quiet_end = notificationRuleForm.quiet_end;
+  if (notificationRuleForm.repeat_suppression_minutes) {
+    policy.repeat_suppression_minutes = Number(notificationRuleForm.repeat_suppression_minutes);
+  }
+  const payload = {
+    name: notificationRuleForm.name || t("notifications.defaultRuleName"),
+    enabled: notificationRuleForm.enabled,
+    event_types: splitCsv(notificationRuleForm.event_types),
+    printer_ids: splitCsv(notificationRuleForm.printer_ids).map(Number).filter(Number.isFinite),
+    severities: splitCsv(notificationRuleForm.severities),
+    quiet_policy: policy,
+  };
+  await withLoading(async () => {
+    const id = notificationRuleForm.id;
+    await apiRequest(id ? `/notifications/rules/${id}` : "/notifications/rules", {
+      method: id ? "PATCH" : "POST",
+      body: JSON.stringify(payload),
+    });
+    resetNotificationRuleForm();
+    await loadNotifications();
+    message.value = t("notifications.ruleSaved");
+  });
+}
+
+function editNotificationRule(rule: NotificationRule) {
+  notificationRuleForm.id = String(rule.id);
+  notificationRuleForm.name = rule.name;
+  notificationRuleForm.event_types = (rule.event_types || []).join(", ");
+  notificationRuleForm.printer_ids = (rule.printer_ids || []).join(", ");
+  notificationRuleForm.severities = (rule.severities || []).join(", ");
+  notificationRuleForm.quiet_start = String(rule.quiet_policy?.quiet_start || "");
+  notificationRuleForm.quiet_end = String(rule.quiet_policy?.quiet_end || "");
+  notificationRuleForm.repeat_suppression_minutes = Number(rule.quiet_policy?.repeat_suppression_minutes || 30);
+  notificationRuleForm.enabled = rule.enabled;
+}
+
+function resetNotificationRuleForm() {
+  notificationRuleForm.id = "";
+  notificationRuleForm.name = "";
+  notificationRuleForm.event_types = "";
+  notificationRuleForm.printer_ids = "";
+  notificationRuleForm.severities = "";
+  notificationRuleForm.quiet_start = "";
+  notificationRuleForm.quiet_end = "";
+  notificationRuleForm.repeat_suppression_minutes = 30;
+  notificationRuleForm.enabled = true;
+}
+
+async function deleteNotificationRule(rule: NotificationRule) {
+  await withLoading(async () => {
+    await apiRequest(`/notifications/rules/${rule.id}`, { method: "DELETE" });
+    await loadNotifications();
+  });
+}
+
 async function downloadSupportBundle() {
   await withLoading(async () => {
     const bundle = await apiRequest<Record<string, any>>("/support/bundle");
+    bundle.frontend = {
+      ...(record(bundle.frontend)),
+      browser: window.navigator.userAgent,
+      language: window.navigator.language,
+      downloaded_at: new Date().toISOString(),
+      experimental_features: { ...experimentalFeatures },
+    };
     const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
     link.download = `filament-manager-support-${new Date().toISOString().slice(0, 10)}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  });
+}
+
+async function downloadExport() {
+  const params = new URLSearchParams({
+    type: exportOptions.type,
+    sections: exportOptions.sections.join(","),
+  });
+  await withLoading(async () => {
+    const response = await fetch(`${API_BASE}/export?${params.toString()}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = exportOptions.type === "csv" ? "filament-manager-export.zip" : "filament-manager-export.json";
     link.click();
     URL.revokeObjectURL(url);
   });
@@ -840,8 +1296,15 @@ async function loadEvents() {
 
 async function openHmsDetails(item: Record<string, any>) {
   selectedHms.value = item;
+  selectedHmsStats.value = null;
   if (!hmsCodes.value.length) {
     hmsCodes.value = await apiRequest<HmsCodeInfo[]>("/hms/codes");
+  }
+  const shortCode = item.short_code || item.code;
+  if (shortCode) {
+    const params = new URLSearchParams({ days: "30" });
+    if (selectedPrinterId.value) params.set("printer_id", String(selectedPrinterId.value));
+    selectedHmsStats.value = await apiRequest<HmsCodeStats>(`/hms/codes/${encodeURIComponent(String(shortCode))}/stats?${params.toString()}`);
   }
 }
 
@@ -854,12 +1317,9 @@ async function openSlotDetails(slot: Record<string, any>) {
   );
 }
 
-async function openPrinterDetails(printerId: number) {
-  selectedPrinterDetails.value = await apiRequest<Dashboard>(`/printers/${printerId}/dashboard`);
-}
-
 async function withLoading(action: () => Promise<void>) {
-  loading.value = true;
+  const token = beginLoading();
+  const watchdog = window.setTimeout(() => finishLoading(token), 20000);
   error.value = "";
   message.value = "";
   try {
@@ -867,8 +1327,21 @@ async function withLoading(action: () => Promise<void>) {
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   } finally {
-    loading.value = false;
+    window.clearTimeout(watchdog);
+    finishLoading(token);
   }
+}
+
+function beginLoading() {
+  const token = ++loadingTokenSeq;
+  activeLoadingTokens.add(token);
+  activeLoadingCount.value = activeLoadingTokens.size;
+  return token;
+}
+
+function finishLoading(token: number) {
+  if (!activeLoadingTokens.delete(token)) return;
+  activeLoadingCount.value = activeLoadingTokens.size;
 }
 
 function metricSince() {
@@ -940,9 +1413,58 @@ function apiBaseForSse() {
   return (import.meta.env.VITE_FILAMENT_MANAGER_API_URL as string | undefined)?.replace(/\/$/, "") || "/api";
 }
 
+function loadExperimentalFeatureSettings(): Record<ExperimentalFeatureKey, boolean> {
+  try {
+    const stored = JSON.parse(window.localStorage.getItem("filamentManager.experimentalFeatures") || "{}");
+    return {
+      timelapse: stored.timelapse === true,
+      maintenance: stored.maintenance === true,
+      printLog: stored.printLog === true,
+      notifications: stored.notifications === true,
+    };
+  } catch {
+    return { ...experimentalFeatureDefaults };
+  }
+}
+
+function loadOverviewControls() {
+  try {
+    const stored = JSON.parse(window.localStorage.getItem("filamentManager.overviewControls") || "{}");
+    return {
+      search: String(stored.search || ""),
+      filter: String(stored.filter || "all"),
+      sort: String(stored.sort || "attention"),
+      density: String(stored.density || "standard"),
+    };
+  } catch {
+    return { search: "", filter: "all", sort: "attention", density: "standard" };
+  }
+}
+
+function saveExperimentalFeatureSettings() {
+  window.localStorage.setItem("filamentManager.experimentalFeatures", JSON.stringify(experimentalFeatures));
+}
+
+function resolveInitialView(view: ViewKey | null) {
+  if (!viewKeys.includes(view as ViewKey)) return "overview";
+  const next = view as ViewKey;
+  return isViewEnabled(next) ? next : "overview";
+}
+
+function isViewEnabled(view: ViewKey) {
+  const feature = experimentalFeatureViews[view];
+  return !feature || experimentalFeatures[feature] === true;
+}
+
 function loadSectionLayouts() {
   try {
-    return JSON.parse(window.localStorage.getItem("filamentManager.sectionLayouts") || "{}");
+    const layouts = JSON.parse(window.localStorage.getItem("filamentManager.sectionLayouts") || "{}");
+    if (layouts?.ams) {
+      layouts.ams = Object.fromEntries(
+        Object.entries(layouts.ams).filter(([key]) => !key.startsWith("ams.unit.")),
+      );
+    }
+    return layouts;
   } catch {
     return {};
   }
@@ -967,25 +1489,43 @@ function isSectionVisible(id: string) {
 }
 
 function isSectionCollapsed(id: string) {
-  return sectionConfig(id).collapsed === true;
+  if (isTransientCollapsedSection(id)) {
+    if (transientCollapsedSections.value[id] !== undefined) return transientCollapsedSections.value[id];
+    return defaultSectionCollapsed(id);
+  }
+  const current = sectionLayouts.value[activeView.value] || {};
+  if (current[id]?.collapsed !== undefined) return current[id].collapsed === true;
+  return defaultSectionCollapsed(id);
 }
 
 function toggleSectionCollapsed(id: string) {
+  if (isTransientCollapsedSection(id)) {
+    transientCollapsedSections.value = {
+      ...transientCollapsedSections.value,
+      [id]: !isSectionCollapsed(id),
+    };
+    return;
+  }
   const config = sectionConfig(id);
-  config.collapsed = !config.collapsed;
+  config.collapsed = !isSectionCollapsed(id);
   saveSectionLayouts();
+}
+
+function defaultSectionCollapsed(id: string) {
+  return activeView.value === "ams" && id.startsWith("ams.unit.");
+}
+
+function isTransientCollapsedSection(id: string) {
+  return activeView.value === "ams" && id.startsWith("ams.unit.");
+}
+
+function resetTransientCollapsedSections(view: ViewKey = activeView.value) {
+  if (view === "ams") transientCollapsedSections.value = {};
 }
 
 function toggleSectionHidden(id: string) {
   const config = sectionConfig(id);
   config.hidden = !config.hidden;
-  saveSectionLayouts();
-}
-
-function resetCurrentLayout() {
-  const copy = { ...sectionLayouts.value };
-  delete copy[activeView.value];
-  sectionLayouts.value = copy;
   saveSectionLayouts();
 }
 
@@ -1016,7 +1556,7 @@ function navLabel(key: string) {
 }
 
 function navItemsByGroup(group: NavGroupKey) {
-  return navItems.filter((item) => item.group === group);
+  return navItems.filter((item) => item.group === group && isViewEnabled(item.key));
 }
 
 function summarySnapshot(item: DashboardSummaryItem): Record<string, any> {
@@ -1069,6 +1609,24 @@ function summaryTone(item: DashboardSummaryItem) {
   return "muted";
 }
 
+function compareOverviewItems(left: DashboardSummaryItem, right: DashboardSummaryItem) {
+  if (overviewControls.sort === "printing") {
+    return Number(summaryDerived(right).printing === true || summaryDerived(right).actual_printing === true)
+      - Number(summaryDerived(left).printing === true || summaryDerived(left).actual_printing === true)
+      || left.printer.name.localeCompare(right.printer.name, locale.value);
+  }
+  if (overviewControls.sort === "name") {
+    return left.printer.name.localeCompare(right.printer.name, locale.value);
+  }
+  if (overviewControls.sort === "last_sync") {
+    return Date.parse(String(right.printer.last_sync_at || "")) - Date.parse(String(left.printer.last_sync_at || ""));
+  }
+  return Number(summaryHasAttention(right)) - Number(summaryHasAttention(left))
+    || Number(summaryDerived(right).printing === true || summaryDerived(right).actual_printing === true)
+    - Number(summaryDerived(left).printing === true || summaryDerived(left).actual_printing === true)
+    || left.printer.name.localeCompare(right.printer.name, locale.value);
+}
+
 function summaryStatusLabel(item: DashboardSummaryItem) {
   const derivedValue = summaryDerived(item);
   const stateValue = summaryState(item);
@@ -1092,6 +1650,14 @@ function summaryTaskName(item: DashboardSummaryItem) {
 
 function summaryProgress(item: DashboardSummaryItem) {
   return Math.round(percent(summaryState(item).mc_percent));
+}
+
+function summaryLayerFraction(item: DashboardSummaryItem) {
+  const printStatus = record(summarySnapshot(item).print_status);
+  const current = printStatus.layer_num ?? summaryState(item).layer_current ?? summaryState(item).layer_num;
+  const total = printStatus.total_layer_num ?? summaryState(item).layer_total ?? summaryState(item).total_layer_num;
+  if (current === undefined && total === undefined) return "--";
+  return `${softCell(current)} / ${softCell(total)}`;
 }
 
 function summaryStage(item: DashboardSummaryItem) {
@@ -1151,7 +1717,21 @@ function dashboardFanRows(fanValue: Record<string, any>, hardwareValue: Record<s
   }
   const fanGear = fanValue.fan_gear;
   if (!rows.length && fanDisplayPercent(fanGear) !== null) rows.push(["fan_gear", fanGear]);
-  return rows;
+  return rows.sort(([left], [right]) => dashboardFanRowSortValue(left) - dashboardFanRowSortValue(right));
+}
+
+function dashboardFanRowSortValue(key: string) {
+  const order: Record<string, number> = {
+    cooling_fan_speed: 10,
+    toolhead_fan: 10,
+    big_fan1_speed: 20,
+    right_aux_fan: 20,
+    left_aux_fan: 30,
+    big_fan2_speed: 40,
+    exhaust_fan: 40,
+    heatbreak_fan_speed: 50,
+  };
+  return order[key] ?? 100;
 }
 
 function airductPartKey(part: Record<string, any>) {
@@ -1255,10 +1835,26 @@ function metricLabel(metric: string) {
     const field = rest.slice(1).join(".");
     return `${fieldLabel("ams")} ${rest[0]} · ${fieldLabel(field === "humidity" ? "humidity_raw" : field)}`;
   }
+  if (group === "fan") {
+    return fanMetricLabel(rest[0] || rest.join("."));
+  }
   const field = rest.join(".");
   const groupLabel = fieldLabel(group);
   const fieldName = fieldLabel(field);
   return field ? `${groupLabel} · ${fieldName}` : groupLabel;
+}
+
+function fanMetricLabel(source: string) {
+  const mapping: Record<string, string> = {
+    cooling_fan_speed: "toolhead_fan",
+    big_fan1_speed: "right_aux_fan",
+    big_fan2_speed: "exhaust_fan",
+    heatbreak_fan_speed: "heatbreak_fan",
+    chamber_fan_speed: "chamber_fan",
+    aux_part_fan_speed: "aux_part_fan",
+    fan_gear: "fan_gear",
+  };
+  return fieldLabel(mapping[source] || source);
 }
 
 function cameraRows(value: Record<string, any>, optionValue: Record<string, any> = {}) {
@@ -1387,6 +1983,129 @@ function formatBytes(value: number) {
     index += 1;
   }
   return `${size.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+}
+
+function storageUsageCard(kind: "internal" | "external", usage: Record<string, any> | undefined) {
+  const label = kind === "internal" ? t("storage.internalStorage") : t("storage.externalStorage");
+  if (!usage || !usage.total_bytes) return { label, value: "--", foot: t("storage.usageUnknown") };
+  const used = numeric(usage.used_bytes) || 0;
+  const total = numeric(usage.total_bytes) || 0;
+  return {
+    label,
+    value: `${formatBytes(used)} / ${formatBytes(total)}`,
+    foot: t("storage.freeSpace", { value: formatBytes(numeric(usage.free_bytes) || 0), percent: usage.used_percent ?? "--" }),
+  };
+}
+
+function storageTargetLabel(value: unknown) {
+  const key = String(value || "");
+  if (key === "internal") return t("storage.internalStorage");
+  if (key === "external") return t("storage.externalStorage");
+  return displayCell(value);
+}
+
+function storageFileUrl(file: StorageFile, inline = false) {
+  if (!selectedPrinterId.value) return "#";
+  const params = new URLSearchParams({ path: file.path });
+  if (inline) params.set("inline", "true");
+  return `${API_BASE}/printers/${selectedPrinterId.value}/storage/files/download?${params.toString()}`;
+}
+
+function timelapseNote(file: StorageFile) {
+  return timelapseNotes.value[file.path] || null;
+}
+
+function timelapseNoteText(file: StorageFile) {
+  return timelapseNoteDrafts[file.path] ?? timelapseNote(file)?.note ?? "";
+}
+
+function setTimelapseDraft(path: string, value: string) {
+  timelapseNoteDrafts[path] = value;
+}
+
+async function toggleTimelapseFavorite(file: StorageFile) {
+  if (!selectedPrinterId.value) return;
+  const current = timelapseNote(file);
+  await withLoading(async () => {
+    const note = await apiRequest<TimelapseNote>(`/printers/${selectedPrinterId.value}/timelapse/notes`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        path: file.path,
+        favorite: !(current?.favorite === true),
+        cached_metadata: timelapseMetadata(file),
+      }),
+    });
+    timelapseNotes.value = { ...timelapseNotes.value, [file.path]: note };
+  });
+}
+
+async function saveTimelapseNote(file: StorageFile) {
+  if (!selectedPrinterId.value) return;
+  await withLoading(async () => {
+    const note = await apiRequest<TimelapseNote>(`/printers/${selectedPrinterId.value}/timelapse/notes`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        path: file.path,
+        note: timelapseNoteText(file),
+        cached_metadata: timelapseMetadata(file),
+      }),
+    });
+    timelapseNotes.value = { ...timelapseNotes.value, [file.path]: note };
+    timelapseNoteDrafts[file.path] = note.note || "";
+  });
+}
+
+function timelapseMetadata(file: StorageFile) {
+  return {
+    name: file.name,
+    size: file.size,
+    modified_at: file.modified_at,
+    type: file.type,
+    cover_cache: "browser-metadata",
+  };
+}
+
+function isTimelapseStorageFile(file: StorageFile) {
+  const type = String(file.type || "").toLowerCase();
+  const name = String(file.name || file.path || "").toLowerCase();
+  return type === "timelapse" || file.path.includes("/timelapse/") || /\.(mp4|mov|avi|mkv)$/i.test(name);
+}
+
+function compareStorageFiles(a: StorageFile, b: StorageFile, sortKey: string) {
+  const nameCompare = (a.name || a.path).localeCompare(b.name || b.path, locale.value);
+  if (sortKey === "modified_asc") return storageTime(a) - storageTime(b) || nameCompare;
+  if (sortKey === "size_desc") return (b.size || 0) - (a.size || 0) || nameCompare;
+  if (sortKey === "size_asc") return (a.size || 0) - (b.size || 0) || nameCompare;
+  if (sortKey === "name_desc") return -nameCompare;
+  if (sortKey === "name_asc") return nameCompare;
+  return storageTime(b) - storageTime(a) || nameCompare;
+}
+
+function storageTime(file: StorageFile) {
+  const value = Date.parse(String(file.modified_at || ""));
+  return Number.isFinite(value) ? value : 0;
+}
+
+function changeStoragePage(delta: number) {
+  storagePage.value = Math.max(1, Math.min(storageTotalPages.value, storagePage.value + delta));
+}
+
+function seekVideoPreviewToEnd(event: Event) {
+  const video = event.currentTarget as HTMLVideoElement | null;
+  if (!video || !Number.isFinite(video.duration) || video.duration <= 0) return;
+  try {
+    video.currentTime = Math.max(0, video.duration - 0.08);
+  } catch {
+    // Some browsers defer seeking until enough metadata has loaded.
+  }
+}
+
+function resetVideoPlayback(event: Event) {
+  const video = event.currentTarget as HTMLVideoElement | null;
+  if (!video || !Number.isFinite(video.duration)) return;
+  if (video.currentTime >= Math.max(0, video.duration - 0.12)) {
+    video.currentTime = 0;
+  }
 }
 
 function formatDurationMinutes(value: unknown) {
@@ -1544,6 +2263,10 @@ function dashboardAmsUnitVisual(unit: Record<string, any>, slots: Record<string,
   };
 }
 
+function amsPageUnitVisual(unit: Record<string, any>, index: number) {
+  return dashboardAmsUnitVisual(unit, arrayOfRecord(unit.slots), index);
+}
+
 function dashboardAmsSlotSortValue(slot: Record<string, any>) {
   const userTray = numeric(slot.user_tray_id);
   if (userTray !== null) return userTray;
@@ -1603,6 +2326,29 @@ function remainLabel(value: unknown) {
 function unitLabel(value: unknown) {
   if (value === null || value === undefined || value === "") return "";
   return formatUnit(value);
+}
+
+function splitCsv(value: string) {
+  return value.split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function inputValue(event: Event) {
+  return event.target instanceof HTMLInputElement ? event.target.value : "";
+}
+
+function checkboxChecked(event: Event) {
+  return event.target instanceof HTMLInputElement ? event.target.checked : false;
+}
+
+function percentageLabel(value: unknown) {
+  const parsed = numeric(value);
+  if (parsed === null) return "--";
+  return `${Math.round(parsed * 100)}%`;
+}
+
+function toggleExportSection(key: string, enabled: boolean) {
+  if (enabled && !exportOptions.sections.includes(key)) exportOptions.sections.push(key);
+  if (!enabled) exportOptions.sections = exportOptions.sections.filter((item) => item !== key);
 }
 
 function dashboardTaskTitle() {
@@ -1710,6 +2456,9 @@ function eventMessage(item: UnifiedEvent | Record<string, any>) {
   if (data.command) {
     return t("events.commandReceived", { command: displayCell(data.command) });
   }
+  if (String(item.type || item.event_type || "") === "spool.location_changed") {
+    return t("events.spoolLocationUpdated");
+  }
   return String(item.message || "");
 }
 
@@ -1809,30 +2558,14 @@ function filamentColor(value: unknown) {
           <h1>{{ navLabel(activeView) }}</h1>
         </div>
         <div class="topbar-actions">
-          <select v-model.number="selectedPrinterId" class="printer-select" @change="handlePrinterSelectionChanged">
-            <option v-if="!printers.length" :value="null">{{ t("common.noPrinter") }}</option>
-            <option v-for="printer in printers" :key="printer.id" :value="printer.id">
-              {{ printer.name }} · {{ printer.host }}
-            </option>
-          </select>
-          <select v-model="locale" class="language-select">
-            <option value="zh-CN">简体中文</option>
-            <option value="en-US">English</option>
-          </select>
+          <AppSelect v-model="selectedPrinterId" class="printer-select" :options="printerSelectOptions" @change="handlePrinterSelectionChanged" />
+          <AppSelect v-model="locale" class="language-select" :options="localeOptions" />
           <span class="status-pill" :class="printerStatusTone">
             <span class="dot"></span>
             {{ selectedPrinter ? displayCell(selectedPrinter.connection_status) : t("common.noPrinter") }}
           </span>
-          <button class="icon-button" type="button" :title="t('common.refresh')" @click="withLoading(loadCurrent)">
+          <button class="icon-button" type="button" :title="t('common.refresh')" @click="refreshCurrentView">
             <RefreshCw :size="17" />
-          </button>
-          <button
-            v-if="['overview', 'dashboard', 'metrics', 'ams', 'inventory'].includes(activeView)"
-            class="secondary"
-            type="button"
-            @click="resetCurrentLayout"
-          >
-            {{ t("layout.reset") }}
           </button>
         </div>
       </header>
@@ -1842,18 +2575,15 @@ function filamentColor(value: unknown) {
       <div v-if="realtimeDisconnected" class="toast warn">{{ t("events.realtimeDisconnected") }}</div>
 
       <section v-if="activeView === 'overview'" class="view">
-        <div class="overview-head">
-          <div>
-            <div class="mini-label">{{ t("overview.priority") }}</div>
-            <h2>{{ t("overview.title") }}</h2>
-            <p>{{ t("overview.subtitle") }}</p>
-          </div>
-          <button class="primary" type="button" @click="withLoading(loadOverview)">
-            <RefreshCw :size="17" />
-            {{ t("overview.refresh") }}
-          </button>
+        <div class="toolbar filters overview-toolbar">
+          <label class="search-field">
+            <Search :size="16" />
+            <input v-model="overviewControls.search" :placeholder="t('overview.search')" />
+          </label>
+          <AppSelect v-model="overviewControls.filter" :options="overviewFilterOptions" />
+          <AppSelect v-model="overviewControls.sort" :options="overviewSortOptions" />
+          <AppSelect v-model="overviewControls.density" :options="overviewDensityOptions" />
         </div>
-
         <div class="metric-grid overview-metrics">
           <div v-for="item in overviewStats" :key="item.label" class="metric-card">
             <div class="metric-label">{{ item.label }}</div>
@@ -1861,55 +2591,6 @@ function filamentColor(value: unknown) {
             <div class="metric-foot">{{ item.foot }}</div>
           </div>
         </div>
-
-        <section v-if="recentImportantEvents.length && isSectionVisible('overview.events')" class="panel">
-          <div class="panel-header">
-            <h3>{{ t("events.recentImportant") }}</h3>
-            <div class="widget-tools">
-              <Bell :size="18" />
-              <button class="icon-button compact" type="button" :title="t('layout.collapse')" @click="toggleSectionCollapsed('overview.events')">
-                <ChevronDown v-if="isSectionCollapsed('overview.events')" :size="15" />
-                <ChevronUp v-else :size="15" />
-              </button>
-              <button class="icon-button compact" type="button" :title="t('layout.hide')" @click="toggleSectionHidden('overview.events')"><X :size="15" /></button>
-            </div>
-          </div>
-          <div v-show="!isSectionCollapsed('overview.events')" class="event-list compact">
-            <div v-for="item in recentImportantEvents" :key="`${item.source}-${item.id}`" class="event-row" :class="eventTone(item)">
-              <span class="status-pill" :class="eventTone(item)"><span class="dot"></span>{{ displayCell(item.severity) }}</span>
-              <strong>{{ eventMessage(item) }}</strong>
-              <small>{{ formatCell(item.created_at) }}</small>
-            </div>
-          </div>
-        </section>
-
-        <section v-if="recentPrintLogItems.length && isSectionVisible('overview.printLog')" class="panel">
-          <div class="panel-header">
-            <h3>{{ t("printLog.recent") }}</h3>
-            <div class="widget-tools">
-              <ClipboardList :size="18" />
-              <button class="icon-button compact" type="button" :title="t('layout.collapse')" @click="toggleSectionCollapsed('overview.printLog')">
-                <ChevronDown v-if="isSectionCollapsed('overview.printLog')" :size="15" />
-                <ChevronUp v-else :size="15" />
-              </button>
-              <button class="icon-button compact" type="button" :title="t('layout.hide')" @click="toggleSectionHidden('overview.printLog')"><X :size="15" /></button>
-            </div>
-          </div>
-          <div v-show="!isSectionCollapsed('overview.printLog')" class="table-wrap compact-table">
-            <table>
-              <thead><tr><th>{{ t("table.name") }}</th><th>{{ t("table.printer") }}</th><th>{{ t("table.status") }}</th><th>{{ t("printLog.duration") }}</th><th>{{ t("overview.progress") }}</th></tr></thead>
-              <tbody>
-                <tr v-for="log in recentPrintLogItems" :key="log.id">
-                  <td>{{ formatCell(log.print_name || log.gcode_file) }}</td>
-                  <td>{{ formatCell(log.printer_name_snapshot) }}</td>
-                  <td><span class="status-pill" :class="printLogTone(log.status)"><span class="dot"></span>{{ displayCell(log.status) }}</span></td>
-                  <td>{{ formatDurationSeconds(log.duration_seconds) }}</td>
-                  <td>{{ formatCell(log.max_progress ?? log.final_progress) }}%</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
 
         <section v-if="!overviewItems.length" class="panel empty-overview">
           <h3>{{ t("overview.noPrinters") }}</h3>
@@ -1920,7 +2601,7 @@ function filamentColor(value: unknown) {
           </button>
         </section>
 
-        <div v-else class="fleet-grid">
+        <div v-else class="fleet-grid" :class="`density-${overviewControls.density}`">
           <article
             v-for="item in overviewItems"
             :key="item.printer.id"
@@ -1954,7 +2635,7 @@ function filamentColor(value: unknown) {
               </div>
             </div>
 
-            <div class="fleet-metrics">
+            <div v-if="overviewControls.density !== 'compact'" class="fleet-metrics">
               <div>
                 <span>{{ t("dashboard.nozzle") }}</span>
                 <strong>{{ summaryTemperature(item, "nozzle") }}℃</strong>
@@ -1973,13 +2654,15 @@ function filamentColor(value: unknown) {
               </div>
             </div>
 
+            <div v-if="overviewControls.density === 'detailed'" class="fleet-detail-row">
+              <span>{{ t("dashboard.layers") }} {{ summaryLayerFraction(item) }}</span>
+              <span>HMS {{ summaryActiveHmsCount(item) }}</span>
+              <span>{{ t("maintenance.due") }} {{ item.maintenance_due_count || 0 }}</span>
+            </div>
+
             <div class="fleet-card-footer">
               <span>{{ t("overview.lastSync") }} {{ formatCell(item.printer.last_sync_at) }}</span>
               <div class="row-actions">
-                <button class="secondary" type="button" @click="openPrinterDetails(item.printer.id)">
-                  <Eye :size="17" />
-                  {{ t("overview.details") }}
-                </button>
                 <button class="secondary" type="button" @click="openPrinterDashboard(item.printer.id)">
                   <Gauge :size="17" />
                   {{ t("overview.openDashboard") }}
@@ -2018,18 +2701,10 @@ function filamentColor(value: unknown) {
               <span :style="{ width: `${dashboardProgress()}%` }"></span>
             </div>
           </div>
-          <div class="strip-actions">
-            <button class="primary" type="button" @click="requestRefreshFull">
-              <PlugZap :size="17" />
-              {{ canRequestFullRefresh ? t("common.fullRefresh") : t("common.fullRefreshNeedsConnection") }}
-            </button>
-            <button v-if="!canRequestFullRefresh" class="secondary" type="button" @click="connectPrinter">
+          <div v-if="!canRequestFullRefresh" class="strip-actions">
+            <button class="secondary" type="button" @click="connectPrinter">
               <PlugZap :size="17" />
               {{ t("common.connectPrinter") }}
-            </button>
-            <button class="secondary" type="button" @click="loadDashboard">
-              <RefreshCw :size="17" />
-              {{ t("common.refreshDashboard") }}
             </button>
           </div>
         </div>
@@ -2055,6 +2730,11 @@ function filamentColor(value: unknown) {
             <div class="metric-value">{{ formatCell(temperatures.bed) }}℃</div>
             <div class="metric-foot">{{ t("dashboard.target") }} {{ formatCell(temperatures.bed_target) }}℃</div>
           </div>
+          <div v-if="shouldShowChamberTemperature" class="metric-card">
+            <div class="metric-label">{{ fieldLabel("chamber") }}</div>
+            <div class="metric-value">{{ formatCell(temperatures.chamber) }}℃</div>
+            <div class="metric-foot">{{ t("dashboard.target") }} {{ formatCell(temperatures.chamber_target) }}℃</div>
+          </div>
           <div class="metric-card">
             <div class="metric-label">WiFi</div>
             <div class="metric-value">{{ formatCell(network.wifi_signal) }}</div>
@@ -2063,7 +2743,7 @@ function filamentColor(value: unknown) {
         </div>
 
         <div class="dashboard-card-flow">
-          <section class="panel">
+          <section v-if="shouldShowDashboardCamera" class="panel">
             <div class="panel-header">
               <h3>{{ t("dashboard.thermalFans") }}</h3>
               <div class="widget-tools">
@@ -2093,7 +2773,7 @@ function filamentColor(value: unknown) {
             </div>
           </section>
 
-          <section class="panel">
+          <section v-if="shouldShowDashboardAms" class="panel">
             <div class="panel-header">
               <h3>{{ t("dashboard.networkHardware") }}</h3>
               <div class="widget-tools">
@@ -2250,21 +2930,8 @@ function filamentColor(value: unknown) {
       <section v-else-if="activeView === 'events'" class="view">
         <div class="toolbar filters">
           <input v-model="eventFilters.type" :placeholder="t('events.typeFilter')" />
-          <select v-model="eventFilters.severity">
-            <option value="">{{ t("events.allSeverities") }}</option>
-            <option value="info">{{ t("values.info") }}</option>
-            <option value="warning">{{ t("values.warning") }}</option>
-            <option value="error">{{ t("values.error") }}</option>
-          </select>
-          <select v-model="eventFilters.active">
-            <option value="">{{ t("events.allStates") }}</option>
-            <option value="active">{{ t("common.unresolved") }}</option>
-            <option value="inactive">{{ t("common.resolved") }}</option>
-          </select>
-          <button class="primary" type="button" @click="withLoading(loadEvents)">
-            <RefreshCw :size="17" />
-            {{ t("events.refresh") }}
-          </button>
+          <AppSelect v-model="eventFilters.severity" :options="eventSeverityOptions" />
+          <AppSelect v-model="eventFilters.active" :options="eventActiveOptions" />
         </div>
         <section class="panel">
           <div class="panel-header"><h3>{{ t("events.title") }}</h3><Bell :size="18" /></div>
@@ -2288,24 +2955,14 @@ function filamentColor(value: unknown) {
 
       <section v-else-if="activeView === 'printLog'" class="view">
         <div class="toolbar filters">
-          <select v-model="printLogFilters.printer_id">
-            <option value="">{{ t("printLog.allPrinters") }}</option>
-            <option v-for="printer in printers" :key="printer.id" :value="String(printer.id)">{{ printer.name }}</option>
-          </select>
-          <select v-model="printLogFilters.status">
-            <option value="">{{ t("printLog.allStatuses") }}</option>
-            <option value="running">{{ t("values.running") }}</option>
-            <option value="paused">{{ t("values.paused") }}</option>
-            <option value="succeeded">{{ t("values.succeeded") }}</option>
-            <option value="failed">{{ t("values.failed") }}</option>
-            <option value="cancelled">{{ t("values.cancelled") }}</option>
-          </select>
+          <AppSelect v-model="printLogFilters.printer_id" :options="printLogPrinterOptions" />
+          <AppSelect v-model="printLogFilters.status" :options="printLogStatusOptions" />
           <input v-model="printLogFilters.search" :placeholder="t('printLog.search')" />
           <input v-model="printLogFilters.date_from" type="date" />
           <input v-model="printLogFilters.date_to" type="date" />
           <button class="primary" type="button" @click="applyPrintLogFilters">
             <Search :size="17" />
-            {{ t("common.refresh") }}
+            {{ t("printLog.applyFilters") }}
           </button>
         </div>
 
@@ -2326,6 +2983,41 @@ function filamentColor(value: unknown) {
             <div class="metric-label">{{ t("printLog.totalDuration") }}</div>
             <div class="metric-value compact-value">{{ formatDurationSeconds(printLogSummary?.total_duration_seconds) }}</div>
           </div>
+        </div>
+
+        <div class="grid two wide">
+          <section class="panel">
+            <div class="panel-header"><h3>{{ t("printLog.analytics") }}</h3><LineChart :size="18" /></div>
+            <div class="analytics-strip">
+              <div><span>{{ t("printLog.successRate") }}</span><strong>{{ percentageLabel(printLogAnalytics?.success_rate) }}</strong></div>
+              <div><span>{{ t("printLog.failureRate") }}</span><strong>{{ percentageLabel(printLogAnalytics?.failure_rate) }}</strong></div>
+              <div><span>{{ t("printLog.averageDuration") }}</span><strong>{{ formatDurationSeconds(printLogAnalytics?.average_duration_seconds) }}</strong></div>
+              <div><span>{{ t("printLog.longestDuration") }}</span><strong>{{ formatDurationSeconds(printLogAnalytics?.longest_duration_seconds) }}</strong></div>
+            </div>
+            <div class="trend-bars">
+              <div v-for="bucket in printLogAnalytics?.by_date || []" :key="bucket.bucket" class="trend-row">
+                <span>{{ bucket.bucket }}</span>
+                <div class="bar"><i :style="{ width: `${percent(bucket.total, 0)}%` }"></i></div>
+                <strong>{{ bucket.total }}</strong>
+              </div>
+              <div v-if="!printLogAnalytics?.by_date?.length" class="empty">{{ t("common.empty") }}</div>
+            </div>
+          </section>
+          <section class="panel">
+            <div class="panel-header"><h3>{{ t("printLog.failureRanking") }}</h3><ShieldAlert :size="18" /></div>
+            <div class="table-wrap compact-table">
+              <table>
+                <thead><tr><th>{{ t("printLog.failureReason") }}</th><th>{{ t("table.value") }}</th></tr></thead>
+                <tbody>
+                  <tr v-if="!printLogAnalytics?.by_failure_reason?.length"><td colspan="2" class="empty">{{ t("common.empty") }}</td></tr>
+                  <tr v-for="item in printLogAnalytics?.by_failure_reason || []" :key="item.reason">
+                    <td>{{ item.reason }}</td>
+                    <td>{{ item.count }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
         </div>
 
         <section class="panel">
@@ -2361,50 +3053,16 @@ function filamentColor(value: unknown) {
 
       <section v-else-if="activeView === 'metrics'" class="view">
         <div class="toolbar filters">
-          <select v-model="metricRange" @change="withLoading(loadMetrics)">
-            <option value="1h">{{ t("metrics.range1h") }}</option>
-            <option value="6h">{{ t("metrics.range6h") }}</option>
-            <option value="24h">{{ t("metrics.range24h") }}</option>
-            <option value="7d">{{ t("metrics.range7d") }}</option>
-            <option value="30d">{{ t("metrics.range30d") }}</option>
-          </select>
-          <select v-model="metricGroup">
-            <option value="temperature">{{ t("metrics.groupTemperature") }}</option>
-            <option value="fan">{{ t("metrics.groupFan") }}</option>
-            <option value="wifi">{{ t("metrics.groupWifi") }}</option>
-            <option value="ams">{{ t("metrics.groupAms") }}</option>
-          </select>
-          <button class="primary" type="button" @click="withLoading(loadMetrics)">
-            <LineChart :size="17" />
-            {{ t("metrics.refresh") }}
-          </button>
+          <AppSelect v-model="metricRange" :options="metricRangeOptions" @change="withLoading(loadMetrics)" />
         </div>
-        <section v-if="isSectionVisible('metrics.summary')" class="panel">
-          <div class="panel-header">
-            <h3>{{ t("metrics.latestSummary") }}</h3>
-            <div class="widget-tools">
-              <LineChart :size="18" />
-              <button class="icon-button compact" type="button" :title="t('layout.collapse')" @click="toggleSectionCollapsed('metrics.summary')">
-                <ChevronDown v-if="isSectionCollapsed('metrics.summary')" :size="15" />
-                <ChevronUp v-else :size="15" />
-              </button>
-              <button class="icon-button compact" type="button" :title="t('layout.hide')" @click="toggleSectionHidden('metrics.summary')"><X :size="15" /></button>
-            </div>
-          </div>
-          <div v-show="!isSectionCollapsed('metrics.summary')" class="metric-mini-grid">
-            <div v-for="item in selectedMetricItems.slice(-6)" :key="`${item.metric}-${item.sampled_at}`">
-              <span>{{ metricLabel(item.metric) }}</span>
-              <strong>{{ formatCell(item.value_float ?? item.value_text) }} {{ unitLabel(item.unit) }}</strong>
-            </div>
-          </div>
-        </section>
-        <div class="grid two wide">
+        <div class="metrics-chart-grid">
           <MetricChart
             :title="t('metrics.temperatureHistory')"
             :subtitle="t('metrics.temperatureSubtitle')"
             :items="metricGroups.temperatures"
             :metric-label="metricLabel"
             :empty-label="t('common.empty')"
+            :tooltip-labels="metricTooltipLabels"
           />
           <MetricChart
             :title="t('metrics.fanHistory')"
@@ -2412,6 +3070,7 @@ function filamentColor(value: unknown) {
             :items="metricGroups.fans"
             :metric-label="metricLabel"
             :empty-label="t('common.empty')"
+            :tooltip-labels="metricTooltipLabels"
           />
           <MetricChart
             :title="t('metrics.wifiHistory')"
@@ -2419,6 +3078,7 @@ function filamentColor(value: unknown) {
             :items="metricGroups.wifi"
             :metric-label="metricLabel"
             :empty-label="t('common.empty')"
+            :tooltip-labels="metricTooltipLabels"
           />
           <MetricChart
             :title="t('metrics.amsHistory')"
@@ -2426,81 +3086,94 @@ function filamentColor(value: unknown) {
             :items="metricGroups.ams"
             :metric-label="metricLabel"
             :empty-label="t('common.empty')"
+            :tooltip-labels="metricTooltipLabels"
           />
         </div>
       </section>
 
       <section v-else-if="activeView === 'storage'" class="view">
-        <div class="toolbar">
-          <button class="primary" type="button" @click="scanStorage">
-            <FolderSearch :size="17" />
-            {{ t("storage.scan") }}
-          </button>
-          <button class="secondary" type="button" @click="withLoading(loadStorage)">
-            <RefreshCw :size="17" />
-            {{ t("storage.refresh") }}
-          </button>
+        <div class="toolbar storage-toolbar">
+          <div class="toolbar filters storage-filters">
+            <label class="search-field">
+              <Search :size="16" />
+              <input v-model="storageSearch" :placeholder="t('storage.search')" />
+            </label>
+            <AppSelect v-model="storageSort" :options="storageSortOptions" />
+          </div>
         </div>
         <div class="metric-grid small">
           <div v-for="item in storageStats" :key="item.label" class="metric-card">
             <div class="metric-label">{{ item.label }}</div>
             <div class="metric-value">{{ item.value }}</div>
+            <div v-if="item.foot" class="metric-foot">{{ item.foot }}</div>
           </div>
         </div>
-        <div class="grid two wide">
-          <section class="panel">
-            <div class="panel-header"><h3>{{ t("storage.typeStats") }}</h3><HardDrive :size="18" /></div>
-            <div class="state-grid">
-              <div v-for="[type, count] in storageTypeRows" :key="type" class="state-row">
-                <span>{{ displayCell(type) }}</span>
-                <strong>{{ count }}</strong>
-              </div>
-              <div v-if="!storageTypeRows.length" class="empty">{{ t("common.empty") }}</div>
-            </div>
-          </section>
-          <section class="panel">
-            <div class="panel-header"><h3>{{ t("storage.timelapse") }}</h3><Archive :size="18" /></div>
-            <div class="file-list">
-              <div v-for="file in timelapseFiles.slice(0, 6)" :key="file.path">
-                <strong>{{ file.name }}</strong>
-                <span>{{ formatBytes(file.size || 0) }} · {{ formatCell(file.modified_at) }}</span>
-              </div>
-              <div v-if="!timelapseFiles.length" class="empty">{{ t("common.empty") }}</div>
-            </div>
-          </section>
-        </div>
         <section class="panel">
-          <div class="panel-header"><h3>{{ t("storage.files") }}</h3><Archive :size="18" /></div>
+          <div class="panel-header">
+            <div>
+              <h3>{{ t("storage.preview") }}</h3>
+              <p class="panel-subtitle">{{ t("storage.previewSubtitle", { count: filteredTimelapseFiles.length }) }}</p>
+            </div>
+            <Camera :size="18" />
+          </div>
           <div v-if="storageResult?.error" class="inline-error">{{ storageResult.error }}</div>
-          <div class="table-wrap">
-            <table>
-              <thead><tr><th>{{ t("table.path") }}</th><th>{{ t("table.name") }}</th><th>{{ t("table.size") }}</th><th>{{ t("table.modifiedAt") }}</th><th>{{ t("table.type") }}</th><th>{{ t("table.source") }}</th></tr></thead>
-              <tbody>
-                <tr v-if="!storageFiles.length"><td colspan="6" class="empty">{{ t("storage.noFiles") }}</td></tr>
-                <tr v-for="file in storageFiles" :key="file.path">
-                  <td class="path">{{ file.path }}</td>
-                  <td>{{ file.name }}</td>
-                  <td>{{ formatBytes(file.size || 0) }}</td>
-                  <td>{{ formatCell(file.modified_at) }}</td>
-                  <td>{{ formatCell(file.type) }}</td>
-                  <td>{{ file.source }}</td>
-                </tr>
-              </tbody>
-            </table>
+          <div class="storage-preview-grid">
+            <article v-for="file in storagePreviewFiles" :key="file.path" class="storage-preview-card">
+              <video
+                :src="storageFileUrl(file, true)"
+                muted
+                controls
+                preload="metadata"
+                playsinline
+                @loadedmetadata="seekVideoPreviewToEnd"
+                @play="resetVideoPlayback"
+              ></video>
+              <div class="storage-preview-meta">
+                <div class="storage-title-row">
+                  <strong>{{ file.name }}</strong>
+                  <button class="icon-button compact" type="button" :title="t('storage.favorite')" @click="toggleTimelapseFavorite(file)">
+                    <Star :size="15" :fill="timelapseNote(file)?.favorite ? 'currentColor' : 'none'" />
+                  </button>
+                </div>
+                <span>{{ formatBytes(file.size || 0) }} · {{ formatCell(file.modified_at) }}</span>
+                <span>{{ t("fields.resolution") }} {{ softCell(timelapseNote(file)?.cached_metadata?.resolution) }} · {{ t("storage.coverCache") }} {{ softCell(timelapseNote(file)?.cached_metadata?.cover_cache) }}</span>
+              </div>
+              <div class="timelapse-note-row">
+                <input
+                  :value="timelapseNoteText(file)"
+                  :placeholder="t('storage.note')"
+                  @input="setTimelapseDraft(file.path, inputValue($event))"
+                />
+                <button class="secondary" type="button" @click="saveTimelapseNote(file)">{{ t("common.save") }}</button>
+              </div>
+              <a class="secondary storage-download-link" :href="storageFileUrl(file)" :download="file.name">
+                <Download :size="15" />
+                {{ t("storage.download") }}
+              </a>
+            </article>
+            <div v-if="!storagePreviewFiles.length" class="empty">{{ t("storage.noPreview") }}</div>
+          </div>
+          <div v-if="filteredTimelapseFiles.length" class="pager">
+            <button class="secondary" type="button" :disabled="storagePage <= 1" @click="changeStoragePage(-1)">{{ t("printLog.prev") }}</button>
+            <span>{{ t("storage.pageInfo", { page: storagePage, total: storageTotalPages, count: filteredTimelapseFiles.length }) }}</span>
+            <button class="secondary" type="button" :disabled="storagePage >= storageTotalPages" @click="changeStoragePage(1)">{{ t("printLog.next") }}</button>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel-header"><h3>{{ t("storage.groupByDate") }}</h3><Camera :size="18" /></div>
+          <div class="date-group-list">
+            <div v-for="group in groupedTimelapseFiles" :key="group.date" class="date-group-row">
+              <strong>{{ group.date }}</strong>
+              <span>{{ group.files.length }}</span>
+            </div>
+            <div v-if="!groupedTimelapseFiles.length" class="empty">{{ t("common.empty") }}</div>
           </div>
         </section>
       </section>
 
       <section v-else-if="activeView === 'ams'" class="view">
         <div class="toolbar">
-          <select v-model="amsSensorRange" @change="withLoading(loadAmsSensorHistories)">
-            <option value="24">24h</option>
-            <option value="168">7d</option>
-          </select>
-          <button class="primary" type="button" @click="withLoading(loadAms)">
-            <RefreshCw :size="17" />
-            {{ t("ams.refresh") }}
-          </button>
+          <AppSelect v-model="amsSensorRange" :options="amsSensorRangeOptions" @change="withLoading(loadAmsSensorHistories)" />
         </div>
         <div class="metric-grid overview-metrics">
           <div v-for="item in amsStats" :key="item.label" class="metric-card">
@@ -2509,83 +3182,119 @@ function filamentColor(value: unknown) {
           </div>
         </div>
         <div class="ams-unit-grid">
-        <section v-for="unit in amsOverview?.units || []" :key="unit.ams_id" class="panel ams-unit-card" :class="amsTone(unit)">
-          <div class="ams-unit-header">
-            <div>
+        <section
+          v-for="(unit, unitIndex) in amsOverview?.units || []"
+          :key="unit.ams_id"
+          class="panel ams-unit-card"
+          :class="[amsTone(unit), { collapsed: isSectionCollapsed(amsSectionKey(unit)) }]"
+        >
+          <div class="ams-unit-header" :class="{ collapsed: isSectionCollapsed(amsSectionKey(unit)) }">
+            <div class="ams-unit-title">
               <div class="badge-row">
                 <span class="ams-badge">{{ unit.ams_type_name === "unknown" ? t("ams.unknownType") : unit.ams_type_name }}</span>
                 <span class="ams-code mono">#{{ unit.ams_id }}</span>
-                <button class="icon-button compact subtle" type="button" :title="t('ams.editLabel')" @click="toggleAmsLabelEditor(unit)">
-                  <Settings :size="14" />
-                </button>
               </div>
               <h3>{{ amsTitle(unit) }}</h3>
-              <div v-if="amsLabelEditing[unit.ams_id]" class="ams-label-row">
-                <input v-model="amsLabelDrafts[unit.ams_id]" :placeholder="t('ams.labelPlaceholder')" />
-                <button class="secondary" type="button" @click="saveAmsLabel(unit)"><Save :size="15" />{{ t("common.save") }}</button>
-                <button class="icon-button compact" type="button" :title="t('ams.clearLabel')" @click="clearAmsLabel(unit)"><X :size="15" /></button>
-              </div>
             </div>
-            <div class="ams-unit-meta">
+            <div class="ams-unit-actions">
+              <span v-if="isSectionCollapsed(amsSectionKey(unit))" class="ams-compact-sensor">{{ softCell(unit.temperature) }}℃ / {{ amsHumidityLabel(unit) }}</span>
+              <button
+                v-if="!isSectionCollapsed(amsSectionKey(unit))"
+                class="icon-button compact subtle"
+                type="button"
+                :title="t('ams.editLabel')"
+                @click="toggleAmsLabelEditor(unit)"
+              >
+                <PencilLine :size="14" />
+              </button>
+              <button class="icon-button compact" type="button" :title="t('layout.collapse')" @click="toggleSectionCollapsed(amsSectionKey(unit))">
+                <ChevronDown v-if="isSectionCollapsed(amsSectionKey(unit))" :size="15" />
+                <ChevronUp v-else :size="15" />
+              </button>
+            </div>
+            <div v-if="amsLabelEditing[unit.ams_id] && !isSectionCollapsed(amsSectionKey(unit))" class="ams-label-row">
+              <input v-model="amsLabelDrafts[unit.ams_id]" :placeholder="t('ams.labelPlaceholder')" />
+              <button class="secondary" type="button" @click="saveAmsLabel(unit)"><Save :size="15" />{{ t("common.save") }}</button>
+              <button class="icon-button compact" type="button" :title="t('ams.clearLabel')" @click="clearAmsLabel(unit)"><X :size="15" /></button>
+            </div>
+            <div v-if="!isSectionCollapsed(amsSectionKey(unit))" class="ams-unit-meta">
               <span>{{ t("fields.temperature") }} {{ softCell(unit.temperature) }}℃</span>
               <span>{{ t("fields.humidity_raw") }} {{ amsHumidityLabel(unit) }}</span>
               <span>{{ t("ams.activeSlot") }} {{ activeSlotDisplayLabel(unit.active_slot) }}</span>
               <span>{{ t("ams.dryStatus") }} {{ displayCell(unit.dry_status_name || unit.dry_status) }}</span>
               <span class="quiet-meta">{{ t("fields.firmware") }} {{ softCell(unit.sw_ver) }}</span>
               <span>{{ t("overview.lastSync") }} {{ formatCell(unit.updated_at) }}</span>
-              <button class="icon-button compact" type="button" :title="t('layout.collapse')" @click="toggleSectionCollapsed(amsSectionKey(unit))">
-                <ChevronDown v-if="isSectionCollapsed(amsSectionKey(unit))" :size="15" />
-                <ChevronUp v-else :size="15" />
-              </button>
             </div>
           </div>
-          <div v-show="!isSectionCollapsed(amsSectionKey(unit))" class="ams-sensor-row">
-            <MetricChart
-              :title="t('ams.sensorHistory')"
-              :subtitle="`${t('fields.temperature')} / ${t('fields.humidity_raw')}`"
-              :items="amsSensorChartItems(unit.ams_id)"
-              :metric-label="metricLabel"
-              :empty-label="t('common.empty')"
-            />
-          </div>
-          <div v-show="!isSectionCollapsed(amsSectionKey(unit))" class="ams-slot-grid">
-            <div v-if="!unit.slots.length" class="empty">{{ t("ams.noSlots") }}</div>
-            <article v-for="slot in unit.slots" :key="slotKey(slot)" class="ams-slot-card" :class="{ active: slot.is_active }">
-              <div class="ams-slot-topline">
-                <div>
-                  <span class="mini-label">{{ slotDisplayLabel(slot) }}</span>
-                  <strong><span class="swatch" :style="{ background: filamentColor(slot.color) }"></span>{{ softCell(slot.material) }}</strong>
+          <div class="ams-fold-stack">
+            <Transition name="ams-fold">
+              <div v-if="isSectionCollapsed(amsSectionKey(unit))" :key="`${unit.ams_id}-collapsed`" class="ams-fold-region">
+                <div class="ams-collapsed-preview">
+                  <div
+                    class="ams-visual-slots ams-page-preview-slots"
+                    :class="{ 'single-slot': amsPageUnitVisual(unit, unitIndex).slots.length <= 1 }"
+                  >
+                    <div
+                      v-for="slot in amsPageUnitVisual(unit, unitIndex).slots"
+                      :key="slot.key"
+                      class="ams-visual-slot"
+                      :class="{ active: slot.active, empty: !slot.loaded }"
+                    >
+                      <span class="ams-slot-material">{{ slot.material }}</span>
+                      <div class="ams-spool" :style="slot.style"><i></i></div>
+                      <strong>{{ slot.label }}</strong>
+                      <small>{{ slot.remain }}</small>
+                    </div>
+                    <div v-if="!amsPageUnitVisual(unit, unitIndex).slots.length" class="empty">{{ t("ams.noSlots") }}</div>
+                  </div>
                 </div>
-                <button class="icon-button compact" type="button" :title="t('table.details')" @click="openSlotDetails(slot)">
-                  <Eye :size="15" />
-                </button>
               </div>
-              <div class="ams-slot-remain">
-                <div class="progress-track">
-                  <span :style="{ width: `${remainPercent(slot.remain)}%` }"></span>
+              <div v-else :key="`${unit.ams_id}-expanded`" class="ams-fold-region">
+                <div class="ams-sensor-row">
+                  <MetricChart
+                    :title="t('ams.sensorHistory')"
+                    :subtitle="`${t('fields.temperature')} / ${t('fields.humidity_raw')}`"
+                    :items="amsSensorChartItems(unit.ams_id)"
+                    :metric-label="metricLabel"
+                    :empty-label="t('common.empty')"
+                    :tooltip-labels="metricTooltipLabels"
+                  />
                 </div>
-                <strong>{{ remainLabel(slot.remain) }}</strong>
+                <div class="ams-slot-grid">
+                  <div v-if="!unit.slots.length" class="empty">{{ t("ams.noSlots") }}</div>
+                  <article v-for="slot in unit.slots" :key="slotKey(slot)" class="ams-slot-card" :class="{ active: slot.is_active }">
+                    <div class="ams-slot-topline">
+                      <div>
+                        <span class="mini-label">{{ slotDisplayLabel(slot) }}</span>
+                        <strong><span class="swatch" :style="{ background: filamentColor(slot.color) }"></span>{{ softCell(slot.material) }}</strong>
+                      </div>
+                      <button class="icon-button compact" type="button" :title="t('table.details')" @click="openSlotDetails(slot)">
+                        <Eye :size="15" />
+                      </button>
+                    </div>
+                    <div class="ams-slot-remain">
+                      <div class="progress-track">
+                        <span :style="{ width: `${remainPercent(slot.remain)}%` }"></span>
+                      </div>
+                      <strong>{{ remainLabel(slot.remain) }}</strong>
+                    </div>
+                    <div class="ams-slot-facts">
+                      <div><span>{{ t("table.state") }}</span><strong>{{ displayCell(slot.state_name || slot.slot_state) }}</strong></div>
+                      <div><span>K</span><strong>{{ softCell(slot.k) }}</strong></div>
+                      <div><span>{{ t("ams.caliIdx") }}</span><strong>{{ softCell(slot.cali_idx) }}</strong></div>
+                      <div><span>{{ t("table.spool") }}</span><strong>{{ softCell(slot.spool_id) }}</strong></div>
+                    </div>
+                    <span v-if="slot.is_active" class="ams-active-ribbon">{{ t("common.currentInUse") }}</span>
+                  </article>
+                </div>
               </div>
-              <div class="ams-slot-facts">
-                <div><span>{{ t("table.state") }}</span><strong>{{ displayCell(slot.state_name || slot.slot_state) }}</strong></div>
-                <div><span>K</span><strong>{{ softCell(slot.k) }}</strong></div>
-                <div><span>{{ t("ams.caliIdx") }}</span><strong>{{ softCell(slot.cali_idx) }}</strong></div>
-                <div><span>{{ t("table.spool") }}</span><strong>{{ softCell(slot.spool_id) }}</strong></div>
-              </div>
-              <span v-if="slot.is_active" class="ams-active-ribbon">{{ t("common.currentInUse") }}</span>
-            </article>
+            </Transition>
           </div>
         </section>
         </div>
       </section>
 
       <section v-else-if="activeView === 'inventory'" class="view">
-        <div class="toolbar">
-          <button class="primary" type="button" @click="withLoading(loadInventory)">
-            <RefreshCw :size="17" />
-            {{ t("inventory.refresh") }}
-          </button>
-        </div>
         <section v-if="isSectionVisible('inventory.spools')" class="panel">
           <div class="panel-header">
             <h3>{{ t("inventory.spools") }}</h3>
@@ -2604,12 +3313,7 @@ function filamentColor(value: unknown) {
             <input v-model="spoolForm.series" :placeholder="t('form.series')" />
             <input v-model="spoolForm.color" :placeholder="t('form.color')" />
             <input v-model.number="spoolForm.sealed_quantity" type="number" min="0" :placeholder="t('form.sealedQty')" />
-            <select v-model="spoolForm.status">
-              <option value="sealed">sealed</option>
-              <option value="opened">opened</option>
-              <option value="active">active</option>
-              <option value="archived">archived</option>
-            </select>
+            <AppSelect v-model="spoolForm.status" :options="spoolStatusOptions" />
             <button class="primary" type="button" @click="createSpool"><Save :size="17" />{{ t("common.create") }}</button>
           </div>
           <div v-show="!isSectionCollapsed('inventory.spools')" class="bind-row">
@@ -2652,10 +3356,6 @@ function filamentColor(value: unknown) {
               <strong>{{ maintenanceHealthPercent }}%</strong>
             </div>
           </div>
-          <button class="primary" type="button" @click="withLoading(loadMaintenance)">
-            <RefreshCw :size="17" />
-            {{ t("maintenance.refresh") }}
-          </button>
         </section>
 
         <div class="maintenance-summary-grid">
@@ -2723,9 +3423,13 @@ function filamentColor(value: unknown) {
                 >
                   <div class="maintenance-card-main">
                     <div class="maintenance-title-row">
-                      <div class="maintenance-icon"><Wrench :size="16" /></div>
+                      <div class="maintenance-icon" :class="{ ams: item.target_type === 'ams' }">
+                        <Boxes v-if="item.target_type === 'ams'" :size="16" />
+                        <Wrench v-else :size="16" />
+                      </div>
                       <div>
                         <h4>{{ item.maintenance_type.name }}</h4>
+                        <div v-if="item.target_label" class="maintenance-target">{{ item.target_label }}</div>
                         <p>{{ item.maintenance_type.description }}</p>
                       </div>
                     </div>
@@ -2761,6 +3465,90 @@ function filamentColor(value: unknown) {
         </div>
       </section>
 
+      <section v-else-if="activeView === 'notifications'" class="view">
+        <div class="grid two wide">
+          <section class="panel">
+            <div class="panel-header"><h3>{{ t("notifications.targets") }}</h3><Send :size="18" /></div>
+            <div class="form-grid compact-form">
+              <AppSelect v-model="notificationTargetForm.channel" :options="notificationChannelOptions" />
+              <input v-model="notificationTargetForm.name" :placeholder="t('form.name')" />
+              <input v-model="notificationTargetForm.url" :placeholder="t('notifications.url')" />
+              <input v-model="notificationTargetForm.token" :placeholder="t('notifications.token')" type="password" />
+              <label class="checkbox"><input v-model="notificationTargetForm.enabled" type="checkbox" /> {{ t("common.active") }}</label>
+              <button class="primary" type="button" @click="saveNotificationTarget"><Save :size="17" />{{ t("common.save") }}</button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>{{ t("table.name") }}</th><th>{{ t("table.type") }}</th><th>{{ t("table.status") }}</th><th>{{ t("table.details") }}</th><th>{{ t("table.actions") }}</th></tr></thead>
+                <tbody>
+                  <tr v-if="!notificationTargets.length"><td colspan="5" class="empty">{{ t("common.empty") }}</td></tr>
+                  <tr v-for="target in notificationTargets" :key="target.id">
+                    <td>{{ target.name }}</td>
+                    <td>{{ target.channel }}</td>
+                    <td>{{ target.enabled ? t("common.active") : t("common.inactive") }}</td>
+                    <td>{{ formatCell(target.display_config) }}</td>
+                    <td>
+                      <button class="icon-button compact" type="button" :title="t('table.actions')" @click="editNotificationTarget(target)"><PencilLine :size="14" /></button>
+                      <button class="icon-button compact" type="button" :title="t('notifications.test')" @click="testNotificationTarget(target)"><Send :size="14" /></button>
+                      <button class="icon-button compact danger" type="button" :title="t('common.delete')" @click="deleteNotificationTarget(target)"><Trash2 :size="14" /></button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header"><h3>{{ t("notifications.rules") }}</h3><Bell :size="18" /></div>
+            <div class="form-grid compact-form">
+              <input v-model="notificationRuleForm.name" :placeholder="t('form.name')" />
+              <input v-model="notificationRuleForm.event_types" :placeholder="t('notifications.eventTypes')" />
+              <input v-model="notificationRuleForm.printer_ids" :placeholder="t('notifications.printerIds')" />
+              <input v-model="notificationRuleForm.severities" :placeholder="t('notifications.severities')" />
+              <input v-model="notificationRuleForm.quiet_start" type="time" />
+              <input v-model="notificationRuleForm.quiet_end" type="time" />
+              <input v-model.number="notificationRuleForm.repeat_suppression_minutes" type="number" min="0" />
+              <label class="checkbox"><input v-model="notificationRuleForm.enabled" type="checkbox" /> {{ t("common.active") }}</label>
+              <button class="primary" type="button" @click="saveNotificationRule"><Save :size="17" />{{ t("common.save") }}</button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>{{ t("table.name") }}</th><th>{{ t("notifications.eventTypes") }}</th><th>{{ t("table.status") }}</th><th>{{ t("table.actions") }}</th></tr></thead>
+                <tbody>
+                  <tr v-if="!notificationRules.length"><td colspan="4" class="empty">{{ t("common.empty") }}</td></tr>
+                  <tr v-for="rule in notificationRules" :key="rule.id">
+                    <td>{{ rule.name }}</td>
+                    <td>{{ (rule.event_types || []).join(', ') || t("common.none") }}</td>
+                    <td>{{ rule.enabled ? t("common.active") : t("common.inactive") }}</td>
+                    <td>
+                      <button class="icon-button compact" type="button" @click="editNotificationRule(rule)"><PencilLine :size="14" /></button>
+                      <button class="icon-button compact danger" type="button" @click="deleteNotificationRule(rule)"><Trash2 :size="14" /></button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+        <section class="panel">
+          <div class="panel-header"><h3>{{ t("notifications.deliveries") }}</h3><Database :size="18" /></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>{{ t("table.time") }}</th><th>{{ t("table.type") }}</th><th>{{ t("table.status") }}</th><th>{{ t("table.message") }}</th></tr></thead>
+              <tbody>
+                <tr v-if="!notificationDeliveries.length"><td colspan="4" class="empty">{{ t("common.empty") }}</td></tr>
+                <tr v-for="delivery in notificationDeliveries" :key="delivery.id">
+                  <td>{{ formatCell(delivery.created_at) }}</td>
+                  <td>{{ delivery.event_type }}</td>
+                  <td>{{ displayCell(delivery.status) }}</td>
+                  <td>{{ softCell(delivery.error_summary) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
       <section v-else-if="activeView === 'printers'" class="view">
         <div class="grid two wide">
           <section class="panel">
@@ -2777,10 +3565,12 @@ function filamentColor(value: unknown) {
                   <button
                     class="icon-button compact"
                     type="button"
+                    :disabled="accessCodeRevealLoading"
                     :title="accessCodeVisible ? t('form.hideAccessCode') : t('form.showAccessCode')"
-                    @click="accessCodeVisible = !accessCodeVisible"
+                    @click="toggleAccessCodeVisibility"
                   >
-                    <EyeOff v-if="accessCodeVisible" :size="15" />
+                    <Loader2 v-if="accessCodeRevealLoading" class="spin" :size="15" />
+                    <EyeOff v-else-if="accessCodeVisible" :size="15" />
                     <Eye v-else :size="15" />
                   </button>
                 </div>
@@ -2855,18 +3645,21 @@ function filamentColor(value: unknown) {
       </section>
 
       <section v-else class="view">
-        <div class="toolbar">
-          <button class="primary" type="button" @click="withLoading(loadDebug)">
-            <RefreshCw :size="17" />
-            {{ t("debug.refresh") }}
-          </button>
-          <button class="secondary" type="button" @click="downloadSupportBundle">
-            <Download :size="17" />
-            {{ t("debug.supportBundle") }}
-          </button>
-        </div>
         <section class="panel">
-          <div class="panel-header"><h3>{{ t("debug.systemInfo") }}</h3><Database :size="18" /></div>
+          <div class="panel-header">
+            <h3>{{ t("debug.systemInfo") }}</h3>
+            <div class="widget-tools">
+              <button v-if="experimentalFeatures.notifications" class="secondary" type="button" @click="switchView('notifications')">
+                <Bell :size="17" />
+                {{ t("nav.notifications") }}
+              </button>
+              <button class="secondary" type="button" @click="downloadSupportBundle">
+                <Download :size="17" />
+                {{ t("debug.supportBundle") }}
+              </button>
+              <Database :size="18" />
+            </div>
+          </div>
           <div class="network-info-grid">
             <div class="network-info-item"><span>{{ t("debug.appVersion") }}</span><strong>{{ systemInfo?.app_version || "--" }}</strong></div>
             <div class="network-info-item"><span>{{ t("debug.uptime") }}</span><strong>{{ formatDurationSeconds(systemInfo?.uptime_seconds) }}</strong></div>
@@ -2878,10 +3671,42 @@ function filamentColor(value: unknown) {
             <div class="network-info-item"><span>{{ t("debug.onlinePrinters") }}</span><strong>{{ systemInfo?.online_printers || 0 }}</strong></div>
           </div>
         </section>
-        <div class="grid two wide">
-          <section class="panel">
+        <section class="panel experimental-panel">
+          <div class="panel-header"><h3>{{ t("debug.experimentalFeatures") }}</h3><ShieldAlert :size="18" /></div>
+          <p class="panel-subtitle experimental-note">{{ t("debug.experimentalHint") }}</p>
+          <div class="experimental-feature-grid">
+            <label v-for="item in experimentalFeatureItems" :key="item.key" class="experimental-toggle-row">
+              <span class="experimental-toggle-copy">
+                <strong>{{ item.label }}</strong>
+                <span>{{ item.description }}</span>
+              </span>
+              <input v-model="experimentalFeatures[item.key]" type="checkbox" />
+              <span class="app-switch" :class="{ on: experimentalFeatures[item.key] }" aria-hidden="true"><i></i></span>
+              <em>{{ experimentalFeatures[item.key] ? t("common.on") : t("common.off") }}</em>
+            </label>
+          </div>
+        </section>
+        <section class="panel export-panel">
+          <div class="panel-header"><h3>{{ t("export.title") }}</h3><FileDown :size="18" /></div>
+          <div class="export-controls">
+            <AppSelect v-model="exportOptions.type" :options="[{ label: 'JSON', value: 'json' }, { label: 'CSV ZIP', value: 'csv' }]" />
+            <button class="primary" type="button" @click="downloadExport"><Download :size="17" />{{ t("export.download") }}</button>
+          </div>
+          <div class="export-section-grid">
+            <label v-for="section in exportSectionItems" :key="section.key" class="checkbox export-section">
+              <input
+                type="checkbox"
+                :checked="exportOptions.sections.includes(section.key)"
+                @change="toggleExportSection(section.key, checkboxChecked($event))"
+              />
+              {{ section.label }}
+            </label>
+          </div>
+        </section>
+        <div class="grid two wide debug-grid">
+          <section class="panel debug-card">
             <div class="panel-header"><h3>{{ t("debug.events") }}</h3><Activity :size="18" /></div>
-            <div class="table-wrap">
+            <div class="table-wrap debug-scroll">
               <table>
                 <thead><tr><th>{{ t("table.time") }}</th><th>{{ t("table.type") }}</th><th>{{ t("table.severity") }}</th><th>{{ t("table.message") }}</th></tr></thead>
                 <tbody>
@@ -2895,9 +3720,9 @@ function filamentColor(value: unknown) {
               </table>
             </div>
           </section>
-          <section class="panel">
+          <section class="panel debug-card">
             <div class="panel-header"><h3>{{ t("debug.rawMqtt") }}</h3><Database :size="18" /></div>
-            <pre class="json-block">{{ JSON.stringify(rawMqtt, null, 2) }}</pre>
+            <pre class="json-block debug-scroll">{{ JSON.stringify(rawMqtt, null, 2) }}</pre>
           </section>
         </div>
       </section>
@@ -2916,6 +3741,9 @@ function filamentColor(value: unknown) {
           <dt>{{ t("table.module") }}</dt><dd>{{ formatCell(selectedHms.module_name) }}</dd>
           <dt>{{ t("hms.known") }}</dt><dd>{{ selectedHms.known === false ? t("common.off") : t("common.on") }}</dd>
           <dt>{{ t("hms.actionable") }}</dt><dd>{{ selectedHms.actionable === false ? t("common.off") : t("common.on") }}</dd>
+          <dt>{{ t("hms.recentCount") }}</dt><dd>{{ selectedHmsStats?.recent_count ?? "--" }}</dd>
+          <dt>{{ t("hms.lastRecovered") }}</dt><dd>{{ formatCell(selectedHmsStats?.last_recovered_at) }}</dd>
+          <dt>{{ t("hms.highFrequency") }}</dt><dd>{{ selectedHmsStats?.high_frequency ? t("common.on") : t("common.off") }}</dd>
           <dt>attr / code / source</dt><dd class="mono">{{ formatCell(selectedHms.attr) }} / {{ formatCell(selectedHms.code) }} / {{ formatCell(selectedHms.source) }}</dd>
           <dt>Wiki</dt><dd><a v-if="selectedHms.wiki_url" :href="selectedHms.wiki_url" target="_blank" rel="noreferrer">{{ selectedHms.wiki_url }}</a><span v-else>--</span></dd>
         </dl>
@@ -2923,22 +3751,64 @@ function filamentColor(value: unknown) {
     </div>
 
     <div v-if="selectedSlot" class="modal-backdrop" @click.self="selectedSlot = null">
-      <section class="modal-panel wide-modal">
+      <section class="modal-panel wide-modal slot-detail-modal">
         <div class="modal-header">
-          <h3>{{ t("ams.slotDetails") }} · AMS {{ selectedSlot.ams_id }} / {{ slotDisplayLabel(selectedSlot) }}</h3>
+          <div class="modal-title-stack">
+            <h3>{{ t("ams.slotDetails") }}</h3>
+            <p>AMS {{ selectedSlot.ams_id }} / {{ slotDisplayLabel(selectedSlot) }}</p>
+          </div>
           <button class="icon-button" type="button" :title="t('common.close')" @click="selectedSlot = null"><X :size="17" /></button>
         </div>
-        <div class="slot-change-grid">
-          <section v-for="kind in slotChangeKinds" :key="kind" class="slot-change-card">
-            <h4>{{ t(`ams.change.${kind}`) }}</h4>
-            <div v-if="!slotHistoryChanges(kind).length" class="empty">{{ t("common.empty") }}</div>
-            <div v-for="change in slotHistoryChanges(kind)" :key="`${kind}-${change.time}`" class="slot-change-row">
-              <span>{{ formatCell(change.time) }}</span>
-              <strong>{{ change.before }} → {{ change.after }}</strong>
+
+        <div class="slot-detail-hero">
+          <div class="slot-detail-spool">
+            <div class="ams-spool" :style="{ '--filament-color': filamentColor(selectedSlot.color || selectedSlot.tray_color) }"><i></i></div>
+            <div>
+              <span>{{ t("table.material") }}</span>
+              <strong>{{ softCell(selectedSlot.material) }}</strong>
+              <small>{{ softCell(selectedSlot.color || selectedSlot.tray_color) }}</small>
             </div>
-          </section>
+          </div>
+          <div class="slot-detail-facts">
+            <div><span>{{ t("table.state") }}</span><strong>{{ displayCell(selectedSlot.state_name || selectedSlot.slot_state) }}</strong></div>
+            <div><span>{{ t("table.remain") }}</span><strong>{{ remainLabel(selectedSlot.remain) }}</strong></div>
+            <div><span>K</span><strong>{{ softCell(selectedSlot.k) }}</strong></div>
+            <div><span>{{ t("ams.caliIdx") }}</span><strong>{{ softCell(selectedSlot.cali_idx) }}</strong></div>
+            <div><span>RFID</span><strong>{{ softCell(selectedSlot.rfid_status_name || selectedSlot.rfid_status || selectedSlot.tray_info_idx) }}</strong></div>
+            <div><span>{{ t("table.spool") }}</span><strong>{{ softCell(selectedSlot.spool_id) }}</strong></div>
+          </div>
         </div>
-        <div class="table-wrap">
+
+        <section class="slot-detail-section">
+          <div class="slot-section-title">
+            <h4>{{ t("ams.changeSummary") }}</h4>
+            <span>{{ t("ams.historySamples") }} {{ selectedSlotHistory.length }}</span>
+          </div>
+          <div class="slot-change-grid">
+            <section v-for="kind in slotChangeKinds" :key="kind" class="slot-change-card">
+              <div class="slot-change-card-head">
+                <h4>{{ t(`ams.change.${kind}`) }}</h4>
+                <span>{{ slotHistoryChanges(kind).length }}</span>
+              </div>
+              <div v-if="!slotHistoryChanges(kind).length" class="slot-empty-state">{{ t("ams.noChanges") }}</div>
+              <div v-for="change in slotHistoryChanges(kind)" :key="`${kind}-${change.time}`" class="slot-change-row">
+                <time>{{ formatCell(change.time) }}</time>
+                <div class="slot-change-flow">
+                  <span>{{ change.before }}</span>
+                  <i>→</i>
+                  <strong>{{ change.after }}</strong>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="slot-detail-section">
+          <div class="slot-section-title">
+            <h4>{{ t("ams.historySamples") }}</h4>
+            <span>{{ selectedSlotHistory.length }}</span>
+          </div>
+          <div class="table-wrap slot-history-table">
           <table>
             <thead><tr><th>{{ t("table.time") }}</th><th>{{ t("table.state") }}</th><th>{{ t("table.material") }}</th><th>{{ t("form.color") }}</th><th>{{ t("table.remain") }}</th><th>K</th><th>{{ t("ams.caliIdx") }}</th><th>RFID</th></tr></thead>
             <tbody>
@@ -2955,48 +3825,12 @@ function filamentColor(value: unknown) {
               </tr>
             </tbody>
           </table>
-        </div>
-      </section>
-    </div>
-
-    <div v-if="selectedPrinterDetails" class="modal-backdrop" @click.self="selectedPrinterDetails = null">
-      <section class="modal-panel wide-modal">
-        <div class="modal-header">
-          <h3>{{ t("overview.details") }} · {{ selectedPrinterDetails.printer?.name }}</h3>
-          <button class="icon-button" type="button" :title="t('common.close')" @click="selectedPrinterDetails = null"><X :size="17" /></button>
-        </div>
-        <div class="grid two">
-          <dl class="kv">
-            <dt>{{ t("table.host") }}</dt><dd>{{ selectedPrinterDetails.printer?.host }}</dd>
-            <dt>{{ t("table.serial") }}</dt><dd>{{ maskSerial(selectedPrinterDetails.printer?.serial) }}</dd>
-            <dt>{{ t("table.status") }}</dt><dd>{{ displayCell(selectedPrinterDetails.printer?.connection_status) }}</dd>
-            <dt>{{ t("overview.lastSync") }}</dt><dd>{{ formatCell(selectedPrinterDetails.printer?.last_sync_at) }}</dd>
-          </dl>
-          <dl class="kv">
-            <dt>{{ t("fields.firmware") }}</dt><dd>{{ formatCell(record(selectedPrinterDetails.device_snapshot?.firmware).printer_version) }}</dd>
-            <dt>{{ t("dashboard.nozzle") }}</dt><dd>{{ formatCell(record(selectedPrinterDetails.device_snapshot?.nozzles).current_nozzle_id) }}</dd>
-            <dt>{{ t("dashboard.cameraDetection") }}</dt><dd>{{ entries(record(selectedPrinterDetails.device_snapshot?.camera_options)).length }}</dd>
-            <dt>{{ t("dashboard.dataCoverage") }}</dt><dd>{{ entries(record(selectedPrinterDetails.device_snapshot?.data_coverage)).filter(([, value]) => record(value).received).length }}</dd>
-          </dl>
-        </div>
-        <details>
-          <summary>{{ t("hms.recent") }}</summary>
-          <div class="table-wrap">
-            <table>
-              <tbody>
-                <tr v-for="item in arrayOfRecord(selectedPrinterDetails.device_snapshot?.hms_errors).slice(0, 6)" :key="`${item.short_code}-${item.active}`">
-                  <td class="mono">{{ formatCell(item.short_code) }}</td>
-                  <td>{{ hmsMessage(item) }}</td>
-                  <td>{{ item.active ? t("common.unresolved") : t("common.resolved") }}</td>
-                </tr>
-              </tbody>
-            </table>
           </div>
-        </details>
+        </section>
       </section>
     </div>
 
-    <div v-if="loading" class="loading-mask">
+    <div v-if="loading" class="loading-mask" :title="displayCell('loading')">
       <Loader2 class="spin" :size="24" />
     </div>
   </div>

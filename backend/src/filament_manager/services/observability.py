@@ -5,17 +5,26 @@ import os
 import re
 import resource
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from filament_manager.core.config import get_settings
 from filament_manager.core.security import redact_sensitive
-from filament_manager.db.models import DeviceMetricSample, DeviceStatusSnapshot, Printer, PrinterEvent, RawMqttMessage
+from filament_manager.db.models import (
+    DeviceMetricSample,
+    DeviceStatusSnapshot,
+    NotificationDelivery,
+    Printer,
+    PrinterEvent,
+    PrintLogEntry,
+    RawMqttMessage,
+)
 from filament_manager.services.maintenance import maintenance_due_counts
+from filament_manager.services.notifications import notification_config_summary
 
 APP_STARTED_AT = time.monotonic()
 IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
@@ -67,6 +76,8 @@ def prometheus_metrics(db: Session) -> str:
             )
             lines.append(f"filament_manager_hms_active{labels} {hms_active}")
         lines.append(f"filament_manager_maintenance_due{labels} {due_counts.get(printer.id, 0)}")
+        _append_print_log_metrics(lines, db, printer.id)
+        _append_event_count_metrics(lines, db, printer.id)
 
     for (printer_id, metric), sample in latest_metrics.items():
         value = _number(sample.value_float if sample.value_float is not None else sample.value_text)
@@ -75,6 +86,7 @@ def prometheus_metrics(db: Session) -> str:
         name = _prom_metric_name(metric)
         labels = _labels(printer_id=printer_id)
         lines.append(f"{name}{labels} {value}")
+    _append_notification_metrics(lines, db)
     return "\n".join(lines) + "\n"
 
 
@@ -84,6 +96,15 @@ def support_bundle(db: Session) -> dict[str, Any]:
         db.scalars(select(RawMqttMessage).order_by(RawMqttMessage.id.desc()).limit(20)).all()
     )
     events = list(db.scalars(select(PrinterEvent).order_by(PrinterEvent.id.desc()).limit(50)).all())
+    connection_events = [
+        event for event in events if event.event_type.startswith("printer.connection.")
+    ][:20]
+    mqtt_errors = [
+        event for event in events if event.event_type.startswith("mqtt.") or event.event_type.startswith("printer.command.")
+    ][:20]
+    storage_errors = [
+        event for event in events if event.event_type == "storage.scan_failed"
+    ][:20]
     printer_aliases = {printer.name: f"printer-{index + 1}" for index, printer in enumerate(printers)}
     serial_aliases = {printer.serial: f"serial-{index + 1}" for index, printer in enumerate(printers)}
     host_aliases = {printer.host: f"host-{index + 1}" for index, printer in enumerate(printers)}
@@ -123,10 +144,23 @@ def support_bundle(db: Session) -> dict[str, Any]:
             )
             for row in raw_messages
         ],
+        "recent_connection_events": [
+            _redact_bundle_value(_event_summary(event), printer_aliases=printer_aliases, serial_aliases=serial_aliases, host_aliases=host_aliases)
+            for event in connection_events
+        ],
+        "recent_mqtt_errors": [
+            _redact_bundle_value(_event_summary(event), printer_aliases=printer_aliases, serial_aliases=serial_aliases, host_aliases=host_aliases)
+            for event in mqtt_errors
+        ],
+        "recent_storage_errors": [
+            _redact_bundle_value(_event_summary(event), printer_aliases=printer_aliases, serial_aliases=serial_aliases, host_aliases=host_aliases)
+            for event in storage_errors
+        ],
         "config_summary": _redact_bundle_value(
             {
                 "database_url": get_settings().database_url,
                 "prometheus_enabled": get_settings().prometheus_enabled,
+                "prometheus_bearer_token_configured": bool(get_settings().prometheus_bearer_token),
                 "printer_count": len(printers),
                 "printers": [
                     {
@@ -147,11 +181,81 @@ def support_bundle(db: Session) -> dict[str, Any]:
             serial_aliases=serial_aliases,
             host_aliases=host_aliases,
         ),
+        "notification_summary": _redact_bundle_value(
+            notification_config_summary(db),
+            printer_aliases=printer_aliases,
+            serial_aliases=serial_aliases,
+            host_aliases=host_aliases,
+        ),
+        "experimental_features": {
+            "print_log": {"default_enabled": False},
+            "timelapse": {"default_enabled": False},
+            "maintenance": {"default_enabled": False},
+        },
+        "frontend": {"app_version": "0.1.0", "browser_info_source": "download_client"},
         "privacy": {
-            "redacted": ["access_code", "serial", "ip", "printer_name", "local_paths"],
+            "redacted": ["access_code", "serial", "ip", "printer_name", "local_paths", "webhook_url", "ntfy_token"],
             "excluded": ["full_database", "large_files", "local_test_environment_document"],
         },
     }
+
+
+def _append_print_log_metrics(lines: list[str], db: Session, printer_id: int) -> None:
+    rows = list(db.scalars(select(PrintLogEntry).where(PrintLogEntry.printer_id == printer_id)).all())
+    completed = [row for row in rows if row.status in {"succeeded", "failed", "cancelled"}]
+    for status in ("succeeded", "failed", "cancelled"):
+        labels = _labels(printer_id=printer_id, status=status)
+        count = sum(1 for row in rows if row.status == status)
+        lines.append(f"filament_manager_print_total{labels} {count}")
+    success_count = sum(1 for row in completed if row.status == "succeeded")
+    success_rate = (success_count / len(completed)) if completed else 0.0
+    lines.append(f"filament_manager_print_success_rate{_labels(printer_id=printer_id)} {success_rate}")
+    durations = [row.duration_seconds or 0 for row in completed if row.duration_seconds is not None]
+    average = (sum(durations) / len(durations)) if durations else 0.0
+    lines.append(f"filament_manager_print_average_duration_seconds{_labels(printer_id=printer_id)} {average}")
+
+
+def _append_event_count_metrics(lines: list[str], db: Session, printer_id: int) -> None:
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    hms_24h = db.scalar(
+        select(func.count())
+        .select_from(PrinterEvent)
+        .where(
+            PrinterEvent.printer_id == printer_id,
+            PrinterEvent.event_type == "hms.error",
+            PrinterEvent.created_at >= cutoff,
+        )
+    )
+    lines.append(f"filament_manager_hms_recent_24h_total{_labels(printer_id=printer_id)} {int(hms_24h or 0)}")
+    for event_type, metric_name in (
+        ("printer.connection.disconnected", "filament_manager_connection_state_changes_total"),
+        ("printer.connection.restored", "filament_manager_connection_state_changes_total"),
+        ("storage.scan", "filament_manager_storage_scan_total"),
+        ("storage.scan_failed", "filament_manager_storage_scan_total"),
+    ):
+        count = int(
+            db.scalar(
+                select(func.count())
+                .select_from(PrinterEvent)
+                .where(PrinterEvent.printer_id == printer_id, PrinterEvent.event_type == event_type)
+            )
+            or 0
+        )
+        status_label = "failed" if event_type.endswith("failed") or event_type.endswith("disconnected") else "succeeded"
+        lines.append(f"{metric_name}{_labels(printer_id=printer_id, event_type=event_type, status=status_label)} {count}")
+
+
+def _append_notification_metrics(lines: list[str], db: Session) -> None:
+    for status in ("sent", "failed", "suppressed", "skipped", "delayed"):
+        count = int(
+            db.scalar(
+                select(func.count())
+                .select_from(NotificationDelivery)
+                .where(NotificationDelivery.status == status)
+            )
+            or 0
+        )
+        lines.append(f"filament_manager_notification_delivery_total{_labels(status=status)} {count}")
 
 
 def _latest_metrics(db: Session) -> dict[tuple[int, str], DeviceMetricSample]:
@@ -240,6 +344,18 @@ def _payload_summary(payload: Any) -> dict[str, Any]:
         "mc_percent": print_section.get("mc_percent"),
         "has_ams": isinstance(print_section.get("ams"), dict),
         "hms_count": len(print_section.get("hms")) if isinstance(print_section.get("hms"), list) else 0,
+    }
+
+
+def _event_summary(event: PrinterEvent) -> dict[str, Any]:
+    return {
+        "id": event.id,
+        "printer_id": event.printer_id,
+        "event_type": event.event_type,
+        "severity": event.severity,
+        "message": event.message,
+        "data": event.data,
+        "created_at": event.created_at.isoformat(),
     }
 
 

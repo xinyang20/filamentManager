@@ -6,14 +6,15 @@ import socket
 import ssl
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Iterator
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from filament_manager.db.models import Printer, PrinterEvent, PrinterStorageFile, utc_now
+from filament_manager.services.notifications import dispatch_event_notifications
 
-DEFAULT_STORAGE_DIRS = ("/", "/cache", "/model", "/timelapse", "/timelapse/video", "/record", "/recording")
+DEFAULT_STORAGE_DIRS = ("/timelapse", "/timelapse/video")
 FTPS_USERNAME = "bblp"
 FTPS_PORT = 990
 FTPS_TIMEOUT = 8
@@ -56,10 +57,21 @@ class ImplicitFTP_TLS(ftplib.FTP_TLS):
         )
         self.af = self.sock.family
         context = self.context or ssl.create_default_context()
+        self.context = context
         self.sock = context.wrap_socket(self.sock, server_hostname=self.host)
         self.file = self.sock.makefile("r", encoding=self.encoding)
         self.welcome = self.getresp()
         return self.welcome
+
+    def ntransfercmd(self, cmd: str, rest: str | None = None) -> tuple[socket.socket, int | None]:
+        conn, size = ftplib.FTP.ntransfercmd(self, cmd, rest)
+        if self._prot_p:
+            wrap_kwargs: dict[str, Any] = {"server_hostname": self.host}
+            control_session = getattr(self.sock, "session", None)
+            if control_session is not None:
+                wrap_kwargs["session"] = control_session
+            conn = self.context.wrap_socket(conn, **wrap_kwargs)
+        return conn, size
 
 
 def scan_printer_storage(
@@ -84,6 +96,8 @@ def scan_printer_storage(
     new_count = 0
     existing_count = 0
     for record in records:
+        if not is_timelapse_storage_record(record):
+            continue
         model = db.scalars(
             select(PrinterStorageFile).where(
                 PrinterStorageFile.printer_id == printer.id,
@@ -127,14 +141,7 @@ def scan_printer_storage(
 
 
 def _list_storage_files(printer: Printer, directories: tuple[str, ...]) -> list[dict[str, Any]]:
-    context = ssl.create_default_context()
-    if not printer.certificate_verify:
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
-    with ImplicitFTP_TLS(context=context, timeout=FTPS_TIMEOUT) as ftp:
-        ftp.connect(printer.host, FTPS_PORT)
-        ftp.login(FTPS_USERNAME, printer.access_code)
-        ftp.prot_p()
+    with _connect_storage_ftp(printer) as ftp:
         records: list[dict[str, Any]] = []
         seen: set[str] = set()
         for directory in directories:
@@ -145,6 +152,49 @@ def _list_storage_files(printer: Printer, directories: tuple[str, ...]) -> list[
                 seen.add(path)
                 records.append(record)
         return records
+
+
+def stream_printer_storage_file(
+    printer: Printer,
+    path: str,
+    *,
+    start: int | None = None,
+    end: int | None = None,
+    chunk_size: int = 1024 * 256,
+) -> Iterator[bytes]:
+    if "\r" in path or "\n" in path:
+        raise ValueError("Invalid storage path")
+    offset = max(0, start or 0)
+    remaining = None if end is None else max(0, end - offset + 1)
+    with _connect_storage_ftp(printer) as ftp:
+        ftp.voidcmd("TYPE I")
+        conn = ftp.transfercmd(f"RETR {path}", rest=offset if offset else None)
+        try:
+            while True:
+                if remaining is not None and remaining <= 0:
+                    break
+                read_size = chunk_size if remaining is None else min(chunk_size, remaining)
+                chunk = conn.recv(read_size)
+                if not chunk:
+                    break
+                if remaining is not None:
+                    remaining -= len(chunk)
+                yield chunk
+        finally:
+            conn.close()
+        ftp.voidresp()
+
+
+def _connect_storage_ftp(printer: Printer) -> ImplicitFTP_TLS:
+    context = ssl.create_default_context()
+    if not printer.certificate_verify:
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    ftp = ImplicitFTP_TLS(context=context, timeout=FTPS_TIMEOUT)
+    ftp.connect(printer.host, FTPS_PORT)
+    ftp.login(FTPS_USERNAME, printer.access_code)
+    ftp.prot_p()
+    return ftp
 
 
 def _list_directory(ftp: ftplib.FTP, directory: str) -> list[dict[str, Any]]:
@@ -206,15 +256,16 @@ def _record_storage_event(
     severity: str,
     data: dict[str, Any] | None = None,
 ) -> None:
-    db.add(
-        PrinterEvent(
-            printer_id=printer_id,
-            event_type="storage.scan" if severity == "info" else "storage.scan_failed",
-            severity=severity,
-            message=message,
-            data=data,
-        )
+    event = PrinterEvent(
+        printer_id=printer_id,
+        event_type="storage.scan" if severity == "info" else "storage.scan_failed",
+        severity=severity,
+        message=message,
+        data=data,
     )
+    db.add(event)
+    db.flush()
+    dispatch_event_notifications(db, event)
 
 
 def _normalize_dir(value: str) -> str:
@@ -239,6 +290,19 @@ def _file_type(name: str, path: str | None = None) -> str:
     if lower.endswith((".log", ".txt")):
         return "log"
     return "other"
+
+
+def is_timelapse_storage_record(record: dict[str, Any]) -> bool:
+    return _is_timelapse_path(record.get("path")) or str(record.get("type") or "").lower() == "timelapse"
+
+
+def is_timelapse_storage_file(file: PrinterStorageFile) -> bool:
+    return _is_timelapse_path(file.path) or str(file.type or "").lower() == "timelapse"
+
+
+def _is_timelapse_path(value: Any) -> bool:
+    path = str(value or "").lower()
+    return path == "/timelapse" or path.startswith("/timelapse/")
 
 
 def _parse_modified_at(value: Any) -> datetime | None:

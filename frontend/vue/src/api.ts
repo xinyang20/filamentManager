@@ -39,24 +39,43 @@ export function formatUnit(value: unknown): string {
 }
 
 function formatDateTime(value: string): string | null {
+  const parsed = parseApiDateTime(value);
+  if (parsed) return formatDate(parsed);
+  return null;
+}
+
+export function parseApiDateTime(value: string): Date | null {
   const match = ISO_DATE_TIME_RE.exec(value);
   if (!match) return null;
   const [, year, month, day, hour, minute, second = "00", timezone] = match;
-  if (timezone) {
-    const parsed = new Date(`${year}-${month}-${day}T${hour}:${minute}:${second}${timezone}`);
-    if (!Number.isNaN(parsed.getTime())) return formatDate(parsed);
-  }
-  return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
+  const zone = timezone || "Z";
+  const parsed = new Date(`${year}-${month}-${day}T${hour}:${minute}:${second}${zone}`);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
 function formatDate(value: Date): string {
-  const year = value.getFullYear();
-  const month = String(value.getMonth() + 1).padStart(2, "0");
-  const day = String(value.getDate()).padStart(2, "0");
-  const hour = String(value.getHours()).padStart(2, "0");
-  const minute = String(value.getMinutes()).padStart(2, "0");
-  const second = String(value.getSeconds()).padStart(2, "0");
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: localTimeZone(),
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(value);
+  const part = (type: string) => parts.find((item) => item.type === type)?.value || "00";
+  const year = part("year");
+  const month = part("month");
+  const day = part("day");
+  const hour = part("hour");
+  const minute = part("minute");
+  const second = part("second");
   return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
+}
+
+export function localTimeZone(): string {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 }
 
 export function numeric(value: unknown): number | null {

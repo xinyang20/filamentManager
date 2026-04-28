@@ -34,6 +34,7 @@ from filament_manager.services.device_status import (
 )
 from filament_manager.services.ams import record_ams_slot_history_sample
 from filament_manager.services.metrics import record_metric_samples_from_push_status
+from filament_manager.services.notifications import dispatch_event_notifications
 from filament_manager.services.print_log import upsert_print_log_from_snapshot
 
 
@@ -65,6 +66,7 @@ def emit_printer_event(
     )
     db.add(event)
     db.flush()
+    dispatch_event_notifications(db, event)
     return event
 
 
@@ -105,6 +107,7 @@ def _upsert_state_snapshot(
         select(PrinterStateSnapshot).where(PrinterStateSnapshot.printer_id == printer.id)
     ).first()
     previous_state = snapshot.gcode_state if snapshot else None
+    previous_connection_status = printer.connection_status
 
     values = {
         "gcode_state": current_state,
@@ -133,6 +136,16 @@ def _upsert_state_snapshot(
     printer.last_error = None
     db.add(printer)
     db.flush()
+
+    if previous_connection_status not in {"connected", "connecting"}:
+        emit_printer_event(
+            db,
+            printer_id=printer.id,
+            event_type="printer.connection.restored",
+            severity="info",
+            message="Printer telemetry connection restored",
+            data={"previous_status": previous_connection_status, "current_status": "connected"},
+        )
 
     transition = classify_transition(
         previous_state,
@@ -452,9 +465,7 @@ def _record_command_event(
     payload: dict[str, Any],
 ) -> None:
     command_section = _command_section(payload, command)
-    severity = "info"
-    if str(command_section.get("result") or "").upper() == "FAIL":
-        severity = "error"
+    severity = _command_event_severity(command, command_section)
     emit_printer_event(
         db,
         printer_id=printer_id,
@@ -468,6 +479,8 @@ def _record_command_event(
             "result": command_section.get("result"),
             "reason": command_section.get("reason"),
             "err_code": command_section.get("err_code"),
+            "led_node": command_section.get("led_node"),
+            "led_mode": command_section.get("led_mode"),
         },
     )
 
@@ -548,3 +561,20 @@ def _command_section(payload: dict[str, Any], command: str) -> dict[str, Any]:
         if isinstance(section, dict) and str(section.get("command")) == command:
             return section
     return {}
+
+
+def _command_event_severity(command: str, command_section: dict[str, Any]) -> str:
+    result = str(command_section.get("result") or "").upper()
+    if result != "FAIL":
+        return "info"
+    if _is_benign_ledctrl_failure(command, command_section):
+        return "info"
+    return "error"
+
+
+def _is_benign_ledctrl_failure(command: str, command_section: dict[str, Any]) -> bool:
+    if command != "ledctrl":
+        return False
+    reason = str(command_section.get("reason") or "").strip().lower()
+    led_node = str(command_section.get("led_node") or "").strip()
+    return bool(led_node) and reason == f"did not find the valid led: {led_node}".lower()

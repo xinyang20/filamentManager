@@ -50,6 +50,10 @@ class PrinterRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class PrinterAccessCodeRead(BaseModel):
+    access_code: str
+
+
 class PrinterStateRead(BaseModel):
     id: int
     printer_id: int
@@ -364,7 +368,37 @@ class PrintLogSummaryRead(BaseModel):
     failed: int
     cancelled: int
     total_duration_seconds: int
+    average_duration_seconds: float | None = None
+    longest_duration_seconds: int | None = None
+    success_rate: float = 0.0
+    failure_rate: float = 0.0
+    cancelled_rate: float = 0.0
     by_printer: list[dict[str, Any]] = Field(default_factory=list)
+    by_date: list[dict[str, Any]] = Field(default_factory=list)
+    by_failure_reason: list[dict[str, Any]] = Field(default_factory=list)
+    by_hms: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class PrintLogAnalyticsRead(BaseModel):
+    from_: datetime | None = Field(default=None, alias="from")
+    to: datetime | None = None
+    printer_id: int | None = None
+    bucket: str
+    total: int
+    running: int
+    succeeded: int
+    failed: int
+    cancelled: int
+    success_rate: float
+    failure_rate: float
+    cancelled_rate: float
+    total_duration_seconds: int
+    average_duration_seconds: float | None = None
+    longest_duration_seconds: int | None = None
+    by_printer: list[dict[str, Any]] = Field(default_factory=list)
+    by_date: list[dict[str, Any]] = Field(default_factory=list)
+    by_failure_reason: list[dict[str, Any]] = Field(default_factory=list)
+    by_hms: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class MaintenanceTypeRead(BaseModel):
@@ -385,6 +419,8 @@ class PrinterMaintenanceRead(BaseModel):
     id: int
     printer_id: int
     printer_name: str | None = None
+    target_type: str = "printer"
+    target_label: str | None = None
     maintenance_type: MaintenanceTypeRead
     enabled: bool
     custom_interval: float | None
@@ -450,7 +486,13 @@ class SupportBundleRead(BaseModel):
     system: SystemInfoRead
     recent_events: list[dict[str, Any]]
     recent_mqtt: list[dict[str, Any]]
+    recent_connection_events: list[dict[str, Any]] = Field(default_factory=list)
+    recent_mqtt_errors: list[dict[str, Any]] = Field(default_factory=list)
+    recent_storage_errors: list[dict[str, Any]] = Field(default_factory=list)
     config_summary: dict[str, Any]
+    notification_summary: dict[str, Any] = Field(default_factory=dict)
+    experimental_features: dict[str, Any] = Field(default_factory=dict)
+    frontend: dict[str, Any] = Field(default_factory=dict)
     privacy: dict[str, Any]
 
 
@@ -465,6 +507,20 @@ class HmsCodeInfoRead(BaseModel):
     wiki_url: str | None = None
     known: bool = True
     actionable: bool = True
+
+
+class HmsCodeStatsRead(BaseModel):
+    short_code: str
+    printer_id: int | None = None
+    days: int
+    recent_count: int
+    active_count: int
+    recovered_count: int
+    affected_printers: list[int] = Field(default_factory=list)
+    last_seen_at: datetime | None = None
+    last_recovered_at: datetime | None = None
+    high_frequency: bool = False
+    recent_events: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class DeviceStatusSnapshotRead(BaseModel):
@@ -550,6 +606,7 @@ class StorageSummaryRead(BaseModel):
     file_count: int
     total_size: int
     by_type: dict[str, int]
+    storage_usage: dict[str, Any] = Field(default_factory=dict)
     recent_files: list[PrinterStorageFileRead] = Field(default_factory=list)
     timelapse_files: list[PrinterStorageFileRead] = Field(default_factory=list)
     last_scan_event: UnifiedEventRead | None = None
@@ -564,6 +621,117 @@ class StorageScanResultRead(BaseModel):
     existing_count: int = 0
     failed_count: int = 0
     files: list[PrinterStorageFileRead] = Field(default_factory=list)
+
+
+class TimelapseNoteRead(BaseModel):
+    id: int
+    printer_id: int
+    path: str
+    favorite: bool
+    note: str | None
+    cached_metadata: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TimelapseNoteUpdate(BaseModel):
+    path: str = Field(min_length=1)
+    favorite: bool | None = None
+    note: str | None = Field(default=None, max_length=4000)
+    cached_metadata: dict[str, Any] | None = None
+
+
+class NotificationTargetCreate(BaseModel):
+    channel: str = Field(pattern="^(webhook|ntfy)$")
+    name: str = Field(min_length=1, max_length=120)
+    enabled: bool = True
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+class NotificationTargetUpdate(BaseModel):
+    channel: str | None = Field(default=None, pattern="^(webhook|ntfy)$")
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    enabled: bool | None = None
+    config: dict[str, Any] | None = None
+
+
+class NotificationTargetRead(BaseModel):
+    id: int
+    channel: str
+    name: str
+    enabled: bool
+    config: dict[str, Any]
+    display_config: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class NotificationRuleCreate(BaseModel):
+    name: str = Field(default="Notification rule", min_length=1, max_length=120)
+    enabled: bool = True
+    event_types: list[str] = Field(default_factory=list)
+    printer_ids: list[int] = Field(default_factory=list)
+    severities: list[str] = Field(default_factory=list)
+    quiet_policy: dict[str, Any] = Field(default_factory=dict)
+
+
+class NotificationRuleUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    enabled: bool | None = None
+    event_types: list[str] | None = None
+    printer_ids: list[int] | None = None
+    severities: list[str] | None = None
+    quiet_policy: dict[str, Any] | None = None
+
+
+class NotificationRuleRead(BaseModel):
+    id: int
+    name: str
+    enabled: bool
+    event_types: list[str]
+    printer_ids: list[int]
+    severities: list[str]
+    quiet_policy: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class NotificationDeliveryRead(BaseModel):
+    id: int
+    target_id: int | None
+    rule_id: int | None
+    event_id: int | None
+    printer_id: int | None
+    event_type: str
+    status: str
+    error_summary: str | None
+    response_status: int | None
+    sent_at: datetime | None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class DeviceCapabilitiesRead(BaseModel):
+    model_family: str
+    model_hint: str | None = None
+    known: bool
+    supports_ams: bool | None = None
+    supports_ams_ht: bool | None = None
+    supports_chamber_temperature: bool | None = None
+    supports_aux_fan: bool | None = None
+    supports_camera_fields: bool | None = None
+    has_carbon_rods: bool | None = None
+    xy_motion: str | None = None
+    recommended_maintenance: list[str] = Field(default_factory=list)
+    visible_fields: list[str] = Field(default_factory=list)
+    evidence: dict[str, Any] = Field(default_factory=dict)
 
 
 class MqttPayloadIn(BaseModel):

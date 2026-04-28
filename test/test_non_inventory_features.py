@@ -126,6 +126,25 @@ def test_print_log_lifecycle_and_maintenance_perform(api_client, printer_payload
     assert history[0]["note"] == "cleaned"
 
 
+def test_maintenance_mapping_uses_p2s_motion_parts_and_separate_ams_object(api_client, printer_payload) -> None:
+    payload = {**printer_payload, "name": "Workshop P2S"}
+    printer_id = _create_printer(api_client, payload)
+
+    maintenance = api_client.get(f"/api/printers/{printer_id}/maintenance").json()
+    codes = {item["maintenance_type"]["code"] for item in maintenance}
+    assert "carbon_rod_cleaning" not in codes
+    assert "x_axis_smooth_rod_cleaning" in codes
+    assert "ams_cleaning" not in codes
+
+    _ingest(api_client, printer_id, _push_status())
+    maintenance = api_client.get(f"/api/printers/{printer_id}/maintenance").json()
+    by_code = {item["maintenance_type"]["code"]: item for item in maintenance}
+    assert "carbon_rod_cleaning" not in by_code
+    assert by_code["x_axis_smooth_rod_cleaning"]["maintenance_type"]["name"] == "X 轴光轴清洁"
+    assert by_code["ams_cleaning"]["target_type"] == "ams"
+    assert "AMS" in by_code["ams_cleaning"]["target_label"]
+
+
 def test_system_info_support_bundle_and_prometheus_default(api_client, printer_payload) -> None:
     printer_id = _create_printer(api_client, printer_payload)
     _ingest(api_client, printer_id, _push_status())
@@ -144,3 +163,86 @@ def test_system_info_support_bundle_and_prometheus_default(api_client, printer_p
 
     metrics = api_client.get("/api/metrics/prometheus")
     assert metrics.status_code == 404
+
+
+def test_notification_rules_dispatch_locally_without_printer_commands(api_client, printer_payload) -> None:
+    printer_id = _create_printer(api_client, printer_payload)
+    target = api_client.post(
+        "/api/notifications/targets",
+        json={
+            "channel": "webhook",
+            "name": "Local mock",
+            "enabled": True,
+            "config": {"url": "mock://notification-target", "token": "secret-token-1234"},
+        },
+    )
+    assert target.status_code == 201, target.text
+    assert "secret-token-1234" not in target.text
+
+    rule = api_client.post(
+        "/api/notifications/rules",
+        json={
+            "name": "HMS rule",
+            "enabled": True,
+            "event_types": ["hms.error"],
+            "printer_ids": [printer_id],
+            "severities": ["error", "warning"],
+            "quiet_policy": {"repeat_suppression_minutes": 30},
+        },
+    )
+    assert rule.status_code == 201, rule.text
+
+    payload = _push_status()
+    payload["print"]["hms"] = [{"attr": "0x05000300", "code": "0x8001"}]
+    _ingest(api_client, printer_id, payload)
+
+    deliveries = api_client.get("/api/notifications/deliveries").json()
+    assert deliveries
+    assert deliveries[0]["event_type"] == "hms.error"
+    assert deliveries[0]["status"] == "sent"
+
+    raw = api_client.get("/api/debug/raw-mqtt").json()
+    assert [row["command"] for row in raw] == ["push_status"]
+
+    stats = api_client.get("/api/hms/codes/0500_8001/stats").json()
+    assert stats["recent_count"] >= 1
+    assert printer_id in stats["affected_printers"]
+
+
+def test_print_log_analytics_timelapse_notes_and_export(api_client, printer_payload) -> None:
+    printer_id = _create_printer(api_client, printer_payload)
+    _ingest(api_client, printer_id, _push_status("RUNNING", 10))
+    _ingest(api_client, printer_id, _push_status("FINISH", 100))
+
+    analytics = api_client.get(f"/api/print-log/analytics?printer_id={printer_id}").json()
+    assert analytics["succeeded"] == 1
+    assert analytics["success_rate"] == 1.0
+    assert analytics["by_printer"][0]["printer_id"] == printer_id
+
+    assert api_client.get("/api/projects").status_code == 404
+
+    note = api_client.patch(
+        f"/api/printers/{printer_id}/timelapse/notes",
+        json={"path": "/timelapse/demo.mp4", "favorite": True, "note": "cover ok", "cached_metadata": {"duration": 12}},
+    )
+    assert note.status_code == 200, note.text
+    notes = api_client.get(f"/api/printers/{printer_id}/timelapse/notes").json()
+    assert notes[0]["favorite"] is True
+    assert notes[0]["note"] == "cover ok"
+
+    export = api_client.get("/api/export?type=json&sections=config,print_logs,notifications")
+    assert export.status_code == 200
+    assert printer_payload["access_code"] not in export.text
+    assert printer_payload["host"] not in export.text
+    assert api_client.get("/api/export?type=json&sections=projects").json()["sections"] == []
+
+
+def test_device_capabilities_are_conservative_for_p2s(api_client, printer_payload) -> None:
+    printer_id = _create_printer(api_client, {**printer_payload, "name": "Workshop P2S"})
+
+    capabilities = api_client.get(f"/api/printers/{printer_id}/capabilities")
+    assert capabilities.status_code == 200
+    body = capabilities.json()
+    assert body["model_family"] == "p2"
+    assert body["has_carbon_rods"] is False
+    assert "carbon_rod_cleaning" not in body["recommended_maintenance"]

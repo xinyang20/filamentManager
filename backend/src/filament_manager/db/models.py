@@ -447,6 +447,69 @@ class PrinterEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
 
 
+class NotificationTarget(Base, TimestampMixin):
+    __tablename__ = "notification_targets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel: Mapped[str] = mapped_column(String(40), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    display_config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class NotificationRule(Base, TimestampMixin):
+    __tablename__ = "notification_rules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), default="Notification rule")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    event_types: Mapped[list[str]] = mapped_column(JSON, default=list)
+    printer_ids: Mapped[list[int]] = mapped_column(JSON, default=list)
+    severities: Mapped[list[str]] = mapped_column(JSON, default=list)
+    quiet_policy: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class NotificationDelivery(Base):
+    __tablename__ = "notification_deliveries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    target_id: Mapped[int | None] = mapped_column(
+        ForeignKey("notification_targets.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    rule_id: Mapped[int | None] = mapped_column(
+        ForeignKey("notification_rules.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    event_id: Mapped[int | None] = mapped_column(
+        ForeignKey("printer_events.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    printer_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    event_type: Mapped[str] = mapped_column(String(100), index=True)
+    status: Mapped[str] = mapped_column(String(40), default="pending", index=True)
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    response_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+
+class TimelapseNote(Base, TimestampMixin):
+    __tablename__ = "timelapse_notes"
+    __table_args__ = (UniqueConstraint("printer_id", "path", name="uq_timelapse_note_path"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    printer_id: Mapped[int] = mapped_column(ForeignKey("printers.id", ondelete="CASCADE"), index=True)
+    path: Mapped[str] = mapped_column(Text)
+    favorite: Mapped[bool] = mapped_column(Boolean, default=False)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cached_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
 class InventoryEvent(Base):
     __tablename__ = "inventory_events"
 

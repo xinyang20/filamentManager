@@ -114,6 +114,31 @@ def test_stop_success_then_failed_is_cancelled(api_client, printer_payload, fixt
     assert not any(item["event_type"] == "print.failed" for item in events)
 
 
+def test_ledctrl_unknown_led_node_is_not_error(api_client, printer_payload) -> None:
+    printer_id = _create_printer(api_client, printer_payload)
+
+    _ingest(
+        api_client,
+        printer_id,
+        {
+            "print": {
+                "command": "ledctrl",
+                "sequence_id": "synthetic-led-1",
+                "result": "fail",
+                "led_node": "chamber_light2",
+                "led_mode": "on",
+                "reason": "did not find the valid led: chamber_light2",
+            }
+        },
+    )
+
+    events = api_client.get("/api/debug/events").json()
+    led_events = [item for item in events if item["event_type"] == "printer.command.ledctrl"]
+    assert len(led_events) == 1
+    assert led_events[0]["severity"] == "info"
+    assert led_events[0]["data"]["led_node"] == "chamber_light2"
+
+
 def test_access_code_is_masked_in_api_responses(api_client, printer_payload) -> None:
     printer_id = _create_printer(api_client, printer_payload)
 
@@ -136,3 +161,7 @@ def test_access_code_is_masked_in_api_responses(api_client, printer_payload) -> 
     masked = api_client.patch(f"/api/printers/{printer_id}", json={"access_code": "****9999"})
     assert masked.status_code == 200, masked.text
     assert masked.json()["access_code"] == "****1234"
+
+    revealed = api_client.get(f"/api/printers/{printer_id}/access-code")
+    assert revealed.status_code == 200, revealed.text
+    assert revealed.json()["access_code"] == "new-access-1234"

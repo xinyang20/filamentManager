@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
+from email.utils import format_datetime
+import mimetypes
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
 from fastapi.responses import StreamingResponse
@@ -22,8 +25,12 @@ from filament_manager.db.models import (
     PrinterStorageFile,
     PrinterStateSnapshot,
     PrintLogEntry,
+    NotificationDelivery,
+    NotificationRule,
+    NotificationTarget,
     RawMqttMessage,
     SpoolLocation,
+    TimelapseNote,
 )
 from filament_manager.db.session import get_db
 from filament_manager.mqtt.client import is_certificate_verify_error, mqtt_manager
@@ -40,17 +47,27 @@ from filament_manager.schemas import (
     DeviceMetricSampleRead,
     DiscoveryCandidateRead,
     HmsCodeInfoRead,
+    HmsCodeStatsRead,
     InventoryEventRead,
     MaintenanceHistoryRead,
     MaintenanceOverviewRead,
     MaintenancePerformRequest,
     MqttPayloadIn,
+    NotificationDeliveryRead,
+    NotificationRuleCreate,
+    NotificationRuleRead,
+    NotificationRuleUpdate,
+    NotificationTargetCreate,
+    NotificationTargetRead,
+    NotificationTargetUpdate,
     PrinterMaintenanceRead,
     PrinterMaintenanceUpdate,
+    PrintLogAnalyticsRead,
     PrintLogEntryRead,
     PrintLogListRead,
     PrintLogSummaryRead,
     PrinterCreate,
+    PrinterAccessCodeRead,
     PrinterDashboardRead,
     PrinterEventRead,
     PrinterRead,
@@ -66,13 +83,18 @@ from filament_manager.schemas import (
     StorageScanResultRead,
     SupportBundleRead,
     SystemInfoRead,
+    TimelapseNoteRead,
+    TimelapseNoteUpdate,
     UnifiedEventRead,
+    DeviceCapabilitiesRead,
 )
 from filament_manager.services.ams import build_ams_overview, build_ams_sensor_history, delete_ams_label, set_ams_label
 from filament_manager.services.discovery import scan_lan_devices
+from filament_manager.services.device_capabilities import all_device_capabilities, printer_capabilities
 from filament_manager.services.events import list_unified_events, sse_event_generator
+from filament_manager.services.exporting import export_csv_zip_bytes, export_json_bytes
 from filament_manager.services.fans import fan_percent, normalize_fan_payload
-from filament_manager.services.hms import get_hms_code, list_hms_codes
+from filament_manager.services.hms import get_hms_code, hms_code_stats, list_hms_codes
 from filament_manager.services.inventory import (
     bind_slot_to_spool,
     create_spool,
@@ -90,8 +112,25 @@ from filament_manager.services.maintenance import (
     update_maintenance_item,
 )
 from filament_manager.services.mqtt_processing import process_mqtt_payload
+from filament_manager.services.notifications import (
+    create_rule,
+    create_target,
+    delete_rule,
+    delete_target,
+    list_deliveries,
+    list_rules,
+    list_targets,
+    redact_notification_config,
+    test_target,
+    update_rule,
+    update_target,
+)
+from filament_manager.services.local_records import (
+    list_timelapse_notes,
+    upsert_timelapse_note,
+)
 from filament_manager.services.observability import prometheus_metrics, support_bundle, system_info
-from filament_manager.services.print_log import list_print_logs, print_log_summary
+from filament_manager.services.print_log import list_print_logs, print_log_analytics, print_log_summary
 from filament_manager.services.printers import (
     create_printer,
     delete_printer,
@@ -100,7 +139,11 @@ from filament_manager.services.printers import (
     printer_to_read,
     update_printer,
 )
-from filament_manager.services.storage import scan_printer_storage
+from filament_manager.services.storage import (
+    is_timelapse_storage_file,
+    scan_printer_storage,
+    stream_printer_storage_file,
+)
 
 router = APIRouter()
 
@@ -152,6 +195,12 @@ def api_get_printer(printer_id: int, db: Session = Depends(get_db)) -> PrinterRe
     printer = _printer_or_404(db, printer_id)
     _sync_runtime_connection_status(db, printer)
     return printer_to_read(printer)
+
+
+@router.get("/printers/{printer_id}/access-code", response_model=PrinterAccessCodeRead)
+def api_get_printer_access_code(printer_id: int, db: Session = Depends(get_db)) -> PrinterAccessCodeRead:
+    printer = _printer_or_404(db, printer_id)
+    return PrinterAccessCodeRead(access_code=printer.access_code)
 
 
 @router.patch("/printers/{printer_id}", response_model=PrinterRead)
@@ -378,10 +427,65 @@ def api_get_printer_storage_files(
             .order_by(PrinterStorageFile.path)
         ).all()
     )
+    rows = [row for row in rows if is_timelapse_storage_file(row)]
     return [
         PrinterStorageFileRead.model_validate(row).model_copy(update={"raw": redact_sensitive(row.raw)})
         for row in rows
     ]
+
+
+@router.get("/printers/{printer_id}/storage/files/download")
+def api_download_printer_storage_file(
+    printer_id: int,
+    path: str = Query(..., min_length=1),
+    inline: bool = Query(default=False),
+    range_header: str | None = Header(default=None, alias="Range"),
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    printer = _printer_or_404(db, printer_id)
+    if "\r" in path or "\n" in path:
+        raise HTTPException(status_code=400, detail="Invalid storage path")
+    file = db.scalars(
+        select(PrinterStorageFile).where(
+            PrinterStorageFile.printer_id == printer_id,
+            PrinterStorageFile.path == path,
+        )
+    ).first()
+    if file is None:
+        raise HTTPException(status_code=404, detail="Storage file is not in the latest scanned file list")
+    if not is_timelapse_storage_file(file):
+        raise HTTPException(status_code=403, detail="Only timelapse files can be downloaded")
+    filename = file.name or path.rsplit("/", 1)[-1] or "printer-file"
+    disposition = "inline" if inline and _storage_file_can_inline(file) else "attachment"
+    headers = {
+        "Content-Disposition": f"{disposition}; filename*=UTF-8''{quote(filename)}",
+        "X-Content-Type-Options": "nosniff",
+        "Accept-Ranges": "bytes",
+        **_storage_cache_headers(file),
+    }
+    range_start: int | None = None
+    range_end: int | None = None
+    status_code = status.HTTP_200_OK
+    if range_header and file.size:
+        byte_range = _parse_range_header(range_header, file.size)
+        if byte_range is None:
+            raise HTTPException(
+                status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
+                detail="Invalid range",
+                headers={"Content-Range": f"bytes */{file.size}"},
+            )
+        range_start, range_end = byte_range
+        status_code = status.HTTP_206_PARTIAL_CONTENT
+        headers["Content-Range"] = f"bytes {range_start}-{range_end}/{file.size}"
+        headers["Content-Length"] = str(range_end - range_start + 1)
+    return StreamingResponse(
+        stream_printer_storage_file(printer, path, start=range_start, end=range_end)
+        if range_start is not None
+        else stream_printer_storage_file(printer, path),
+        status_code=status_code,
+        media_type=_storage_media_type(file),
+        headers=headers,
+    )
 
 
 @router.get("/printers/{printer_id}/storage/summary", response_model=StorageSummaryRead)
@@ -397,6 +501,7 @@ def api_get_printer_storage_summary(
             .order_by(PrinterStorageFile.modified_at.desc().nullslast(), PrinterStorageFile.id.desc())
         ).all()
     )
+    rows = [row for row in rows if is_timelapse_storage_file(row)]
     files = [
         PrinterStorageFileRead.model_validate(row).model_copy(update={"raw": redact_sensitive(row.raw)})
         for row in rows
@@ -422,10 +527,36 @@ def api_get_printer_storage_summary(
         file_count=len(rows),
         total_size=sum(row.size or 0 for row in rows),
         by_type=by_type,
+        storage_usage=_storage_usage_summary(db, printer_id),
         recent_files=files[:10],
         timelapse_files=[file for file in files if file.type == "timelapse"][:10],
         last_scan_event=last_scan_event,
         last_scan=last_scan.data if last_scan is not None else None,
+    )
+
+
+@router.get("/printers/{printer_id}/timelapse/notes", response_model=list[TimelapseNoteRead])
+def api_get_timelapse_notes(printer_id: int, db: Session = Depends(get_db)) -> list[TimelapseNote]:
+    _printer_or_404(db, printer_id)
+    return list_timelapse_notes(db, printer_id)
+
+
+@router.patch("/printers/{printer_id}/timelapse/notes", response_model=TimelapseNoteRead)
+def api_update_timelapse_note(
+    printer_id: int,
+    data: TimelapseNoteUpdate,
+    db: Session = Depends(get_db),
+) -> TimelapseNote:
+    _printer_or_404(db, printer_id)
+    return upsert_timelapse_note(
+        db,
+        printer_id=printer_id,
+        path=data.path,
+        favorite=data.favorite,
+        note=data.note,
+        note_set="note" in data.model_fields_set,
+        cached_metadata=data.cached_metadata,
+        cached_metadata_set="cached_metadata" in data.model_fields_set,
     )
 
 
@@ -582,6 +713,19 @@ def api_print_log_summary(
     return print_log_summary(db, date_from=from_, date_to=to)
 
 
+@router.get("/print-log/analytics", response_model=PrintLogAnalyticsRead)
+def api_print_log_analytics(
+    from_: datetime | None = Query(default=None, alias="from"),
+    to: datetime | None = Query(default=None),
+    printer_id: int | None = Query(default=None),
+    bucket: str = Query(default="day", pattern="^(day|week|month)$"),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if printer_id is not None:
+        _printer_or_404(db, printer_id)
+    return print_log_analytics(db, date_from=from_, date_to=to, printer_id=printer_id, bucket=bucket)
+
+
 @router.get("/maintenance/overview", response_model=MaintenanceOverviewRead)
 def api_maintenance_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
     return maintenance_overview(db)
@@ -649,6 +793,29 @@ def api_get_hms_code(short_code: str) -> dict[str, Any]:
     if code is None:
         raise HTTPException(status_code=404, detail="HMS code not found")
     return code
+
+
+@router.get("/hms/codes/{short_code}/stats", response_model=HmsCodeStatsRead)
+def api_get_hms_code_stats(
+    short_code: str,
+    printer_id: int | None = Query(default=None),
+    days: int = Query(default=30, ge=1, le=365),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if printer_id is not None:
+        _printer_or_404(db, printer_id)
+    return hms_code_stats(db, short_code=short_code, printer_id=printer_id, days=days)
+
+
+@router.get("/device-capabilities", response_model=dict[str, DeviceCapabilitiesRead])
+def api_device_capabilities() -> dict[str, dict[str, Any]]:
+    return all_device_capabilities()
+
+
+@router.get("/printers/{printer_id}/capabilities", response_model=DeviceCapabilitiesRead)
+def api_printer_capabilities(printer_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
+    printer = _printer_or_404(db, printer_id)
+    return printer_capabilities(db, printer)
 
 
 @router.get("/events", response_model=list[UnifiedEventRead])
@@ -760,6 +927,105 @@ def api_list_printer_events(limit: int = 100, db: Session = Depends(get_db)) -> 
 @router.get("/debug/inventory-events", response_model=list[InventoryEventRead])
 def api_list_inventory_events(limit: int = 100, db: Session = Depends(get_db)) -> list[InventoryEvent]:
     return list(db.scalars(select(InventoryEvent).order_by(InventoryEvent.id.desc()).limit(limit)).all())
+
+
+@router.get("/notifications/targets", response_model=list[NotificationTargetRead])
+def api_list_notification_targets(db: Session = Depends(get_db)) -> list[NotificationTargetRead]:
+    return [_notification_target_read(row) for row in list_targets(db)]
+
+
+@router.post("/notifications/targets", response_model=NotificationTargetRead, status_code=status.HTTP_201_CREATED)
+def api_create_notification_target(
+    data: NotificationTargetCreate,
+    db: Session = Depends(get_db),
+) -> NotificationTargetRead:
+    return _notification_target_read(create_target(db, channel=data.channel, name=data.name, enabled=data.enabled, config=data.config))
+
+
+@router.patch("/notifications/targets/{target_id}", response_model=NotificationTargetRead)
+def api_update_notification_target(
+    target_id: int,
+    data: NotificationTargetUpdate,
+    db: Session = Depends(get_db),
+) -> NotificationTargetRead:
+    target = _notification_target_or_404(db, target_id)
+    return _notification_target_read(update_target(db, target, **data.model_dump(exclude_unset=True)))
+
+
+@router.delete("/notifications/targets/{target_id}", status_code=status.HTTP_204_NO_CONTENT)
+def api_delete_notification_target(target_id: int, db: Session = Depends(get_db)) -> Response:
+    target = _notification_target_or_404(db, target_id)
+    delete_target(db, target)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/notifications/targets/{target_id}/test", response_model=NotificationDeliveryRead)
+def api_test_notification_target(target_id: int, db: Session = Depends(get_db)) -> NotificationDelivery:
+    target = _notification_target_or_404(db, target_id)
+    return test_target(db, target)
+
+
+@router.get("/notifications/rules", response_model=list[NotificationRuleRead])
+def api_list_notification_rules(db: Session = Depends(get_db)) -> list[NotificationRule]:
+    return list_rules(db)
+
+
+@router.post("/notifications/rules", response_model=NotificationRuleRead, status_code=status.HTTP_201_CREATED)
+def api_create_notification_rule(data: NotificationRuleCreate, db: Session = Depends(get_db)) -> NotificationRule:
+    return create_rule(
+        db,
+        name=data.name,
+        enabled=data.enabled,
+        event_types=data.event_types,
+        printer_ids=data.printer_ids,
+        severities=data.severities,
+        quiet_policy=data.quiet_policy,
+    )
+
+
+@router.patch("/notifications/rules/{rule_id}", response_model=NotificationRuleRead)
+def api_update_notification_rule(
+    rule_id: int,
+    data: NotificationRuleUpdate,
+    db: Session = Depends(get_db),
+) -> NotificationRule:
+    rule = _notification_rule_or_404(db, rule_id)
+    return update_rule(db, rule, **data.model_dump(exclude_unset=True))
+
+
+@router.delete("/notifications/rules/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)
+def api_delete_notification_rule(rule_id: int, db: Session = Depends(get_db)) -> Response:
+    rule = _notification_rule_or_404(db, rule_id)
+    delete_rule(db, rule)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/notifications/deliveries", response_model=list[NotificationDeliveryRead])
+def api_list_notification_deliveries(
+    limit: int = Query(default=100, ge=1, le=1000),
+    db: Session = Depends(get_db),
+) -> list[NotificationDelivery]:
+    return list_deliveries(db, limit=limit)
+
+
+@router.get("/export")
+def api_export(
+    type: str = Query(default="json", pattern="^(json|csv)$"),  # noqa: A002
+    sections: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> Response:
+    section_list = [item.strip() for item in sections.split(",") if item.strip()] if sections else None
+    if type == "csv":
+        return Response(
+            content=export_csv_zip_bytes(db, section_list),
+            media_type="application/zip",
+            headers={"Content-Disposition": "attachment; filename=filament-manager-export.zip"},
+        )
+    return Response(
+        content=export_json_bytes(db, section_list),
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=filament-manager-export.json"},
+    )
 
 
 @router.get("/metrics/prometheus")
@@ -948,6 +1214,188 @@ def _slot_global_tray_id(slot: AmsSlot) -> str:
         return str((int(slot.ams_id) * 4) + int(slot.tray_id))
     except (TypeError, ValueError):
         return f"{slot.ams_id}:{slot.tray_id}"
+
+
+def _storage_media_type(file: PrinterStorageFile) -> str:
+    guessed, _encoding = mimetypes.guess_type(file.name or file.path)
+    if guessed:
+        return guessed
+    if file.type == "log":
+        return "text/plain; charset=utf-8"
+    if file.type in {"gcode", "model"}:
+        return "application/octet-stream"
+    return "application/octet-stream"
+
+
+def _storage_file_can_inline(file: PrinterStorageFile) -> bool:
+    media_type = _storage_media_type(file)
+    return media_type.startswith(("image/", "video/", "text/"))
+
+
+def _storage_cache_headers(file: PrinterStorageFile) -> dict[str, str]:
+    size = file.size or 0
+    modified = file.modified_at
+    stamp = int(modified.timestamp()) if modified else int(file.last_scanned_at.timestamp())
+    headers = {
+        "Cache-Control": "private, max-age=604800",
+        "ETag": f'W/"printer-storage-{file.id}-{size}-{stamp}"',
+    }
+    if modified is not None:
+        if modified.tzinfo is None:
+            modified = modified.replace(tzinfo=timezone.utc)
+        headers["Last-Modified"] = format_datetime(modified.astimezone(timezone.utc), usegmt=True)
+    return headers
+
+
+def _parse_range_header(value: str, size: int) -> tuple[int, int] | None:
+    if not value.startswith("bytes=") or size <= 0:
+        return None
+    spec = value.removeprefix("bytes=").split(",", 1)[0].strip()
+    if "-" not in spec:
+        return None
+    start_text, end_text = spec.split("-", 1)
+    try:
+        if start_text == "":
+            suffix = int(end_text)
+            if suffix <= 0:
+                return None
+            start = max(0, size - suffix)
+            end = size - 1
+        else:
+            start = int(start_text)
+            end = int(end_text) if end_text else size - 1
+    except ValueError:
+        return None
+    if start < 0 or end < start or start >= size:
+        return None
+    return start, min(end, size - 1)
+
+
+def _storage_usage_summary(db: Session, printer_id: int) -> dict[str, Any]:
+    telemetry = _latest_storage_telemetry(db, printer_id)
+    if not telemetry:
+        return {}
+    usage = {
+        "internal": _storage_capacity(telemetry, "internal"),
+        "external": _storage_capacity(telemetry, "external"),
+        "timelapse_path": telemetry.get("timelapse_path"),
+        "store_path_type": telemetry.get("tl_store_path_type"),
+        "store_hpd_type": telemetry.get("tl_store_hpd_type"),
+        "current_target": _storage_target_name(telemetry.get("tl_store_path_type")),
+    }
+    return {key: value for key, value in usage.items() if value not in (None, {}, "")}
+
+
+def _latest_storage_telemetry(db: Session, printer_id: int) -> dict[str, Any]:
+    snapshot = db.scalars(
+        select(DeviceStatusSnapshot).where(DeviceStatusSnapshot.printer_id == printer_id)
+    ).first()
+    if snapshot is not None:
+        camera = snapshot.camera if isinstance(snapshot.camera, dict) else {}
+        telemetry = _storage_telemetry_from_sections(camera, {})
+        if telemetry:
+            return telemetry
+
+    raw_messages = db.scalars(
+        select(RawMqttMessage)
+        .where(RawMqttMessage.printer_id == printer_id)
+        .order_by(RawMqttMessage.id.desc())
+        .limit(20)
+    ).all()
+    for raw_message in raw_messages:
+        if not isinstance(raw_message.payload, dict):
+            continue
+        payload = raw_message.payload
+        print_section = payload.get("print") if isinstance(payload.get("print"), dict) else payload
+        if not isinstance(print_section, dict):
+            continue
+        ipcam = print_section.get("ipcam") if isinstance(print_section.get("ipcam"), dict) else {}
+        device = print_section.get("device") if isinstance(print_section.get("device"), dict) else {}
+        device_cam = device.get("cam") if isinstance(device.get("cam"), dict) else {}
+        telemetry = _storage_telemetry_from_sections(ipcam, device_cam)
+        if telemetry:
+            return telemetry
+    return {}
+
+
+def _storage_telemetry_from_sections(ipcam: dict[str, Any], device_cam: dict[str, Any]) -> dict[str, Any]:
+    telemetry: dict[str, Any] = {}
+    for key in (
+        "tl_internal_free_kb",
+        "tl_internal_total_kb",
+        "tl_external_free_kb",
+        "tl_external_total_kb",
+        "tl_store_path_type",
+        "tl_store_hpd_type",
+        "timelapse_path",
+    ):
+        if key in ipcam:
+            telemetry[key] = ipcam.get(key)
+        if key in device_cam:
+            telemetry[key] = device_cam.get(key)
+    return telemetry
+
+
+def _storage_capacity(telemetry: dict[str, Any], kind: str) -> dict[str, Any]:
+    total_kb = _int_or_none(telemetry.get(f"tl_{kind}_total_kb"))
+    free_kb = _int_or_none(telemetry.get(f"tl_{kind}_free_kb"))
+    if total_kb is None and free_kb is None:
+        return {}
+    total_bytes = total_kb * 1024 if total_kb is not None else None
+    free_bytes = free_kb * 1024 if free_kb is not None else None
+    used_bytes = total_bytes - free_bytes if total_bytes is not None and free_bytes is not None else None
+    used_percent = None
+    if used_bytes is not None and total_bytes:
+        used_percent = round(max(0, min(100, (used_bytes / total_bytes) * 100)), 1)
+    return {
+        key: value
+        for key, value in {
+            "total_bytes": total_bytes,
+            "free_bytes": free_bytes,
+            "used_bytes": used_bytes,
+            "used_percent": used_percent,
+        }.items()
+        if value is not None
+    }
+
+
+def _storage_target_name(value: Any) -> str | None:
+    text = str(value)
+    if text == "1":
+        return "internal"
+    if text == "2":
+        return "external"
+    return None
+
+
+def _int_or_none(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _notification_target_read(target: NotificationTarget) -> NotificationTargetRead:
+    read = NotificationTargetRead.model_validate(target)
+    redacted = redact_notification_config(target.config)
+    display = target.display_config if isinstance(target.display_config, dict) and target.display_config else redacted
+    return read.model_copy(update={"config": redacted, "display_config": display})
+
+
+def _notification_target_or_404(db: Session, target_id: int) -> NotificationTarget:
+    target = db.get(NotificationTarget, target_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Notification target not found")
+    return target
+
+
+def _notification_rule_or_404(db: Session, rule_id: int) -> NotificationRule:
+    rule = db.get(NotificationRule, rule_id)
+    if rule is None:
+        raise HTTPException(status_code=404, detail="Notification rule not found")
+    return rule
 
 
 def _printer_or_404(db: Session, printer_id: int):

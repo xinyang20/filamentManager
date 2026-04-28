@@ -6,21 +6,37 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from filament_manager.db.models import MaintenanceHistory, MaintenanceType, Printer, PrinterMaintenance, utc_now
+from filament_manager.db.models import (
+    AmsUnit,
+    DeviceStatusSnapshot,
+    MaintenanceHistory,
+    MaintenanceType,
+    Printer,
+    PrinterMaintenance,
+    utc_now,
+)
 from filament_manager.services.print_log import completed_print_seconds_by_printer
 
 DEFAULT_MAINTENANCE_TYPES = [
     {
         "code": "carbon_rod_cleaning",
-        "name": "碳棒清洁",
-        "description": "清洁 X 轴碳棒表面残留。",
+        "name": "X 轴碳棒清洁",
+        "description": "清洁 X1/P1 系列 X 轴碳棒表面残留；碳棒不加油、不上脂。",
+        "default_interval": 100.0,
+        "icon": "sparkles",
+        "wiki_url": "https://wiki.bambulab.com/",
+    },
+    {
+        "code": "x_axis_smooth_rod_cleaning",
+        "name": "X 轴光轴清洁",
+        "description": "清洁 P2 系列 X 轴中空钢光轴；该结构使用光轴 + 皮带，不是碳棒。",
         "default_interval": 100.0,
         "icon": "sparkles",
         "wiki_url": "https://wiki.bambulab.com/",
     },
     {
         "code": "lead_screw_lubrication",
-        "name": "丝杆润滑",
+        "name": "Z 轴丝杆润滑",
         "description": "为 Z 轴丝杆补充润滑。",
         "default_interval": 120.0,
         "icon": "droplets",
@@ -45,7 +61,7 @@ DEFAULT_MAINTENANCE_TYPES = [
     {
         "code": "ams_cleaning",
         "name": "AMS 清洁",
-        "description": "清理 AMS 内部碎屑和滚轮区域。",
+        "description": "作为 AMS 独立维护对象，清理内部碎屑、滚轮区域并检查耗材通道。",
         "default_interval": 120.0,
         "icon": "boxes",
         "wiki_url": "https://wiki.bambulab.com/",
@@ -59,6 +75,37 @@ DEFAULT_MAINTENANCE_TYPES = [
         "wiki_url": "https://wiki.bambulab.com/",
     },
 ]
+
+MAINTENANCE_RULES: dict[str, dict[str, Any]] = {
+    "carbon_rod_cleaning": {
+        "families": {"x1", "p1"},
+        "target_type": "printer",
+    },
+    "x_axis_smooth_rod_cleaning": {
+        "families": {"p2"},
+        "target_type": "printer",
+    },
+    "lead_screw_lubrication": {
+        "families": {"x1", "p1", "p2", "a1", "h2", "unknown"},
+        "target_type": "printer",
+    },
+    "nozzle_inspection": {
+        "families": {"x1", "p1", "p2", "a1", "h2", "unknown"},
+        "target_type": "printer",
+    },
+    "build_plate_cleaning": {
+        "families": {"x1", "p1", "p2", "a1", "h2", "unknown"},
+        "target_type": "printer",
+    },
+    "poop_chute_inspection": {
+        "families": {"x1", "p1", "p2", "h2"},
+        "target_type": "printer",
+    },
+    "ams_cleaning": {
+        "requires_ams": True,
+        "target_type": "ams",
+    },
+}
 
 
 def maintenance_overview(db: Session) -> dict[str, Any]:
@@ -96,6 +143,7 @@ def get_printer_maintenance(db: Session, printer: Printer) -> list[dict[str, Any
             .order_by(PrinterMaintenance.id)
         ).all()
     )
+    rows = [row for row in rows if _maintenance_type_applies(db, printer, row.maintenance_type.code)]
     return [_maintenance_read(db, row, printer=printer) for row in rows]
 
 
@@ -186,6 +234,8 @@ def ensure_maintenance_items(db: Session, printer_ids: list[int] | None = None) 
     }
     for printer in printers:
         for item_type in type_rows:
+            if not _maintenance_type_applies(db, printer, item_type.code):
+                continue
             key = (printer.id, item_type.id)
             if key in existing:
                 continue
@@ -230,13 +280,29 @@ def _ensure_default_types(db: Session) -> list[MaintenanceType]:
             )
             db.add(row)
             db.flush()
+        else:
+            row.name = item["name"]
+            row.description = item["description"]
+            row.interval_type = "print_hours"
+            row.default_interval = item["default_interval"]
+            row.icon = item["icon"]
+            row.wiki_url = item["wiki_url"]
+            row.is_system_default = True
+            db.add(row)
         rows.append(row)
     db.commit()
     return rows
 
 
 def _all_items(db: Session) -> list[PrinterMaintenance]:
-    return list(db.scalars(select(PrinterMaintenance).order_by(PrinterMaintenance.printer_id, PrinterMaintenance.id)).all())
+    printers = {printer.id: printer for printer in db.scalars(select(Printer)).all()}
+    rows = list(db.scalars(select(PrinterMaintenance).order_by(PrinterMaintenance.printer_id, PrinterMaintenance.id)).all())
+    return [
+        item
+        for item in rows
+        if (printer := printers.get(item.printer_id)) is not None
+        and _maintenance_type_applies(db, printer, item.maintenance_type.code)
+    ]
 
 
 def _maintenance_read(db: Session, item: PrinterMaintenance, printer: Printer | None = None) -> dict[str, Any]:
@@ -258,6 +324,8 @@ def _maintenance_read(db: Session, item: PrinterMaintenance, printer: Printer | 
         "id": item.id,
         "printer_id": item.printer_id,
         "printer_name": printer.name if printer else None,
+        "target_type": _maintenance_target_type(item),
+        "target_label": _maintenance_target_label(db, item, printer),
         "maintenance_type": item.maintenance_type,
         "enabled": item.enabled,
         "custom_interval": item.custom_interval,
@@ -282,6 +350,66 @@ def _due_status(enabled: bool, hours_until_due: float, interval: float) -> str:
     if hours_until_due <= max(10.0, interval * 0.1):
         return "soon"
     return "ok"
+
+
+def _maintenance_type_applies(db: Session, printer: Printer, code: str) -> bool:
+    rule = MAINTENANCE_RULES.get(code)
+    if rule is None:
+        return True
+    if rule.get("requires_ams"):
+        return _printer_has_ams(db, printer.id)
+    families = rule.get("families")
+    if isinstance(families, set):
+        return _printer_family(db, printer) in families
+    return True
+
+
+def _maintenance_target_type(item: PrinterMaintenance) -> str:
+    rule = MAINTENANCE_RULES.get(item.maintenance_type.code) or {}
+    target_type = rule.get("target_type")
+    return str(target_type) if target_type else "printer"
+
+
+def _maintenance_target_label(db: Session, item: PrinterMaintenance, printer: Printer | None) -> str | None:
+    if printer is None:
+        return None
+    if _maintenance_target_type(item) != "ams":
+        return printer.name
+    units = list(
+        db.scalars(select(AmsUnit).where(AmsUnit.printer_id == printer.id).order_by(AmsUnit.ams_id)).all()
+    )
+    if not units:
+        return f"AMS · {printer.name}"
+    names = []
+    for unit in units:
+        ams_name = unit.ams_type_name if unit.ams_type_name != "unknown" else "AMS"
+        names.append(f"{ams_name} #{unit.ams_id}")
+    return f"{' / '.join(names)} · {printer.name}"
+
+
+def _printer_has_ams(db: Session, printer_id: int) -> bool:
+    return db.scalar(select(func.count()).select_from(AmsUnit).where(AmsUnit.printer_id == printer_id)) > 0
+
+
+def _printer_family(db: Session, printer: Printer) -> str:
+    parts = [printer.name, printer.serial]
+    snapshot = db.scalar(select(DeviceStatusSnapshot).where(DeviceStatusSnapshot.printer_id == printer.id))
+    if snapshot is not None:
+        for payload in (snapshot.hardware, snapshot.firmware, snapshot.raw_refs):
+            if isinstance(payload, dict):
+                parts.extend(str(value) for value in payload.values() if isinstance(value, (str, int, float)))
+    text = " ".join(str(part) for part in parts if part).upper()
+    if "P2" in text or "P2S" in text:
+        return "p2"
+    if "X1" in text:
+        return "x1"
+    if "P1" in text:
+        return "p1"
+    if "A1" in text:
+        return "a1"
+    if "H2" in text:
+        return "h2"
+    return "unknown"
 
 
 def _printer_by_id(printers: list[Printer], printer_id: int) -> Printer | None:

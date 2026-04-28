@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed } from "vue";
-import { formatUnit } from "../api";
+import { computed, ref } from "vue";
+import { formatCell, formatUnit, parseApiDateTime } from "../api";
 import type { MetricSample } from "../types";
 
 const props = defineProps<{
@@ -9,17 +9,34 @@ const props = defineProps<{
   items: MetricSample[];
   metricLabel: (metric: string) => string;
   emptyLabel: string;
+  tooltipLabels?: {
+    time: string;
+    value: string;
+  };
 }>();
 
 const width = 720;
-const height = 220;
-const padding = { top: 16, right: 20, bottom: 24, left: 42 };
+const height = 240;
+const padding = { top: 16, right: 20, bottom: 40, left: 42 };
 const colors = ["#00AE42", "#0033FF", "#00B1B7", "#C37A00", "#C53333", "#5E43B7"];
+const hovered = ref<{
+  x: number;
+  time: number;
+  rows: {
+    metric: string;
+    label: string;
+    color: string;
+    point: MetricSample;
+    x: number;
+    y: number;
+  }[];
+} | null>(null);
+const hiddenMetrics = ref<Set<string>>(new Set());
 
 const numericItems = computed(() =>
   props.items
     .filter((item) => typeof item.value_float === "number" && Number.isFinite(item.value_float))
-    .sort((a, b) => new Date(a.sampled_at).getTime() - new Date(b.sampled_at).getTime()),
+    .sort((a, b) => sampleTime(a) - sampleTime(b)),
 );
 
 const series = computed(() => {
@@ -38,8 +55,11 @@ const series = computed(() => {
   }));
 });
 
+const visibleSeries = computed(() => series.value.filter((item) => !hiddenMetrics.value.has(item.metric)));
+const visibleItems = computed(() => visibleSeries.value.flatMap((item) => item.points));
+
 const domain = computed(() => {
-  const values = numericItems.value.map((item) => item.value_float as number);
+  const values = visibleItems.value.map((item) => item.value_float as number);
   if (!values.length) return { min: 0, max: 1 };
   const min = Math.min(...values);
   const max = Math.max(...values);
@@ -49,7 +69,7 @@ const domain = computed(() => {
 });
 
 const timeDomain = computed(() => {
-  const times = numericItems.value.map((item) => new Date(item.sampled_at).getTime());
+  const times = numericItems.value.map(sampleTime);
   if (!times.length) {
     const now = Date.now();
     return { min: now - 1, max: now };
@@ -66,11 +86,30 @@ const latestItems = computed(() =>
     color: item.color,
     value: item.latest?.value_float ?? undefined,
     unit: item.latest?.unit || "",
+    hidden: hiddenMetrics.value.has(item.metric),
   })),
 );
 
+const xTicks = computed(() => {
+  if (!numericItems.value.length) return [];
+  const span = timeDomain.value.max - timeDomain.value.min;
+  return [0, 1 / 3, 2 / 3, 1].map((ratio, index) => {
+    const value = timeDomain.value.min + span * ratio;
+    return {
+      key: `${index}-${Math.round(value)}`,
+      x: padding.left + ratio * (width - padding.left - padding.right),
+      value,
+      label: formatAxisTime(value),
+    };
+  });
+});
+
 function x(sample: MetricSample) {
-  const time = new Date(sample.sampled_at).getTime();
+  const time = sampleTime(sample);
+  return xAtTime(time);
+}
+
+function xAtTime(time: number) {
   const span = timeDomain.value.max - timeDomain.value.min;
   return padding.left + ((time - timeDomain.value.min) / span) * (width - padding.left - padding.right);
 }
@@ -105,9 +144,105 @@ function formatNumber(value: number | undefined) {
   return value.toFixed(2);
 }
 
+function sampleTime(sample: MetricSample) {
+  return parseApiDateTime(sample.sampled_at)?.getTime() ?? new Date(sample.sampled_at).getTime();
+}
+
 function unitLabel(value: string) {
   return value ? formatUnit(value) : "";
 }
+
+function hoverAxis(event: PointerEvent) {
+  if (!visibleSeries.value.length) return;
+  const svg = event.currentTarget instanceof SVGElement ? event.currentTarget.ownerSVGElement : null;
+  if (!svg) return;
+  const rect = svg.getBoundingClientRect();
+  const pointerX = ((event.clientX - rect.left) / rect.width) * width;
+  const plotLeft = padding.left;
+  const plotRight = width - padding.right;
+  const clampedX = Math.min(Math.max(pointerX, plotLeft), plotRight);
+  const ratio = (clampedX - plotLeft) / (plotRight - plotLeft);
+  const time = timeDomain.value.min + ratio * (timeDomain.value.max - timeDomain.value.min);
+  const rows = visibleSeries.value
+    .map((item) => {
+      const point = nearestPoint(item.points, time);
+      const value = point?.value_float;
+      if (!point || typeof value !== "number") return null;
+      return {
+        metric: item.metric,
+        label: item.label,
+        color: item.color,
+        point,
+        x: x(point),
+        y: y(value),
+      };
+    })
+    .filter((item): item is NonNullable<typeof item> => item !== null);
+  hovered.value = rows.length ? { x: clampedX, time, rows } : null;
+}
+
+function clearHover() {
+  hovered.value = null;
+}
+
+function tooltipX(value: number) {
+  return Math.min(Math.max(value + 12, padding.left), width - tooltipWidth.value - 10);
+}
+
+function tooltipY() {
+  return padding.top + 8;
+}
+
+function hoverValue(item: MetricSample) {
+  return `${formatNumber(item.value_float ?? undefined)} ${unitLabel(item.unit || "")}`.trim();
+}
+
+function nearestPoint(points: MetricSample[], time: number) {
+  if (!points.length) return null;
+  let best = points[0];
+  let bestDistance = Math.abs(sampleTime(best) - time);
+  for (let index = 1; index < points.length; index += 1) {
+    const point = points[index];
+    const distance = Math.abs(sampleTime(point) - time);
+    if (distance < bestDistance) {
+      best = point;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+function toggleMetric(metric: string) {
+  const next = new Set(hiddenMetrics.value);
+  if (next.has(metric)) {
+    next.delete(metric);
+  } else {
+    const visibleCount = series.value.filter((item) => !next.has(item.metric)).length;
+    if (visibleCount <= 1) return;
+    next.add(metric);
+  }
+  hiddenMetrics.value = next;
+  clearHover();
+}
+
+function formatAxisTime(value: number) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hour = String(date.getHours()).padStart(2, "0");
+  const minute = String(date.getMinutes()).padStart(2, "0");
+  return `${month}-${day} ${hour}:${minute}`;
+}
+
+function tickAnchor(index: number) {
+  if (index === 0) return "start";
+  if (index === xTicks.value.length - 1) return "end";
+  return "middle";
+}
+
+const tooltipWidth = computed(() => 310);
+const tooltipHeight = computed(() => Math.max(70, 38 + (hovered.value?.rows.length || 0) * 18));
 </script>
 
 <template>
@@ -122,11 +257,18 @@ function unitLabel(value: string) {
     <div v-if="!numericItems.length" class="chart-empty">{{ emptyLabel }}</div>
     <template v-else>
       <div class="chart-summary">
-        <div v-for="item in latestItems" :key="item.metric" class="chart-summary-item">
+        <button
+          v-for="item in latestItems"
+          :key="item.metric"
+          class="chart-summary-item"
+          :class="{ off: item.hidden }"
+          type="button"
+          @click="toggleMetric(item.metric)"
+        >
           <span class="legend-dot" :style="{ background: item.color }"></span>
           <span class="summary-label">{{ item.label }}</span>
           <strong>{{ formatNumber(item.value) }} {{ unitLabel(item.unit) }}</strong>
-        </div>
+        </button>
       </div>
 
       <svg class="metric-chart" :viewBox="`0 0 ${width} ${height}`" role="img">
@@ -134,7 +276,12 @@ function unitLabel(value: string) {
         <line :x1="padding.left" :x2="padding.left" :y1="padding.top" :y2="height - padding.bottom" class="axis-line" />
         <text :x="padding.left - 8" :y="padding.top + 4" class="axis-label" text-anchor="end">{{ formatNumber(domain.max) }}</text>
         <text :x="padding.left - 8" :y="height - padding.bottom" class="axis-label" text-anchor="end">{{ formatNumber(domain.min) }}</text>
-        <g v-for="item in series" :key="item.metric">
+        <g v-for="(tick, index) in xTicks" :key="tick.key">
+          <line :x1="tick.x" :x2="tick.x" :y1="padding.top" :y2="height - padding.bottom" class="grid-line" />
+          <line :x1="tick.x" :x2="tick.x" :y1="height - padding.bottom" :y2="height - padding.bottom + 5" class="axis-line" />
+          <text :x="tick.x" :y="height - 14" class="axis-label" :text-anchor="tickAnchor(index)">{{ tick.label }}</text>
+        </g>
+        <g v-for="item in visibleSeries" :key="item.metric">
           <path :d="areaPath(item.points)" :fill="item.color" opacity="0.08" />
           <path :d="linePath(item.points)" :stroke="item.color" class="series-line" />
           <circle
@@ -146,13 +293,42 @@ function unitLabel(value: string) {
             :fill="item.color"
           />
         </g>
+        <rect
+          :x="padding.left"
+          :y="padding.top"
+          :width="width - padding.left - padding.right"
+          :height="height - padding.top - padding.bottom"
+          class="chart-axis-hit-area"
+          @pointermove="hoverAxis"
+          @pointerleave="clearHover"
+        />
+        <g v-if="hovered" class="chart-hover">
+          <line :x1="hovered.x" :x2="hovered.x" :y1="padding.top" :y2="height - padding.bottom" class="hover-line" />
+          <circle
+            v-for="row in hovered.rows"
+            :key="`hover-${row.metric}`"
+            :cx="row.x"
+            :cy="row.y"
+            r="4.5"
+            :fill="row.color"
+            class="hover-dot"
+          />
+          <g :transform="`translate(${tooltipX(hovered.x)}, ${tooltipY()})`">
+            <rect :width="tooltipWidth" :height="tooltipHeight" rx="8" class="chart-tooltip-bg" />
+            <text x="10" y="19" class="chart-tooltip-title">{{ props.tooltipLabels?.time || "Time" }}: {{ formatAxisTime(hovered.time) }}</text>
+            <text
+              v-for="(row, index) in hovered.rows"
+              :key="`tip-${row.metric}`"
+              x="10"
+              :y="42 + index * 18"
+              class="chart-tooltip-line"
+            >
+              {{ row.label }}: {{ hoverValue(row.point) }} · {{ formatCell(row.point.sampled_at) }}
+            </text>
+          </g>
+        </g>
       </svg>
 
-      <div class="chart-legend">
-        <span v-for="item in series" :key="item.metric">
-          <i :style="{ background: item.color }"></i>{{ item.label }}
-        </span>
-      </div>
     </template>
   </section>
 </template>

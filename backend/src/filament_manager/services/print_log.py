@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import func, or_, select
@@ -109,13 +109,51 @@ def print_log_summary(
     date_from: datetime | None = None,
     date_to: datetime | None = None,
 ) -> dict[str, Any]:
+    rows = _filtered_rows(db, date_from=date_from, date_to=date_to)
+    return _analytics_payload(rows, date_from=date_from, date_to=date_to, bucket="day")
+
+
+def print_log_analytics(
+    db: Session,
+    *,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    printer_id: int | None = None,
+    bucket: str = "day",
+) -> dict[str, Any]:
+    rows = _filtered_rows(db, date_from=date_from, date_to=date_to, printer_id=printer_id)
+    return _analytics_payload(rows, date_from=date_from, date_to=date_to, printer_id=printer_id, bucket=bucket)
+
+
+def _filtered_rows(
+    db: Session,
+    *,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    printer_id: int | None = None,
+) -> list[PrintLogEntry]:
     query = select(PrintLogEntry)
+    if printer_id is not None:
+        query = query.where(PrintLogEntry.printer_id == printer_id)
     if date_from:
         query = query.where(PrintLogEntry.started_at >= date_from)
     if date_to:
         query = query.where(PrintLogEntry.started_at <= date_to)
-    rows = list(db.scalars(query).all())
+    return list(db.scalars(query).all())
+
+
+def _analytics_payload(
+    rows: list[PrintLogEntry],
+    *,
+    date_from: datetime | None,
+    date_to: datetime | None,
+    printer_id: int | None = None,
+    bucket: str,
+) -> dict[str, Any]:
     by_printer: dict[int, dict[str, Any]] = {}
+    by_date: dict[str, dict[str, Any]] = {}
+    by_failure_reason: dict[str, dict[str, Any]] = {}
+    by_hms: dict[str, dict[str, Any]] = {}
     for row in rows:
         item = by_printer.setdefault(
             row.printer_id,
@@ -125,7 +163,9 @@ def print_log_summary(
                 "total": 0,
                 "succeeded": 0,
                 "failed": 0,
+                "cancelled": 0,
                 "duration_seconds": 0,
+                "average_duration_seconds": None,
             },
         )
         item["total"] += 1
@@ -134,16 +174,62 @@ def print_log_summary(
             item["succeeded"] += 1
         if row.status == "failed":
             item["failed"] += 1
+        if row.status == "cancelled":
+            item["cancelled"] += 1
+
+        bucket_key = _bucket_key(row.started_at or row.created_at, bucket)
+        date_item = by_date.setdefault(
+            bucket_key,
+            {"bucket": bucket_key, "total": 0, "succeeded": 0, "failed": 0, "cancelled": 0, "duration_seconds": 0},
+        )
+        date_item["total"] += 1
+        date_item["duration_seconds"] += row.duration_seconds or 0
+        if row.status in {"succeeded", "failed", "cancelled"}:
+            date_item[row.status if row.status != "succeeded" else "succeeded"] += 1
+
+        if row.status == "failed":
+            reason = row.failure_reason or "unknown"
+            reason_item = by_failure_reason.setdefault(reason, {"reason": reason, "count": 0})
+            reason_item["count"] += 1
+
+        for hms in row.hms_summary or []:
+            if not isinstance(hms, dict):
+                continue
+            code = str(hms.get("short_code") or hms.get("code") or "unknown")
+            hms_item = by_hms.setdefault(code, {"code": code, "count": 0})
+            hms_item["count"] += 1
+
+    completed = [row for row in rows if row.status in {"succeeded", "failed", "cancelled"}]
+    durations = [row.duration_seconds or 0 for row in completed if row.duration_seconds is not None]
+    total = len(rows)
+    succeeded = sum(1 for row in rows if row.status == "succeeded")
+    failed = sum(1 for row in rows if row.status == "failed")
+    cancelled = sum(1 for row in rows if row.status == "cancelled")
+    for item in by_printer.values():
+        completed_count = item["succeeded"] + item["failed"] + item["cancelled"]
+        item["average_duration_seconds"] = round(item["duration_seconds"] / completed_count, 2) if completed_count else None
+        item["success_rate"] = round(item["succeeded"] / completed_count, 4) if completed_count else 0.0
+
     return {
         "from": date_from,
         "to": date_to,
-        "total": len(rows),
+        "printer_id": printer_id,
+        "bucket": bucket,
+        "total": total,
         "running": sum(1 for row in rows if row.status in {"running", "paused"}),
-        "succeeded": sum(1 for row in rows if row.status == "succeeded"),
-        "failed": sum(1 for row in rows if row.status == "failed"),
-        "cancelled": sum(1 for row in rows if row.status == "cancelled"),
+        "succeeded": succeeded,
+        "failed": failed,
+        "cancelled": cancelled,
         "total_duration_seconds": sum(row.duration_seconds or 0 for row in rows),
+        "average_duration_seconds": round(sum(durations) / len(durations), 2) if durations else None,
+        "longest_duration_seconds": max(durations) if durations else None,
+        "success_rate": round(succeeded / len(completed), 4) if completed else 0.0,
+        "failure_rate": round(failed / len(completed), 4) if completed else 0.0,
+        "cancelled_rate": round(cancelled / len(completed), 4) if completed else 0.0,
         "by_printer": list(by_printer.values()),
+        "by_date": sorted(by_date.values(), key=lambda item: item["bucket"]),
+        "by_failure_reason": sorted(by_failure_reason.values(), key=lambda item: item["count"], reverse=True),
+        "by_hms": sorted(by_hms.values(), key=lambda item: item["count"], reverse=True),
     }
 
 
@@ -272,3 +358,13 @@ def _aware(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value
+
+
+def _bucket_key(value: datetime, bucket: str) -> str:
+    aware = _aware(value)
+    if bucket == "week":
+        start = aware - timedelta(days=aware.weekday())
+        return start.date().isoformat()
+    if bucket == "month":
+        return f"{aware.year:04d}-{aware.month:02d}"
+    return aware.date().isoformat()

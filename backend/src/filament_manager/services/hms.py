@@ -3,7 +3,13 @@ from __future__ import annotations
 import json
 from functools import lru_cache
 from importlib import resources
+from datetime import timedelta
 from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from filament_manager.db.models import PrinterEvent, utc_now
 
 
 @lru_cache(maxsize=1)
@@ -49,3 +55,92 @@ def enrich_hms_error(error: dict[str, Any]) -> dict[str, Any]:
     error["suggestion_zh"] = "保留 attr、code 和 source 原始字段，用于后续对照官方 Wiki 或日志排查。"
     error["suggestion_en"] = "Keep raw attr, code, and source fields for later comparison with official wiki or logs."
     return error
+
+
+def hms_code_stats(
+    db: Session,
+    *,
+    short_code: str,
+    printer_id: int | None = None,
+    days: int = 30,
+) -> dict[str, Any]:
+    normalized = short_code.upper()
+    cutoff = utc_now() - timedelta(days=days)
+    query = (
+        select(PrinterEvent)
+        .where(
+            PrinterEvent.event_type.in_(("hms.error", "hms.recovered")),
+            PrinterEvent.created_at >= cutoff,
+        )
+        .order_by(PrinterEvent.created_at.desc(), PrinterEvent.id.desc())
+    )
+    if printer_id is not None:
+        query = query.where(PrinterEvent.printer_id == printer_id)
+    rows = [
+        row
+        for row in db.scalars(query).all()
+        if _event_short_code(row) == normalized
+    ]
+    active = [row for row in rows if _event_active(row) is not False and row.event_type == "hms.error"]
+    recovered = [row for row in rows if _event_active(row) is False or row.event_type == "hms.recovered"]
+    affected = sorted({row.printer_id for row in rows})
+    last_seen = rows[0].created_at if rows else None
+    last_recovered = recovered[0].created_at if recovered else None
+    return {
+        "short_code": normalized,
+        "printer_id": printer_id,
+        "days": days,
+        "recent_count": len(rows),
+        "active_count": len(active),
+        "recovered_count": len(recovered),
+        "affected_printers": affected,
+        "last_seen_at": last_seen,
+        "last_recovered_at": last_recovered,
+        "high_frequency": len(rows) >= max(3, days // 7),
+        "recent_events": [
+            {
+                "id": row.id,
+                "printer_id": row.printer_id,
+                "event_type": row.event_type,
+                "severity": row.severity,
+                "message": row.message,
+                "active": _event_active(row),
+                "created_at": row.created_at,
+                "data": row.data,
+            }
+            for row in rows[:20]
+        ],
+    }
+
+
+def _event_short_code(event: PrinterEvent) -> str | None:
+    data = event.data if isinstance(event.data, dict) else {}
+    value = data.get("short_code")
+    if value:
+        return str(value).upper()
+    attr = _as_int(data.get("attr"))
+    code = _as_int(data.get("code_value"))
+    if attr is None or code is None:
+        return None
+    module = (attr >> 16) & 0xFFFF
+    return f"{module:04X}_{code & 0xFFFF:04X}"
+
+
+def _event_active(event: PrinterEvent) -> bool | None:
+    data = event.data if isinstance(event.data, dict) else {}
+    value = data.get("active")
+    return value if isinstance(value, bool) else None
+
+
+def _as_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, str) and value.lower().startswith("0x"):
+        try:
+            return int(value, 16)
+        except ValueError:
+            return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

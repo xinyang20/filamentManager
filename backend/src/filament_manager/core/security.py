@@ -3,6 +3,10 @@ SENSITIVE_KEYS = {
     "password",
     "token",
     "secret",
+    "authorization",
+    "bearer_token",
+    "access_token",
+    "api_key",
 }
 
 

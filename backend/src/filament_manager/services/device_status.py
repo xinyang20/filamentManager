@@ -10,6 +10,7 @@ from filament_manager.db.models import AmsUnit, DeviceStatusSnapshot, Printer, P
 from filament_manager.mqtt.parser import extract_print, identify_tray
 from filament_manager.services.fans import fan_percent, packed_fan_bytes
 from filament_manager.services.hms import enrich_hms_error
+from filament_manager.services.notifications import dispatch_event_notifications
 
 
 DICT_FIELDS = {
@@ -137,6 +138,12 @@ IPCAM_FIELDS = (
     "resolution",
     "rtsp_url",
     "timelapse",
+    "tl_external_free_kb",
+    "tl_external_total_kb",
+    "tl_internal_free_kb",
+    "tl_internal_total_kb",
+    "tl_store_hpd_type",
+    "tl_store_path_type",
     "tutk_server",
 )
 
@@ -628,6 +635,10 @@ def _camera_payload(payload: dict[str, Any], print_section: dict[str, Any]) -> d
         xcam = top_level_xcam if isinstance(top_level_xcam, dict) else {}
     ipcam = print_section.get("ipcam")
     ipcam_dict = ipcam if isinstance(ipcam, dict) else {}
+    device = print_section.get("device")
+    device_dict = device if isinstance(device, dict) else {}
+    device_cam = device_dict.get("cam")
+    device_cam_dict = device_cam if isinstance(device_cam, dict) else {}
     camera = {
         "ipcam": ipcam if not isinstance(ipcam, dict) else None,
         "ipcam_record": print_section.get("ipcam_record", xcam.get("ipcam_record", ipcam_dict.get("ipcam_record"))),
@@ -642,6 +653,9 @@ def _camera_payload(payload: dict[str, Any], print_section: dict[str, Any]) -> d
     for key in IPCAM_FIELDS:
         if key in ipcam_dict:
             camera[key] = ipcam_dict.get(key)
+    for key in ("timelapse_path", "tl_external_free_kb", "tl_external_total_kb", "tl_internal_free_kb", "tl_internal_total_kb"):
+        if key in device_cam_dict:
+            camera[key] = device_cam_dict.get(key)
     return _compact(camera)
 
 
@@ -945,6 +959,7 @@ def _emit_hms_events(db: Session, printer_id: int, hms_errors: list[dict[str, An
         )
         db.add(event)
         db.flush()
+        dispatch_event_notifications(db, event)
 
 
 def _parse_ams_module_name(name: str) -> tuple[str | None, str | None]:

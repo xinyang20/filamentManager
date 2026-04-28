@@ -13,9 +13,10 @@ import paho.mqtt.client as mqtt
 from sqlalchemy.orm import Session
 
 from filament_manager.core.config import get_settings
-from filament_manager.db.models import Printer, utc_now
+from filament_manager.db.models import Printer, PrinterEvent, utc_now
 from filament_manager.db import session as db_session
 from filament_manager.services.mqtt_processing import process_mqtt_payload
+from filament_manager.services.notifications import dispatch_event_notifications
 
 LOGGER = logging.getLogger(__name__)
 MQTT_USERNAME = "bblp"
@@ -234,11 +235,23 @@ class PrinterMqttClient:
             printer = db.get(Printer, self.printer_id)
             if printer is None:
                 return
+            previous_status = printer.connection_status
             printer.connection_status = status
             printer.last_error = error
             if status == "connected":
                 printer.last_sync_at = utc_now()
             db.add(printer)
+            if previous_status != status and status in {"connected", "disconnected", "error"}:
+                event = PrinterEvent(
+                    printer_id=printer.id,
+                    event_type="printer.connection.restored" if status == "connected" else "printer.connection.disconnected",
+                    severity="info" if status == "connected" else "warning",
+                    message="Printer MQTT connection restored" if status == "connected" else "Printer MQTT connection disconnected",
+                    data={"previous_status": previous_status, "current_status": status, "error": error},
+                )
+                db.add(event)
+                db.flush()
+                dispatch_event_notifications(db, event)
             db.commit()
         finally:
             db.close()
