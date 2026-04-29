@@ -13,8 +13,6 @@ from filament_manager.db.models import (
     PrinterEvent,
     PrinterStateSnapshot,
     RawMqttMessage,
-    Spool,
-    SpoolLocation,
     utc_now,
 )
 from filament_manager.mqtt.parser import (
@@ -33,6 +31,7 @@ from filament_manager.services.device_status import (
     upsert_device_status_from_push_status,
 )
 from filament_manager.services.ams import record_ams_slot_history_sample
+from filament_manager.services.inventory import process_ams_slot_filament, record_print_filament_context
 from filament_manager.services.metrics import record_metric_samples_from_push_status
 from filament_manager.services.notifications import dispatch_event_notifications
 from filament_manager.services.print_log import upsert_print_log_from_snapshot
@@ -174,6 +173,13 @@ def _upsert_state_snapshot(
             raw_message=raw_message,
             event_type=transition.event_type,
         )
+        record_print_filament_context(
+            db,
+            printer_id=printer.id,
+            task_id=values["task_id"],
+            gcode_file=values["gcode_file"],
+            event_type=transition.event_type,
+        )
     elif current_state:
         _update_print_job(db, printer.id, snapshot, None)
         upsert_print_log_from_snapshot(
@@ -228,93 +234,6 @@ def _update_print_job(
         if event_type in {"print.finished", "print.failed", "print.cancelled"}:
             job.finished_at = utc_now()
         db.add(job)
-
-
-def _spool_display_name(slot: ParsedAmsSlot) -> str:
-    parts = [part for part in [slot.series, slot.material] if part]
-    if parts:
-        return " ".join(parts)
-    return f"AMS {slot.ams_id}-{slot.tray_id} spool"
-
-
-def _get_or_create_spool_for_slot(db: Session, printer_id: int, slot: ParsedAmsSlot) -> Spool | None:
-    identity_key = slot.identity.identity_key
-    if identity_key is None:
-        return None
-    spool = db.scalars(select(Spool).where(Spool.identity_key == identity_key)).first()
-    if spool is None:
-        spool = Spool(
-            identity_key=identity_key,
-            identity_source=slot.identity.identity_source,
-            display_name=_spool_display_name(slot),
-            material=slot.material,
-            series=slot.series,
-            color=slot.color,
-            status="active",
-            sealed_quantity=0,
-            opened_at=utc_now(),
-        )
-        db.add(spool)
-        db.flush()
-        emit_printer_event(
-            db,
-            printer_id=printer_id,
-            event_type="spool.discovered",
-            severity="info",
-            message="RFID spool discovered",
-            dedupe_key=f"spool.discovered:{identity_key}",
-            data={
-                "identity_key": identity_key,
-                "identity_source": slot.identity.identity_source,
-                "ams_id": slot.ams_id,
-                "tray_id": slot.tray_id,
-            },
-        )
-    return spool
-
-
-def _update_spool_location_if_stable(
-    db: Session,
-    *,
-    printer_id: int,
-    slot: ParsedAmsSlot,
-    spool: Spool,
-) -> None:
-    if slot.is_transitioning:
-        return
-    unchanged = (
-        spool.current_printer_id == printer_id
-        and spool.current_ams_id == slot.ams_id
-        and spool.current_tray_id == slot.tray_id
-    )
-    if unchanged:
-        return
-    spool.current_printer_id = printer_id
-    spool.current_ams_id = slot.ams_id
-    spool.current_tray_id = slot.tray_id
-    db.add(spool)
-    db.add(
-        SpoolLocation(
-            spool_id=spool.id,
-            printer_id=printer_id,
-            ams_id=slot.ams_id,
-            tray_id=slot.tray_id,
-            event_type="spool.location_changed",
-        )
-    )
-    emit_printer_event(
-        db,
-        printer_id=printer_id,
-        event_type="spool.location_changed",
-        severity="info",
-        message="Spool location changed",
-        data={
-            "spool_id": spool.id,
-            "identity_key": spool.identity_key,
-            "ams_id": slot.ams_id,
-            "tray_id": slot.tray_id,
-        },
-    )
 
 
 def _upsert_ams_unit(db: Session, printer_id: int, unit: ParsedAmsUnit) -> AmsUnit:
@@ -382,6 +301,11 @@ def _upsert_ams_slot(db: Session, printer_id: int, parsed: ParsedAmsSlot) -> tup
     return slot, changed
 
 
+def _filament_spool_needs_sku_review(filament_spool: Any) -> bool:
+    config = filament_spool.config if isinstance(getattr(filament_spool, "config", None), dict) else {}
+    return getattr(filament_spool, "status", None) == "unknown" or bool(config.get("needs_sku_review"))
+
+
 def _process_ams(db: Session, printer_id: int, payload: dict[str, Any], raw_message: RawMqttMessage) -> None:
     for unit in parse_ams_units(payload):
         ams_unit = _upsert_ams_unit(db, printer_id, unit)
@@ -434,8 +358,52 @@ def _process_ams(db: Session, printer_id: int, payload: dict[str, Any], raw_mess
                     },
                 )
             if identity.identity_source == "manual_required":
-                if not parsed_slot.is_transitioning:
-                    slot.spool_id = None
+                filament_spool, created = process_ams_slot_filament(
+                    db,
+                    printer_id=printer_id,
+                    slot_model=slot,
+                    parsed_slot=parsed_slot,
+                )
+                db.add(slot)
+                if parsed_slot.is_transitioning or filament_spool is None:
+                    continue
+                if created:
+                    emit_printer_event(
+                        db,
+                        printer_id=printer_id,
+                        event_type="spool.discovered",
+                        severity="info",
+                        message="AMS spool discovered",
+                        dedupe_key=f"spool.discovered:{filament_spool.official_spool_uid or filament_spool.id}",
+                        data={
+                            "filament_spool_id": filament_spool.id,
+                            "official_spool_uid": filament_spool.official_spool_uid,
+                            "identity_source": filament_spool.identity_source,
+                            "ams_id": parsed_slot.ams_id,
+                            "tray_id": parsed_slot.tray_id,
+                            "status": filament_spool.status,
+                            "sku_id": filament_spool.sku_id,
+                        },
+                    )
+                if _filament_spool_needs_sku_review(filament_spool):
+                    emit_printer_event(
+                        db,
+                        printer_id=printer_id,
+                        event_type="filament.spool.pending_confirmation",
+                        severity="warning",
+                        message="AMS spool requires SKU review",
+                        dedupe_key=f"filament.spool.pending_confirmation:{filament_spool.official_spool_uid or filament_spool.id}",
+                        data={
+                            "filament_spool_id": filament_spool.id,
+                            "official_spool_uid": filament_spool.official_spool_uid,
+                            "ams_id": parsed_slot.ams_id,
+                            "tray_id": parsed_slot.tray_id,
+                            "material": parsed_slot.material,
+                            "series": parsed_slot.series,
+                            "color": parsed_slot.color,
+                            "sku_id": filament_spool.sku_id,
+                        },
+                    )
                 emit_printer_event(
                     db,
                     printer_id=printer_id,
@@ -447,14 +415,55 @@ def _process_ams(db: Session, printer_id: int, payload: dict[str, Any], raw_mess
                         "ams_id": parsed_slot.ams_id,
                         "tray_id": parsed_slot.tray_id,
                         "warning": identity.identity_warning,
+                        "filament_spool_id": filament_spool.id,
+                        "sku_id": filament_spool.sku_id,
                     },
                 )
                 continue
 
-            spool = _get_or_create_spool_for_slot(db, printer_id, parsed_slot)
-            if spool is not None and not parsed_slot.is_transitioning:
-                slot.spool_id = spool.id
-                _update_spool_location_if_stable(db, printer_id=printer_id, slot=parsed_slot, spool=spool)
+            filament_spool, created = process_ams_slot_filament(
+                db,
+                printer_id=printer_id,
+                slot_model=slot,
+                parsed_slot=parsed_slot,
+            )
+            if filament_spool is not None and created:
+                emit_printer_event(
+                    db,
+                    printer_id=printer_id,
+                    event_type="spool.discovered",
+                    severity="info",
+                    message="RFID spool discovered",
+                    dedupe_key=f"spool.discovered:{filament_spool.official_spool_uid or filament_spool.id}",
+                    data={
+                        "filament_spool_id": filament_spool.id,
+                        "official_spool_uid": filament_spool.official_spool_uid,
+                        "identity_source": filament_spool.identity_source,
+                        "ams_id": parsed_slot.ams_id,
+                        "tray_id": parsed_slot.tray_id,
+                        "status": filament_spool.status,
+                        "sku_id": filament_spool.sku_id,
+                    },
+                )
+                if _filament_spool_needs_sku_review(filament_spool):
+                    emit_printer_event(
+                        db,
+                        printer_id=printer_id,
+                        event_type="filament.spool.pending_confirmation",
+                        severity="warning",
+                        message="AMS RFID spool requires SKU review",
+                        dedupe_key=f"filament.spool.pending_confirmation:{filament_spool.official_spool_uid or filament_spool.id}",
+                        data={
+                            "filament_spool_id": filament_spool.id,
+                            "official_spool_uid": filament_spool.official_spool_uid,
+                            "ams_id": parsed_slot.ams_id,
+                            "tray_id": parsed_slot.tray_id,
+                            "material": parsed_slot.material,
+                            "series": parsed_slot.series,
+                            "color": parsed_slot.color,
+                            "sku_id": filament_spool.sku_id,
+                        },
+                    )
             db.add(slot)
 
 

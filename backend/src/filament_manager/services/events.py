@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from filament_manager.core.security import redact_sensitive
-from filament_manager.db.models import InventoryEvent, PrinterEvent
+from filament_manager.db.models import FilamentSpoolEvent, PrinterEvent
 from filament_manager.db.session import SessionLocal
 
 
@@ -51,11 +51,11 @@ def list_unified_events(
     if since:
         printer_query = printer_query.where(PrinterEvent.created_at >= since)
 
-    inventory_query = select(InventoryEvent)
+    inventory_query = select(FilamentSpoolEvent)
     if event_type:
-        inventory_query = inventory_query.where(InventoryEvent.event_type == event_type)
+        inventory_query = inventory_query.where(FilamentSpoolEvent.event_type == event_type)
     if since:
-        inventory_query = inventory_query.where(InventoryEvent.created_at >= since)
+        inventory_query = inventory_query.where(FilamentSpoolEvent.created_at >= since)
 
     rows = [_printer_event_payload(row) for row in db.scalars(printer_query).all()]
     if printer_id is None and severity is None:
@@ -87,9 +87,9 @@ async def sse_event_generator(poll_interval: float = 2.0) -> Iterable[str]:
             )
             inventory_events = list(
                 db.scalars(
-                    select(InventoryEvent)
-                    .where(InventoryEvent.id > last_inventory_id)
-                    .order_by(InventoryEvent.id)
+                    select(FilamentSpoolEvent)
+                    .where(FilamentSpoolEvent.id > last_inventory_id)
+                    .order_by(FilamentSpoolEvent.id)
                     .limit(100)
                 ).all()
             )
@@ -126,12 +126,12 @@ def _printer_event_payload(event: PrinterEvent) -> dict[str, Any]:
     }
 
 
-def _inventory_event_payload(event: InventoryEvent) -> dict[str, Any]:
+def _inventory_event_payload(event: FilamentSpoolEvent) -> dict[str, Any]:
     data = redact_sensitive(event.data or {})
     return {
         "id": event.id,
         "source": "inventory",
-        "printer_id": data.get("printer_id") if isinstance(data, dict) else None,
+        "printer_id": event.printer_id,
         "spool_id": event.spool_id,
         "type": event.event_type,
         "event_type": event.event_type,
@@ -139,7 +139,16 @@ def _inventory_event_payload(event: InventoryEvent) -> dict[str, Any]:
         "active": _active_from_data(data),
         "message": event.message,
         "dedupe_key": None,
-        "data": data,
+        "data": {
+            **(data if isinstance(data, dict) else {}),
+            "sku_id": event.sku_id,
+            "ams_id": event.ams_id,
+            "tray_id": event.tray_id,
+            "previous": event.previous,
+            "current": event.current,
+            "quantity_delta": event.quantity_delta,
+            "note": event.note,
+        },
         "created_at": event.created_at,
     }
 

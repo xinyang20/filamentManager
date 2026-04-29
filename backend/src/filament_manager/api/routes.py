@@ -20,7 +20,6 @@ from filament_manager.db.models import (
     AmsUnit,
     DeviceStatusSnapshot,
     DeviceMetricSample,
-    InventoryEvent,
     PrinterEvent,
     PrinterStorageFile,
     PrinterStateSnapshot,
@@ -29,7 +28,6 @@ from filament_manager.db.models import (
     NotificationRule,
     NotificationTarget,
     RawMqttMessage,
-    SpoolLocation,
     TimelapseNote,
 )
 from filament_manager.db.session import get_db
@@ -48,7 +46,29 @@ from filament_manager.schemas import (
     DiscoveryCandidateRead,
     HmsCodeInfoRead,
     HmsCodeStatsRead,
-    InventoryEventRead,
+    FilamentBrandCreate,
+    FilamentBrandRead,
+    FilamentBrandUpdate,
+    FilamentColorMappingGapRead,
+    FilamentColorMappingCreate,
+    FilamentColorMappingRead,
+    FilamentColorMappingUpdate,
+    FilamentInventorySummaryRead,
+    FilamentSkuCreate,
+    FilamentSkuRead,
+    FilamentSkuStockAdjust,
+    FilamentSkuTypeSeriesSet,
+    FilamentSkuUpdate,
+    FilamentSpoolCreate,
+    FilamentSpoolEventsRead,
+    FilamentSpoolLocationUpdate,
+    FilamentSpoolRead,
+    FilamentSpoolUpdate,
+    FilamentSpoolWeightUpdate,
+    FilamentTypeSeriesBrandSet,
+    FilamentTypeSeriesCreate,
+    FilamentTypeSeriesRead,
+    FilamentTypeSeriesUpdate,
     MaintenanceHistoryRead,
     MaintenanceOverviewRead,
     MaintenancePerformRequest,
@@ -76,9 +96,6 @@ from filament_manager.schemas import (
     PrinterUpdate,
     RawMqttMessageRead,
     SlotBindRequest,
-    SpoolCreate,
-    SpoolRead,
-    SpoolUpdate,
     StorageSummaryRead,
     StorageScanResultRead,
     SupportBundleRead,
@@ -92,15 +109,50 @@ from filament_manager.services.ams import build_ams_overview, build_ams_sensor_h
 from filament_manager.services.discovery import scan_lan_devices
 from filament_manager.services.device_capabilities import all_device_capabilities, printer_capabilities
 from filament_manager.services.events import list_unified_events, sse_event_generator
-from filament_manager.services.exporting import export_csv_zip_bytes, export_json_bytes
+from filament_manager.services.exporting import export_csv_zip_bytes, export_json_bytes, import_json_payload
 from filament_manager.services.fans import fan_percent, normalize_fan_payload
 from filament_manager.services.hms import get_hms_code, hms_code_stats, list_hms_codes
 from filament_manager.services.inventory import (
-    bind_slot_to_spool,
-    create_spool,
-    get_spool,
-    list_spools,
-    update_spool,
+    adjust_sku_stock,
+    bind_slot_to_filament_spool,
+    build_inventory_summary,
+    confirm_filament_spool_sku_review,
+    create_brand,
+    create_color_mapping,
+    create_filament_spool,
+    create_sku,
+    create_type_series,
+    delete_brand,
+    delete_color_mapping,
+    delete_filament_spool,
+    delete_sku,
+    delete_type_series,
+    filament_brand_to_read,
+    filament_color_mapping_to_read,
+    filament_sku_to_read,
+    filament_spool_to_read,
+    filament_type_series_to_read,
+    get_brand,
+    get_color_mapping,
+    get_filament_spool,
+    get_sku,
+    get_type_series,
+    list_brands,
+    list_color_mappings,
+    list_color_mapping_gaps,
+    list_filament_spool_events,
+    list_filament_spools,
+    list_skus,
+    list_type_series,
+    set_sku_type_series,
+    set_type_series_brands,
+    update_brand,
+    update_color_mapping,
+    update_filament_location,
+    update_filament_spool,
+    update_filament_weight,
+    update_sku,
+    update_type_series,
 )
 from filament_manager.services.maintenance import (
     get_maintenance_item,
@@ -860,22 +912,330 @@ def api_ingest_mqtt_payload(
     return read.model_copy(update={"payload": redact_sensitive(read.payload)})
 
 
-@router.get("/spools", response_model=list[SpoolRead])
-def api_list_spools(db: Session = Depends(get_db)) -> list[Any]:
-    return list_spools(db)
+@router.get("/filament/brands", response_model=list[FilamentBrandRead])
+def api_list_filament_brands(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
+    return [filament_brand_to_read(db, brand) for brand in list_brands(db)]
 
 
-@router.post("/spools", response_model=SpoolRead, status_code=status.HTTP_201_CREATED)
-def api_create_spool(data: SpoolCreate, db: Session = Depends(get_db)) -> Any:
-    return create_spool(db, data)
+@router.post("/filament/brands", response_model=FilamentBrandRead, status_code=status.HTTP_201_CREATED)
+def api_create_filament_brand(data: FilamentBrandCreate, db: Session = Depends(get_db)) -> dict[str, Any]:
+    try:
+        brand = create_brand(db, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return filament_brand_to_read(db, brand)
 
 
-@router.patch("/spools/{spool_id}", response_model=SpoolRead)
-def api_update_spool(spool_id: int, data: SpoolUpdate, db: Session = Depends(get_db)) -> Any:
-    spool = get_spool(db, spool_id)
+@router.patch("/filament/brands/{brand_id}", response_model=FilamentBrandRead)
+def api_update_filament_brand(
+    brand_id: int,
+    data: FilamentBrandUpdate,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    brand = get_brand(db, brand_id)
+    if brand is None:
+        raise HTTPException(status_code=404, detail="Filament brand not found")
+    try:
+        updated = update_brand(db, brand, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return filament_brand_to_read(db, updated)
+
+
+@router.delete("/filament/brands/{brand_id}", status_code=status.HTTP_204_NO_CONTENT)
+def api_delete_filament_brand(brand_id: int, db: Session = Depends(get_db)) -> Response:
+    brand = get_brand(db, brand_id)
+    if brand is None:
+        raise HTTPException(status_code=404, detail="Filament brand not found")
+    try:
+        delete_brand(db, brand)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/filament/type-series", response_model=list[FilamentTypeSeriesRead])
+def api_list_filament_type_series(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
+    return [filament_type_series_to_read(db, row) for row in list_type_series(db)]
+
+
+@router.post("/filament/type-series", response_model=FilamentTypeSeriesRead, status_code=status.HTTP_201_CREATED)
+def api_create_filament_type_series(
+    data: FilamentTypeSeriesCreate,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        row = create_type_series(db, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return filament_type_series_to_read(db, row)
+
+
+@router.patch("/filament/type-series/{type_series_id}", response_model=FilamentTypeSeriesRead)
+def api_update_filament_type_series(
+    type_series_id: int,
+    data: FilamentTypeSeriesUpdate,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    row = get_type_series(db, type_series_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Filament type series not found")
+    try:
+        updated = update_type_series(db, row, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return filament_type_series_to_read(db, updated)
+
+
+@router.delete("/filament/type-series/{type_series_id}", status_code=status.HTTP_204_NO_CONTENT)
+def api_delete_filament_type_series(type_series_id: int, db: Session = Depends(get_db)) -> Response:
+    row = get_type_series(db, type_series_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Filament type series not found")
+    try:
+        delete_type_series(db, row)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/filament/type-series/{type_series_id}/brands", response_model=FilamentTypeSeriesRead)
+def api_set_filament_type_series_brands(
+    type_series_id: int,
+    data: FilamentTypeSeriesBrandSet,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    row = get_type_series(db, type_series_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Filament type series not found")
+    try:
+        updated = set_type_series_brands(db, row, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return filament_type_series_to_read(db, updated)
+
+
+@router.get("/filament/color-mappings", response_model=list[FilamentColorMappingRead])
+def api_list_filament_color_mappings(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
+    return [filament_color_mapping_to_read(row) for row in list_color_mappings(db)]
+
+
+@router.post("/filament/color-mappings", response_model=FilamentColorMappingRead, status_code=status.HTTP_201_CREATED)
+def api_create_filament_color_mapping(
+    data: FilamentColorMappingCreate,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        mapping = create_color_mapping(db, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return filament_color_mapping_to_read(mapping)
+
+
+@router.patch("/filament/color-mappings/{mapping_id}", response_model=FilamentColorMappingRead)
+def api_update_filament_color_mapping(
+    mapping_id: int,
+    data: FilamentColorMappingUpdate,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    mapping = get_color_mapping(db, mapping_id)
+    if mapping is None:
+        raise HTTPException(status_code=404, detail="Filament color mapping not found")
+    try:
+        updated = update_color_mapping(db, mapping, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return filament_color_mapping_to_read(updated)
+
+
+@router.delete("/filament/color-mappings/{mapping_id}", status_code=status.HTTP_204_NO_CONTENT)
+def api_delete_filament_color_mapping(mapping_id: int, db: Session = Depends(get_db)) -> Response:
+    mapping = get_color_mapping(db, mapping_id)
+    if mapping is None:
+        raise HTTPException(status_code=404, detail="Filament color mapping not found")
+    delete_color_mapping(db, mapping)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/filament/color-mapping-gaps", response_model=list[FilamentColorMappingGapRead])
+def api_list_filament_color_mapping_gaps(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
+    return list_color_mapping_gaps(db)
+
+
+@router.get("/filament/skus", response_model=list[FilamentSkuRead])
+def api_list_filament_skus(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
+    return [filament_sku_to_read(row) for row in list_skus(db)]
+
+
+@router.post("/filament/skus", response_model=FilamentSkuRead, status_code=status.HTTP_201_CREATED)
+def api_create_filament_sku(data: FilamentSkuCreate, db: Session = Depends(get_db)) -> dict[str, Any]:
+    try:
+        sku = create_sku(db, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return filament_sku_to_read(sku)
+
+
+@router.patch("/filament/skus/{sku_id}", response_model=FilamentSkuRead)
+def api_update_filament_sku(
+    sku_id: int,
+    data: FilamentSkuUpdate,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    sku = get_sku(db, sku_id)
+    if sku is None:
+        raise HTTPException(status_code=404, detail="Filament SKU not found")
+    try:
+        updated = update_sku(db, sku, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return filament_sku_to_read(updated)
+
+
+@router.delete("/filament/skus/{sku_id}", status_code=status.HTTP_204_NO_CONTENT)
+def api_delete_filament_sku(
+    sku_id: int,
+    force: bool = Query(False),
+    db: Session = Depends(get_db),
+) -> Response:
+    sku = get_sku(db, sku_id)
+    if sku is None:
+        raise HTTPException(status_code=404, detail="Filament SKU not found")
+    try:
+        delete_sku(db, sku, force=force)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/filament/skus/{sku_id}/type-series", response_model=FilamentSkuRead)
+def api_set_filament_sku_type_series(
+    sku_id: int,
+    data: FilamentSkuTypeSeriesSet,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    sku = get_sku(db, sku_id)
+    if sku is None:
+        raise HTTPException(status_code=404, detail="Filament SKU not found")
+    try:
+        updated = set_sku_type_series(db, sku, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return filament_sku_to_read(updated)
+
+
+@router.post("/filament/skus/{sku_id}/sealed-stock-adjust", response_model=FilamentSkuRead)
+def api_adjust_filament_sku_stock(
+    sku_id: int,
+    data: FilamentSkuStockAdjust,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    sku = get_sku(db, sku_id)
+    if sku is None:
+        raise HTTPException(status_code=404, detail="Filament SKU not found")
+    try:
+        updated = adjust_sku_stock(db, sku, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return filament_sku_to_read(updated)
+
+
+@router.get("/filament/inventory/summary", response_model=FilamentInventorySummaryRead)
+def api_get_filament_inventory_summary(db: Session = Depends(get_db)) -> dict[str, Any]:
+    return build_inventory_summary(db)
+
+
+@router.get("/filament/spools", response_model=list[FilamentSpoolRead])
+def api_list_filament_spools(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
+    return [filament_spool_to_read(row) for row in list_filament_spools(db)]
+
+
+@router.post("/filament/spools", response_model=FilamentSpoolRead, status_code=status.HTTP_201_CREATED)
+def api_create_filament_spool(data: FilamentSpoolCreate, db: Session = Depends(get_db)) -> dict[str, Any]:
+    try:
+        spool = create_filament_spool(db, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return filament_spool_to_read(spool)
+
+
+@router.get("/filament/spools/{spool_id}", response_model=FilamentSpoolRead)
+def api_get_filament_spool(spool_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
+    spool = get_filament_spool(db, spool_id)
     if spool is None:
-        raise HTTPException(status_code=404, detail="Spool not found")
-    return update_spool(db, spool, data)
+        raise HTTPException(status_code=404, detail="Filament spool not found")
+    return filament_spool_to_read(spool)
+
+
+@router.patch("/filament/spools/{spool_id}", response_model=FilamentSpoolRead)
+def api_update_filament_spool(
+    spool_id: int,
+    data: FilamentSpoolUpdate,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    spool = get_filament_spool(db, spool_id)
+    if spool is None:
+        raise HTTPException(status_code=404, detail="Filament spool not found")
+    try:
+        updated = update_filament_spool(db, spool, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return filament_spool_to_read(updated)
+
+
+@router.post("/filament/spools/{spool_id}/confirm-sku", response_model=FilamentSpoolRead)
+def api_confirm_filament_spool_sku(spool_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
+    spool = get_filament_spool(db, spool_id)
+    if spool is None:
+        raise HTTPException(status_code=404, detail="Filament spool not found")
+    return filament_spool_to_read(confirm_filament_spool_sku_review(db, spool))
+
+
+@router.delete("/filament/spools/{spool_id}", status_code=status.HTTP_204_NO_CONTENT)
+def api_delete_filament_spool(spool_id: int, db: Session = Depends(get_db)) -> Response:
+    spool = get_filament_spool(db, spool_id)
+    if spool is None:
+        raise HTTPException(status_code=404, detail="Filament spool not found")
+    try:
+        delete_filament_spool(db, spool)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/filament/spools/{spool_id}/events", response_model=FilamentSpoolEventsRead)
+def api_get_filament_spool_events(spool_id: int, db: Session = Depends(get_db)) -> dict[str, list[Any]]:
+    if get_filament_spool(db, spool_id) is None:
+        raise HTTPException(status_code=404, detail="Filament spool not found")
+    return list_filament_spool_events(db, spool_id)
+
+
+@router.post("/filament/spools/{spool_id}/weight", response_model=FilamentSpoolRead)
+def api_update_filament_spool_weight(
+    spool_id: int,
+    data: FilamentSpoolWeightUpdate,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    spool = get_filament_spool(db, spool_id)
+    if spool is None:
+        raise HTTPException(status_code=404, detail="Filament spool not found")
+    try:
+        updated = update_filament_weight(db, spool, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return filament_spool_to_read(updated)
+
+
+@router.post("/filament/spools/{spool_id}/location", response_model=FilamentSpoolRead)
+def api_update_filament_spool_location(
+    spool_id: int,
+    data: FilamentSpoolLocationUpdate,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    spool = get_filament_spool(db, spool_id)
+    if spool is None:
+        raise HTTPException(status_code=404, detail="Filament spool not found")
+    return filament_spool_to_read(update_filament_location(db, spool, data))
 
 
 @router.post("/ams/slots/{slot_id}/bind", response_model=AmsSlotRead)
@@ -883,31 +1243,16 @@ def api_bind_slot(slot_id: int, data: SlotBindRequest, db: Session = Depends(get
     slot = db.get(AmsSlot, slot_id)
     if slot is None:
         raise HTTPException(status_code=404, detail="AMS slot not found")
-    spool = get_spool(db, data.spool_id)
-    if spool is None:
-        raise HTTPException(status_code=404, detail="Spool not found")
-    return bind_slot_to_spool(db, slot, spool)
+    filament_spool = get_filament_spool(db, data.spool_id)
+    if filament_spool is None:
+        raise HTTPException(status_code=404, detail="Filament spool not found")
+    return bind_slot_to_filament_spool(db, slot, filament_spool)
 
 
-@router.get("/spools/{spool_id}/locations")
-def api_get_spool_locations(spool_id: int, db: Session = Depends(get_db)) -> list[dict[str, Any]]:
-    if get_spool(db, spool_id) is None:
-        raise HTTPException(status_code=404, detail="Spool not found")
-    rows = db.scalars(
-        select(SpoolLocation).where(SpoolLocation.spool_id == spool_id).order_by(SpoolLocation.id.desc())
-    ).all()
-    return [
-        {
-            "id": row.id,
-            "spool_id": row.spool_id,
-            "printer_id": row.printer_id,
-            "ams_id": row.ams_id,
-            "tray_id": row.tray_id,
-            "event_type": row.event_type,
-            "moved_at": row.moved_at,
-        }
-        for row in rows
-    ]
+@router.api_route("/spools", methods=["GET", "POST", "PATCH", "DELETE"])
+@router.api_route("/spools/{path:path}", methods=["GET", "POST", "PATCH", "DELETE"])
+def api_legacy_spools_removed(path: str | None = None) -> None:
+    raise HTTPException(status_code=410, detail="Legacy /api/spools has been removed; use /api/filament/spools")
 
 
 @router.get("/debug/raw-mqtt", response_model=list[RawMqttMessageRead])
@@ -922,11 +1267,6 @@ def api_list_raw_mqtt(limit: int = 50, db: Session = Depends(get_db)) -> list[Ra
 @router.get("/debug/events", response_model=list[PrinterEventRead])
 def api_list_printer_events(limit: int = 100, db: Session = Depends(get_db)) -> list[PrinterEvent]:
     return list(db.scalars(select(PrinterEvent).order_by(PrinterEvent.id.desc()).limit(limit)).all())
-
-
-@router.get("/debug/inventory-events", response_model=list[InventoryEventRead])
-def api_list_inventory_events(limit: int = 100, db: Session = Depends(get_db)) -> list[InventoryEvent]:
-    return list(db.scalars(select(InventoryEvent).order_by(InventoryEvent.id.desc()).limit(limit)).all())
 
 
 @router.get("/notifications/targets", response_model=list[NotificationTargetRead])
@@ -1011,6 +1351,7 @@ def api_list_notification_deliveries(
 @router.get("/export")
 def api_export(
     type: str = Query(default="json", pattern="^(json|csv)$"),  # noqa: A002
+    mode: str = Query(default="redacted", pattern="^(redacted|backup)$"),
     sections: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ) -> Response:
@@ -1022,10 +1363,22 @@ def api_export(
             headers={"Content-Disposition": "attachment; filename=filament-manager-export.zip"},
         )
     return Response(
-        content=export_json_bytes(db, section_list),
+        content=export_json_bytes(db, section_list, include_sensitive=mode == "backup"),
         media_type="application/json",
         headers={"Content-Disposition": "attachment; filename=filament-manager-export.json"},
     )
+
+
+@router.post("/import")
+def api_import_backup(data: dict[str, Any], db: Session = Depends(get_db)) -> dict[str, Any]:
+    mode = str(data.get("mode") or "merge")
+    payload = data.get("payload")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Import payload must be a JSON object")
+    try:
+        return import_json_payload(db, payload, mode=mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/metrics/prometheus")
@@ -1191,6 +1544,7 @@ def _ams_slot_read(slot: AmsSlot) -> AmsSlotRead:
     read = AmsSlotRead.model_validate(slot)
     user_tray_id = _slot_user_tray_id(slot)
     slot_label = f"Slot {user_tray_id}" if user_tray_id is not None else f"Slot {slot.tray_id}"
+    context = _filament_context_from_slot(slot)
     return read.model_copy(
         update={
             "raw": redact_sensitive(read.raw),
@@ -1198,8 +1552,26 @@ def _ams_slot_read(slot: AmsSlot) -> AmsSlotRead:
             "slot_label": slot_label,
             "global_tray_id": _slot_global_tray_id(slot),
             "location_label": f"AMS {slot.ams_id} / {slot_label}",
+            "filament_brand_id": context["brand_id"],
+            "filament_brand_name": context["brand_name"],
+            "filament_material": context["material"],
+            "filament_series": context["series"],
         }
     )
+
+
+def _filament_context_from_slot(slot: AmsSlot) -> dict[str, Any]:
+    sku = slot.filament_spool.sku if slot.filament_spool and slot.filament_spool.sku else None
+    if sku is None:
+        return {"brand_id": None, "brand_name": None, "material": None, "series": None}
+    first_series = sku.type_series
+    first_brand = first_series.brand if first_series else None
+    return {
+        "brand_id": first_brand.id if first_brand else None,
+        "brand_name": first_brand.name if first_brand else None,
+        "material": first_series.material_type if first_series else None,
+        "series": first_series.series_name if first_series else None,
+    }
 
 
 def _slot_user_tray_id(slot: AmsSlot) -> int | None:

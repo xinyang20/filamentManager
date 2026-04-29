@@ -116,13 +116,19 @@ class AmsSlotRead(BaseModel):
     identity_confidence: float
     identity_warning: str | None
     is_transitioning: bool
-    spool_id: int | None
+    spool_id: int | None = None
+    filament_spool_id: int | None = None
+    filament_brand_id: int | None = None
+    filament_brand_name: str | None = None
+    filament_material: str | None = None
+    filament_series: str | None = None
     user_tray_id: int | None = None
     slot_label: str | None = None
     global_tray_id: str | None = None
     location_label: str | None = None
     is_active: bool = False
     tray_id_name: Any | None = None
+    tray_color_name: Any | None = None
     tray_info_idx: Any | None = None
     nozzle_temp_min: Any | None = None
     nozzle_temp_max: Any | None = None
@@ -231,45 +237,302 @@ class AmsSensorHistoryRead(BaseModel):
     humidity: SensorStatsRead
 
 
-class SpoolCreate(BaseModel):
-    display_name: str = Field(min_length=1, max_length=160)
-    brand: str | None = Field(default=None, max_length=120)
-    material: str | None = Field(default=None, max_length=80)
-    series: str | None = Field(default=None, max_length=120)
-    color: str | None = Field(default=None, max_length=80)
-    sealed_quantity: int = Field(default=1, ge=0)
-    status: str = Field(default="sealed", pattern="^(sealed|opened|active|archived)$")
+class FilamentBrandCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    aliases: list[str] = Field(default_factory=list)
+    note: str | None = None
 
 
-class SpoolUpdate(BaseModel):
-    display_name: str | None = Field(default=None, min_length=1, max_length=160)
-    brand: str | None = Field(default=None, max_length=120)
-    material: str | None = Field(default=None, max_length=80)
-    series: str | None = Field(default=None, max_length=120)
-    color: str | None = Field(default=None, max_length=80)
-    sealed_quantity: int | None = Field(default=None, ge=0)
-    status: str | None = Field(default=None, pattern="^(sealed|opened|active|archived)$")
+class FilamentBrandUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    aliases: list[str] | None = None
+    note: str | None = None
 
 
-class SpoolRead(BaseModel):
+class FilamentBrandRead(BaseModel):
     id: int
-    identity_key: str | None
-    identity_source: str
-    display_name: str
-    brand: str | None
-    material: str | None
-    series: str | None
-    color: str | None
-    status: str
-    sealed_quantity: int
-    opened_at: datetime | None
-    current_printer_id: int | None
-    current_ams_id: str | None
-    current_tray_id: str | None
+    name: str
+    aliases: list[str]
+    note: str | None
+    type_series_count: int = 0
+    sku_count: int = 0
+    spool_count: int = 0
     created_at: datetime
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class FilamentTypeSeriesCreate(BaseModel):
+    brand_id: int | None = Field(default=None, gt=0)
+    material_type: str = Field(min_length=1, max_length=40)
+    series_name: str = Field(min_length=1, max_length=120)
+    empty_spool_weight_g: float | None = Field(default=None, ge=0)
+    config: dict[str, Any] = Field(default_factory=dict)
+    note: str | None = None
+    brand_ids: list[int] = Field(default_factory=list)
+
+
+class FilamentTypeSeriesUpdate(BaseModel):
+    brand_id: int | None = Field(default=None, gt=0)
+    material_type: str | None = Field(default=None, min_length=1, max_length=40)
+    series_name: str | None = Field(default=None, min_length=1, max_length=120)
+    empty_spool_weight_g: float | None = Field(default=None, ge=0)
+    config: dict[str, Any] | None = None
+    note: str | None = None
+
+
+class FilamentTypeSeriesBrandSet(BaseModel):
+    brand_id: int | None = Field(default=None, gt=0)
+    brand_ids: list[int] = Field(default_factory=list)
+
+
+class FilamentTypeSeriesRead(BaseModel):
+    id: int
+    brand_id: int
+    brand_name: str | None = None
+    material_type: str
+    series_name: str
+    empty_spool_weight_g: float | None
+    config: dict[str, Any]
+    note: str | None
+    brand_ids: list[int] = Field(default_factory=list)
+    brands: list[dict[str, Any]] = Field(default_factory=list)
+    sku_count: int = 0
+    spool_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class FilamentSkuCreate(BaseModel):
+    type_series_id: int | None = Field(default=None, gt=0)
+    color_name: str | None = Field(default=None, max_length=120)
+    color_hex: str | None = Field(default=None, max_length=16)
+    nominal_weight_g: float = Field(default=1000.0, ge=0)
+    note: str | None = None
+    type_series_ids: list[int] = Field(default_factory=list)
+    sealed_quantity: int = Field(default=0, ge=0)
+
+
+class FilamentSkuUpdate(BaseModel):
+    type_series_id: int | None = Field(default=None, gt=0)
+    color_name: str | None = Field(default=None, max_length=120)
+    color_hex: str | None = Field(default=None, max_length=16)
+    nominal_weight_g: float | None = Field(default=None, ge=0)
+    note: str | None = None
+
+
+class FilamentSkuTypeSeriesSet(BaseModel):
+    type_series_id: int | None = Field(default=None, gt=0)
+    type_series_ids: list[int] = Field(default_factory=list)
+
+
+class FilamentSkuStockAdjust(BaseModel):
+    delta: int
+    reason: str | None = None
+
+
+class FilamentSkuRead(BaseModel):
+    id: int
+    type_series_id: int | None = None
+    brand_id: int | None = None
+    brand_name: str | None = None
+    material: str | None = None
+    series: str | None = None
+    color_name: str | None
+    color_hex: str | None
+    color_value: str | None = None
+    nominal_weight_g: float
+    empty_spool_weight_g: float | None = None
+    filament_diameter_mm: float = 1.75
+    density_g_cm3: float | None = None
+    tray_info_idx: str | None = None
+    sealed_quantity: int
+    note: str | None
+    type_series_ids: list[int] = Field(default_factory=list)
+    type_series: list[dict[str, Any]] = Field(default_factory=list)
+    brands: list[dict[str, Any]] = Field(default_factory=list)
+    opened_spool_count: int = 0
+    ams_spool_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class FilamentSpoolCreate(BaseModel):
+    sku_id: int | None = None
+    official_spool_uid: str | None = Field(default=None, max_length=220)
+    identity_source: str = Field(default="manual", pattern="^(ams_official_id|manual|imported)$")
+    nominal_weight_g: float | None = Field(default=None, ge=0)
+    actual_weight_g: float | None = Field(default=None, ge=0)
+    status: str = Field(
+        default="opened_in_storage",
+        pattern="^(sealed_stock_virtual|opened_in_storage|loaded_in_ams|needs_location|empty|archived|unknown)$",
+    )
+    opened_at: datetime | None = None
+    current_printer_id: int | None = None
+    current_ams_id: str | None = Field(default=None, max_length=40)
+    current_tray_id: str | None = Field(default=None, max_length=40)
+    storage_location: str | None = None
+    note: str | None = None
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+class FilamentSpoolUpdate(BaseModel):
+    sku_id: int | None = None
+    official_spool_uid: str | None = Field(default=None, max_length=220)
+    identity_source: str | None = Field(default=None, pattern="^(ams_official_id|manual|imported)$")
+    nominal_weight_g: float | None = Field(default=None, ge=0)
+    actual_weight_g: float | None = Field(default=None, ge=0)
+    status: str | None = Field(
+        default=None,
+        pattern="^(sealed_stock_virtual|opened_in_storage|loaded_in_ams|needs_location|empty|archived|unknown)$",
+    )
+    opened_at: datetime | None = None
+    current_printer_id: int | None = None
+    current_ams_id: str | None = Field(default=None, max_length=40)
+    current_tray_id: str | None = Field(default=None, max_length=40)
+    storage_location: str | None = None
+    note: str | None = None
+    config: dict[str, Any] | None = None
+
+
+class FilamentSpoolWeightUpdate(BaseModel):
+    actual_weight_g: float = Field(ge=0)
+    note: str | None = None
+
+
+class FilamentSpoolLocationUpdate(BaseModel):
+    printer_id: int | None = None
+    ams_id: str | None = Field(default=None, max_length=40)
+    tray_id: str | None = Field(default=None, max_length=40)
+    storage_location: str | None = None
+    note: str | None = None
+
+
+class FilamentSpoolRead(BaseModel):
+    id: int
+    sku_id: int | None
+    legacy_spool_id: int | None = None
+    sku_label: str | None = None
+    brand_id: int | None = None
+    brand_name: str | None = None
+    material: str | None = None
+    series: str | None = None
+    type_series: list[dict[str, Any]] = Field(default_factory=list)
+    brands: list[dict[str, Any]] = Field(default_factory=list)
+    color_name: str | None = None
+    color_hex: str | None = None
+    color_value: str | None = None
+    official_spool_uid: str | None
+    identity_key: str | None = None
+    tray_uuid: str | None = None
+    tag_uid: str | None = None
+    identity_source: str
+    nominal_weight_g: float | None
+    actual_weight_g: float | None
+    initial_net_weight_g: float | None = None
+    current_remaining_g: float | None = None
+    used_weight_g: float = 0
+    empty_spool_weight_g: float | None = None
+    status: str
+    opened_at: datetime | None
+    first_loaded_at: datetime | None = None
+    last_used_at: datetime | None = None
+    current_printer_id: int | None
+    current_ams_id: str | None
+    current_tray_id: str | None
+    storage_location: str | None
+    manual_location: str | None = None
+    manual_quantity_protected: bool = False
+    last_weighed_g: float | None = None
+    last_ams_remain_percent: int | None = None
+    note: str | None
+    config: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class FilamentSpoolEventRead(BaseModel):
+    id: int
+    spool_id: int | None
+    sku_id: int | None
+    printer_id: int | None
+    ams_id: str | None
+    tray_id: str | None
+    event_type: str
+    previous: dict[str, Any] | None
+    current: dict[str, Any] | None
+    quantity_delta: int | None
+    message: str
+    note: str | None
+    data: dict[str, Any] | None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class FilamentSpoolEventsRead(BaseModel):
+    events: list[FilamentSpoolEventRead]
+
+
+class FilamentColorMappingCreate(BaseModel):
+    brand_id: int = Field(gt=0)
+    type_series_id: int = Field(gt=0)
+    color_name: str = Field(min_length=1, max_length=120)
+    color_hex: str = Field(min_length=1, max_length=16)
+    note: str | None = None
+
+
+class FilamentColorMappingUpdate(BaseModel):
+    brand_id: int | None = Field(default=None, gt=0)
+    type_series_id: int | None = Field(default=None, gt=0)
+    color_name: str | None = Field(default=None, min_length=1, max_length=120)
+    color_hex: str | None = Field(default=None, min_length=1, max_length=16)
+    note: str | None = None
+
+
+class FilamentColorMappingRead(BaseModel):
+    id: int
+    brand_id: int
+    brand_name: str | None = None
+    type_series_id: int
+    material_type: str | None = None
+    series_name: str | None = None
+    material: str | None = None
+    series: str | None = None
+    color_name: str
+    color_hex: str
+    hex_value: str | None = None
+    official_name: str | None = None
+    note: str | None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class FilamentColorMappingGapRead(BaseModel):
+    sku_id: int
+    color_name: str | None
+    color_hex: str | None
+    missing: list[str]
+    type_series: list[dict[str, Any]] = Field(default_factory=list)
+    brands: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class FilamentInventorySummaryRead(BaseModel):
+    totals: dict[str, int]
+    skus: list[dict[str, Any]]
+    sealed_stock: list[dict[str, Any]]
+    opened_spools: list[dict[str, Any]]
+    ams_spools: list[dict[str, Any]]
+    needs_location_spools: list[dict[str, Any]]
 
 
 class SlotBindRequest(BaseModel):
@@ -294,18 +557,6 @@ class PrinterEventRead(BaseModel):
     severity: str
     message: str
     dedupe_key: str | None
-    data: dict[str, Any] | None
-    created_at: datetime
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-class InventoryEventRead(BaseModel):
-    id: int
-    spool_id: int
-    event_type: str
-    quantity_delta: int | None
-    message: str
     data: dict[str, Any] | None
     created_at: datetime
 

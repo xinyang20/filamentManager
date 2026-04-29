@@ -1,101 +1,1947 @@
 from __future__ import annotations
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from typing import Any
 
-from filament_manager.db.models import AmsSlot, InventoryEvent, Spool, SpoolLocation, utc_now
-from filament_manager.schemas import SpoolCreate, SpoolUpdate
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session, object_session
+
+from filament_manager.db.models import (
+    AmsSlot,
+    FilamentBrand,
+    FilamentColorMapping,
+    FilamentSku,
+    FilamentSpool,
+    FilamentSpoolEvent,
+    FilamentStockBalance,
+    FilamentTypeSeries,
+    utc_now,
+)
+from filament_manager.mqtt.parser import ParsedAmsSlot, is_valid_identity_value
+from filament_manager.schemas import (
+    FilamentBrandCreate,
+    FilamentBrandUpdate,
+    FilamentColorMappingCreate,
+    FilamentColorMappingUpdate,
+    FilamentSkuCreate,
+    FilamentSkuStockAdjust,
+    FilamentSkuTypeSeriesSet,
+    FilamentSkuUpdate,
+    FilamentSpoolCreate,
+    FilamentSpoolLocationUpdate,
+    FilamentSpoolUpdate,
+    FilamentSpoolWeightUpdate,
+    FilamentTypeSeriesBrandSet,
+    FilamentTypeSeriesCreate,
+    FilamentTypeSeriesUpdate,
+)
 
 
-def list_spools(db: Session) -> list[Spool]:
-    return list(db.scalars(select(Spool).order_by(Spool.id.desc())).all())
+MATERIAL_TYPES = {"PLA", "PETG", "PC", "ABS", "ASA", "TPU", "PA", "Support", "Other"}
+REAL_SPOOL_STATUSES = {
+    "opened_in_storage",
+    "loaded_in_ams",
+    "needs_location",
+    "empty",
+    "archived",
+    "unknown",
+}
 
 
-def get_spool(db: Session, spool_id: int) -> Spool | None:
-    return db.get(Spool, spool_id)
+def list_brands(db: Session) -> list[FilamentBrand]:
+    return list(db.scalars(select(FilamentBrand).order_by(func.lower(FilamentBrand.name), FilamentBrand.id)).all())
 
 
-def create_spool(db: Session, data: SpoolCreate) -> Spool:
-    spool = Spool(
-        identity_source="manual",
-        display_name=data.display_name,
-        brand=data.brand,
-        material=data.material,
-        series=data.series,
-        color=data.color,
-        sealed_quantity=data.sealed_quantity,
+def get_brand(db: Session, brand_id: int) -> FilamentBrand | None:
+    return db.get(FilamentBrand, brand_id)
+
+
+def create_brand(db: Session, data: FilamentBrandCreate) -> FilamentBrand:
+    brand = FilamentBrand(
+        name=_required_text(data.name, "Brand name"),
+        aliases=_clean_aliases(data.aliases),
+        note=data.note,
+    )
+    db.add(brand)
+    db.commit()
+    db.refresh(brand)
+    return brand
+
+
+def update_brand(db: Session, brand: FilamentBrand, data: FilamentBrandUpdate) -> FilamentBrand:
+    updates = data.model_dump(exclude_unset=True)
+    if "name" in updates and updates["name"] is not None:
+        brand.name = _required_text(updates["name"], "Brand name")
+    if "aliases" in updates and updates["aliases"] is not None:
+        brand.aliases = _clean_aliases(updates["aliases"])
+    if "note" in updates:
+        brand.note = updates["note"]
+    db.add(brand)
+    db.commit()
+    db.refresh(brand)
+    return brand
+
+
+def delete_brand(db: Session, brand: FilamentBrand) -> None:
+    referenced = db.scalars(select(FilamentTypeSeries.id).where(FilamentTypeSeries.brand_id == brand.id).limit(1)).first()
+    if referenced is not None:
+        raise ValueError("Brand is still associated with filament type series")
+    mapping = db.scalars(select(FilamentColorMapping.id).where(FilamentColorMapping.brand_id == brand.id).limit(1)).first()
+    if mapping is not None:
+        raise ValueError("Brand is still referenced by color mappings")
+    db.delete(brand)
+    db.commit()
+
+
+def list_type_series(db: Session) -> list[FilamentTypeSeries]:
+    return list(
+        db.scalars(
+            select(FilamentTypeSeries).order_by(
+                func.lower(FilamentTypeSeries.material_type),
+                func.lower(FilamentTypeSeries.series_name),
+                FilamentTypeSeries.id,
+            )
+        ).all()
+    )
+
+
+def get_type_series(db: Session, type_series_id: int) -> FilamentTypeSeries | None:
+    return db.get(FilamentTypeSeries, type_series_id)
+
+
+def type_series_exists(
+    db: Session,
+    *,
+    brand_id: int,
+    material_type: str,
+    series_name: str,
+    exclude_id: int | None = None,
+) -> bool:
+    stmt = select(FilamentTypeSeries.id).where(
+        FilamentTypeSeries.brand_id == brand_id,
+        func.lower(FilamentTypeSeries.material_type) == material_type.lower(),
+        func.lower(FilamentTypeSeries.series_name) == series_name.lower(),
+    )
+    if exclude_id is not None:
+        stmt = stmt.where(FilamentTypeSeries.id != exclude_id)
+    return db.scalars(stmt.limit(1)).first() is not None
+
+
+def create_type_series(db: Session, data: FilamentTypeSeriesCreate) -> FilamentTypeSeries:
+    payload = _type_series_payload(data.model_dump())
+    if get_brand(db, payload["brand_id"]) is None:
+        raise ValueError("Brand not found")
+    if type_series_exists(
+        db,
+        brand_id=payload["brand_id"],
+        material_type=payload["material_type"],
+        series_name=payload["series_name"],
+    ):
+        raise ValueError("Type series already exists for this brand")
+    type_series = FilamentTypeSeries(**payload)
+    db.add(type_series)
+    db.commit()
+    db.refresh(type_series)
+    return type_series
+
+
+def update_type_series(
+    db: Session,
+    type_series: FilamentTypeSeries,
+    data: FilamentTypeSeriesUpdate,
+) -> FilamentTypeSeries:
+    updates = _type_series_payload(data.model_dump(exclude_unset=True), partial=True)
+    if "brand_id" in updates and get_brand(db, updates["brand_id"]) is None:
+        raise ValueError("Brand not found")
+    next_brand_id = updates.get("brand_id", type_series.brand_id)
+    next_material_type = updates.get("material_type", type_series.material_type)
+    next_series_name = updates.get("series_name", type_series.series_name)
+    if type_series_exists(
+        db,
+        brand_id=next_brand_id,
+        material_type=next_material_type,
+        series_name=next_series_name,
+        exclude_id=type_series.id,
+    ):
+        raise ValueError("Type series already exists for this brand")
+    for key, value in updates.items():
+        setattr(type_series, key, value)
+    db.add(type_series)
+    db.commit()
+    db.refresh(type_series)
+    return type_series
+
+
+def delete_type_series(db: Session, type_series: FilamentTypeSeries) -> None:
+    sku_link = db.scalars(select(FilamentSku.id).where(FilamentSku.type_series_id == type_series.id).limit(1)).first()
+    if sku_link is not None:
+        raise ValueError("Type series is still associated with SKUs")
+    spool_link = db.scalars(
+        select(FilamentSpool.id)
+        .join(FilamentSku, FilamentSpool.sku_id == FilamentSku.id)
+        .where(FilamentSku.type_series_id == type_series.id)
+        .limit(1)
+    ).first()
+    if spool_link is not None:
+        raise ValueError("Type series is still referenced by filament spools")
+    db.delete(type_series)
+    db.commit()
+
+
+def set_type_series_brands(
+    db: Session,
+    type_series: FilamentTypeSeries,
+    data: FilamentTypeSeriesBrandSet,
+) -> FilamentTypeSeries:
+    brand_id = data.brand_id or (data.brand_ids[0] if data.brand_ids else None)
+    if brand_id is None:
+        raise ValueError("Brand is required")
+    if get_brand(db, brand_id) is None:
+        raise ValueError("Brand not found")
+    type_series.brand_id = brand_id
+    db.add(type_series)
+    db.commit()
+    db.refresh(type_series)
+    return type_series
+
+
+def list_skus(db: Session) -> list[FilamentSku]:
+    return list(db.scalars(select(FilamentSku).order_by(FilamentSku.id.desc())).all())
+
+
+def get_sku(db: Session, sku_id: int) -> FilamentSku | None:
+    return db.get(FilamentSku, sku_id)
+
+
+def create_sku(db: Session, data: FilamentSkuCreate) -> FilamentSku:
+    payload = _sku_payload(data.model_dump())
+    if get_type_series(db, payload["type_series_id"]) is None:
+        raise ValueError("Type series not found")
+    sku = FilamentSku(**payload)
+    db.add(sku)
+    db.flush()
+    _apply_color_mappings_to_sku_gaps(db)
+    _ensure_color_mapping_from_sku(db, sku)
+    if data.sealed_quantity > 0:
+        balance = _stock_balance(db, sku, create=True)
+        balance.sealed_quantity = data.sealed_quantity
+        db.add(balance)
+        _record_event(
+            db,
+            sku_id=sku.id,
+            event_type="sealed_stock_adjusted",
+            quantity_delta=data.sealed_quantity,
+            message="Initial sealed stock set",
+            current={"sealed_quantity": data.sealed_quantity},
+        )
+    db.commit()
+    db.refresh(sku)
+    return sku
+
+
+def update_sku(db: Session, sku: FilamentSku, data: FilamentSkuUpdate) -> FilamentSku:
+    updates = _sku_payload(data.model_dump(exclude_unset=True), partial=True)
+    if "type_series_id" in updates and get_type_series(db, updates["type_series_id"]) is None:
+        raise ValueError("Type series not found")
+    for key, value in updates.items():
+        setattr(sku, key, value)
+    db.add(sku)
+    _apply_color_mappings_to_sku_gaps(db)
+    _ensure_color_mapping_from_sku(db, sku)
+    db.commit()
+    db.refresh(sku)
+    return sku
+
+
+def set_sku_type_series(
+    db: Session,
+    sku: FilamentSku,
+    data: FilamentSkuTypeSeriesSet,
+) -> FilamentSku:
+    type_series_id = data.type_series_id or (data.type_series_ids[0] if data.type_series_ids else None)
+    if type_series_id is None:
+        raise ValueError("Type series is required")
+    if get_type_series(db, type_series_id) is None:
+        raise ValueError("Type series not found")
+    sku.type_series_id = type_series_id
+    db.add(sku)
+    db.commit()
+    db.refresh(sku)
+    return sku
+
+
+def delete_sku(db: Session, sku: FilamentSku, *, force: bool = False) -> None:
+    referenced = db.scalars(select(FilamentSpool.id).where(FilamentSpool.sku_id == sku.id).limit(1)).first()
+    if referenced is not None:
+        raise ValueError("SKU is still referenced by filament spools")
+    sealed_quantity = _sealed_quantity(sku)
+    if sealed_quantity > 0:
+        if not force:
+            raise ValueError("SKU still has sealed stock balance")
+        balance = _stock_balance(db, sku, create=False)
+        if balance is not None:
+            balance.sealed_quantity = 0
+            db.add(balance)
+    db.delete(sku)
+    db.commit()
+
+
+def adjust_sku_stock(db: Session, sku: FilamentSku, data: FilamentSkuStockAdjust) -> FilamentSku:
+    balance = _stock_balance(db, sku, create=True)
+    previous = balance.sealed_quantity
+    next_quantity = previous + data.delta
+    if next_quantity < 0:
+        raise ValueError("Sealed stock cannot become negative")
+    balance.sealed_quantity = next_quantity
+    db.add(balance)
+    _record_event(
+        db,
+        sku_id=sku.id,
+        event_type="sealed_stock_adjusted",
+        quantity_delta=data.delta,
+        message="Sealed stock adjusted",
+        previous={"sealed_quantity": previous},
+        current={"sealed_quantity": next_quantity},
+        note=data.reason,
+    )
+    db.commit()
+    db.refresh(sku)
+    return sku
+
+
+def list_filament_spools(db: Session) -> list[FilamentSpool]:
+    return [
+        spool
+        for spool in db.scalars(select(FilamentSpool).order_by(FilamentSpool.id.desc())).all()
+        if not _is_phantom_ams_spool(spool)
+    ]
+
+
+def get_filament_spool(db: Session, spool_id: int) -> FilamentSpool | None:
+    return db.get(FilamentSpool, spool_id)
+
+
+def create_filament_spool(db: Session, data: FilamentSpoolCreate) -> FilamentSpool:
+    sku = _sku_or_none(db, data.sku_id)
+    uid = _official_uid_or_none(data.official_spool_uid)
+    if uid is not None and _find_spool_by_official_uid(db, uid) is not None:
+        raise ValueError("Official spool UID already exists")
+    spool = FilamentSpool(
+        sku_id=sku.id if sku else None,
+        official_spool_uid=uid,
+        identity_source=data.identity_source,
+        nominal_weight_g=data.nominal_weight_g if data.nominal_weight_g is not None else (sku.nominal_weight_g if sku else None),
+        actual_weight_g=data.actual_weight_g,
         status=data.status,
-        opened_at=utc_now() if data.status in {"opened", "active"} else None,
+        opened_at=data.opened_at or (utc_now() if data.status in {"opened_in_storage", "loaded_in_ams"} else None),
+        current_printer_id=data.current_printer_id,
+        current_ams_id=data.current_ams_id,
+        current_tray_id=data.current_tray_id,
+        storage_location=data.storage_location,
+        note=data.note,
+        config=data.config,
     )
     db.add(spool)
     db.flush()
-    db.add(
-        InventoryEvent(
-            spool_id=spool.id,
-            event_type="inventory.spool_created",
-            quantity_delta=data.sealed_quantity,
-            message="Spool inventory entry created",
-            data={"status": data.status},
-        )
+    if sku is not None and spool.status in {"opened_in_storage", "loaded_in_ams"}:
+        _open_one_from_stock_if_available(db, sku, spool=spool, note="Manual spool created")
+    _record_event(
+        db,
+        spool=spool,
+        sku_id=spool.sku_id,
+        event_type="opened_from_stock" if spool.status in {"opened_in_storage", "loaded_in_ams"} else "location_updated",
+        message="Filament spool created",
+        current=_spool_snapshot(spool),
     )
+    if spool.status == "loaded_in_ams":
+        _record_event(
+            db,
+            spool=spool,
+            sku_id=spool.sku_id,
+            event_type="loaded_to_ams",
+            message="Spool loaded to AMS",
+            current=_location_snapshot(spool),
+        )
     db.commit()
     db.refresh(spool)
     return spool
 
 
-def update_spool(db: Session, spool: Spool, data: SpoolUpdate) -> Spool:
+def update_filament_spool(db: Session, spool: FilamentSpool, data: FilamentSpoolUpdate) -> FilamentSpool:
     updates = data.model_dump(exclude_unset=True)
-    previous_status = spool.status
+    if "sku_id" in updates:
+        _sku_or_none(db, updates["sku_id"])
+    if "official_spool_uid" in updates:
+        uid = _official_uid_or_none(updates["official_spool_uid"])
+        existing = _find_spool_by_official_uid(db, uid) if uid else None
+        if existing is not None and existing.id != spool.id:
+            raise ValueError("Official spool UID already exists")
+        updates["official_spool_uid"] = uid
+    previous = _spool_snapshot(spool)
     for key, value in updates.items():
         setattr(spool, key, value)
-    if previous_status == "sealed" and spool.status in {"opened", "active"} and spool.opened_at is None:
+    if spool.status in {"opened_in_storage", "loaded_in_ams"} and spool.opened_at is None:
         spool.opened_at = utc_now()
     db.add(spool)
-    db.add(
-        InventoryEvent(
-            spool_id=spool.id,
-            event_type="inventory.spool_updated",
-            quantity_delta=None,
-            message="Spool inventory entry updated",
-            data=updates,
-        )
+    _record_event(
+        db,
+        spool=spool,
+        sku_id=spool.sku_id,
+        event_type="weight_updated" if "actual_weight_g" in updates else "location_updated",
+        message="Filament spool updated",
+        previous=previous,
+        current=_spool_snapshot(spool),
     )
     db.commit()
     db.refresh(spool)
     return spool
 
 
-def bind_slot_to_spool(db: Session, slot: AmsSlot, spool: Spool) -> AmsSlot:
-    was_sealed = spool.status == "sealed"
-    slot.spool_id = spool.id
-    if was_sealed:
-        spool.status = "active"
-        spool.opened_at = utc_now()
-        if spool.sealed_quantity > 0:
-            spool.sealed_quantity -= 1
+def confirm_filament_spool_sku_review(db: Session, spool: FilamentSpool) -> FilamentSpool:
+    previous_config = dict(spool.config or {})
+    config = dict(previous_config)
+    config.pop("needs_sku_review", None)
+    config["sku_review_confirmed_at"] = utc_now().isoformat()
+    spool.config = config
+    if spool.status == "unknown" and spool.sku_id is not None:
+        spool.status = "loaded_in_ams" if spool.current_ams_id is not None else "opened_in_storage"
+    db.add(spool)
+    _record_event(
+        db,
+        spool=spool,
+        sku_id=spool.sku_id,
+        event_type="sku_confirmed",
+        message="Filament spool SKU confirmed",
+        previous={"config": previous_config},
+        current={"config": config},
+    )
+    db.commit()
+    db.refresh(spool)
+    return spool
+
+
+def delete_filament_spool(db: Session, spool: FilamentSpool) -> None:
+    has_events = db.scalars(select(FilamentSpoolEvent.id).where(FilamentSpoolEvent.spool_id == spool.id).limit(1)).first()
+    if has_events is not None and spool.status != "archived":
+        raise ValueError("Archive spool before deleting history-bearing spool")
+    db.delete(spool)
+    db.commit()
+
+
+def update_filament_location(
+    db: Session,
+    spool: FilamentSpool,
+    data: FilamentSpoolLocationUpdate,
+) -> FilamentSpool:
+    previous = _location_snapshot(spool)
+    spool.current_printer_id = data.printer_id
+    spool.current_ams_id = data.ams_id
+    spool.current_tray_id = data.tray_id
+    spool.storage_location = data.storage_location
+    if data.printer_id and data.ams_id and data.tray_id:
+        spool.status = "loaded_in_ams"
+        if spool.opened_at is None:
+            spool.opened_at = utc_now()
+    elif data.storage_location:
+        spool.status = "opened_in_storage" if spool.status != "empty" else spool.status
+    elif spool.status == "loaded_in_ams":
+        spool.status = "needs_location"
+    db.add(spool)
+    _record_event(
+        db,
+        spool=spool,
+        sku_id=spool.sku_id,
+        event_type="location_updated",
+        message="Filament spool location updated",
+        previous=previous,
+        current=_location_snapshot(spool),
+        note=data.note,
+    )
+    db.commit()
+    db.refresh(spool)
+    return spool
+
+
+def update_filament_weight(
+    db: Session,
+    spool: FilamentSpool,
+    data: FilamentSpoolWeightUpdate,
+) -> FilamentSpool:
+    previous = {"actual_weight_g": spool.actual_weight_g}
+    spool.actual_weight_g = data.actual_weight_g
+    db.add(spool)
+    _record_event(
+        db,
+        spool=spool,
+        sku_id=spool.sku_id,
+        event_type="weight_updated",
+        message="Filament spool weight updated",
+        previous=previous,
+        current={"actual_weight_g": spool.actual_weight_g},
+        note=data.note,
+    )
+    db.commit()
+    db.refresh(spool)
+    return spool
+
+
+def list_filament_spool_events(db: Session, spool_id: int) -> dict[str, list[Any]]:
+    return {
+        "events": list(
+            db.scalars(
+                select(FilamentSpoolEvent)
+                .where(FilamentSpoolEvent.spool_id == spool_id)
+                .order_by(FilamentSpoolEvent.id.desc())
+            ).all()
+        )
+    }
+
+
+def list_color_mappings(db: Session) -> list[FilamentColorMapping]:
+    if _ensure_color_mappings_from_skus(db):
+        db.commit()
+    return list(
+        db.scalars(
+            select(FilamentColorMapping)
+            .join(FilamentBrand, FilamentColorMapping.brand_id == FilamentBrand.id)
+            .join(FilamentTypeSeries, FilamentColorMapping.type_series_id == FilamentTypeSeries.id)
+            .order_by(
+                func.lower(FilamentBrand.name),
+                func.lower(FilamentTypeSeries.material_type),
+                func.lower(FilamentTypeSeries.series_name),
+                func.lower(FilamentColorMapping.color_name),
+            )
+        ).all()
+    )
+
+
+def get_color_mapping(db: Session, mapping_id: int) -> FilamentColorMapping | None:
+    return db.get(FilamentColorMapping, mapping_id)
+
+
+def create_color_mapping(db: Session, data: FilamentColorMappingCreate) -> FilamentColorMapping:
+    payload = _color_mapping_payload(db, data.model_dump())
+    existing = _find_color_mapping(
+        db,
+        brand_id=payload["brand_id"],
+        type_series_id=payload["type_series_id"],
+        color_name=payload["color_name"],
+        color_hex=payload["color_hex"],
+    )
+    if existing is not None:
+        raise ValueError("Color mapping already exists")
+    mapping = FilamentColorMapping(**payload)
+    db.add(mapping)
+    _apply_color_mapping_to_sku_gaps(db, **payload)
+    db.commit()
+    db.refresh(mapping)
+    return mapping
+
+
+def update_color_mapping(
+    db: Session,
+    mapping: FilamentColorMapping,
+    data: FilamentColorMappingUpdate,
+) -> FilamentColorMapping:
+    previous = {
+        "brand_id": mapping.brand_id,
+        "type_series_id": mapping.type_series_id,
+        "color_name": mapping.color_name,
+        "color_hex": mapping.color_hex,
+    }
+    updates = data.model_dump(exclude_unset=True)
+    if updates.get("brand_id") is None:
+        updates.pop("brand_id", None)
+    if updates.get("type_series_id") is None:
+        updates.pop("type_series_id", None)
+    payload = _color_mapping_payload(
+        db,
+        {
+            "brand_id": updates.get("brand_id", mapping.brand_id),
+            "type_series_id": updates.get("type_series_id", mapping.type_series_id),
+            "color_name": updates.get("color_name", mapping.color_name),
+            "color_hex": updates.get("color_hex", mapping.color_hex),
+            "note": updates.get("note", mapping.note),
+        },
+    )
+    existing = _find_color_mapping(
+        db,
+        brand_id=payload["brand_id"],
+        type_series_id=payload["type_series_id"],
+        color_name=payload["color_name"],
+        color_hex=payload["color_hex"],
+    )
+    if existing is not None and existing.id != mapping.id:
+        raise ValueError("Color mapping already exists")
+    for key, value in payload.items():
+        setattr(mapping, key, value)
+    db.add(mapping)
+    _apply_color_mapping_update_to_skus(db, previous=previous, current=payload)
+    _apply_color_mapping_to_sku_gaps(db, **payload)
+    db.commit()
+    db.refresh(mapping)
+    return mapping
+
+
+def delete_color_mapping(db: Session, mapping: FilamentColorMapping) -> None:
+    db.delete(mapping)
+    db.commit()
+
+
+def list_color_mapping_gaps(db: Session) -> list[dict[str, Any]]:
+    if _ensure_color_mappings_from_skus(db):
+        db.commit()
+    if _apply_color_mappings_to_sku_gaps(db):
+        db.commit()
+    gaps: list[dict[str, Any]] = []
+    for sku in list_skus(db):
+        missing: list[str] = []
+        if not _clean_text(sku.color_name):
+            missing.append("color_name")
+        if not _clean_text(sku.color_hex):
+            missing.append("color_hex")
+        if not missing:
+            continue
+        gaps.append(
+            {
+                "sku_id": sku.id,
+                "color_name": sku.color_name,
+                "color_hex": sku.color_hex,
+                "missing": missing,
+                "type_series": [_type_series_summary(sku.type_series)] if sku.type_series else [],
+                "brands": _sku_brand_summaries(sku),
+            }
+        )
+    return gaps
+
+
+def build_inventory_summary(db: Session) -> dict[str, Any]:
+    skus = [filament_sku_to_read(sku) for sku in list_skus(db)]
+    spools = [filament_spool_to_read(spool) for spool in list_filament_spools(db)]
+    sealed_stock = [sku for sku in skus if int(sku["sealed_quantity"]) > 0]
+    opened_spools = [spool for spool in spools if spool["status"] == "opened_in_storage"]
+    ams_spools = [spool for spool in spools if spool["current_ams_id"] or spool["status"] == "loaded_in_ams"]
+    needs_location = [spool for spool in spools if spool["status"] == "needs_location"]
+    return {
+        "totals": {
+            "sku_count": len(skus),
+            "sealed_quantity": sum(int(sku["sealed_quantity"]) for sku in skus),
+            "opened_spool_count": len(opened_spools),
+            "ams_spool_count": len(ams_spools),
+            "needs_location_count": len(needs_location),
+        },
+        "skus": skus,
+        "sealed_stock": sealed_stock,
+        "opened_spools": opened_spools,
+        "ams_spools": ams_spools,
+        "needs_location_spools": needs_location,
+    }
+
+
+def bind_slot_to_filament_spool(db: Session, slot: AmsSlot, spool: FilamentSpool) -> AmsSlot:
+    previous = _location_snapshot(spool)
+    sku = spool.sku
+    if sku is not None and spool.status == "sealed_stock_virtual":
+        _open_one_from_stock_if_available(db, sku, spool=spool, note="Spool bound to AMS slot")
+    spool.status = "loaded_in_ams"
+    spool.opened_at = spool.opened_at or utc_now()
     spool.current_printer_id = slot.printer_id
     spool.current_ams_id = slot.ams_id
     spool.current_tray_id = slot.tray_id
+    spool.storage_location = None
+    slot.filament_spool_id = spool.id
     db.add(slot)
     db.add(spool)
-    db.add(
-        SpoolLocation(
-            spool_id=spool.id,
-            printer_id=slot.printer_id,
-            ams_id=slot.ams_id,
-            tray_id=slot.tray_id,
-            event_type="spool.bound_to_slot",
-        )
-    )
-    db.add(
-        InventoryEvent(
-            spool_id=spool.id,
-            event_type="inventory.slot_bound",
-            quantity_delta=-1 if was_sealed else None,
-            message="Spool bound to AMS slot",
-            data={"printer_id": slot.printer_id, "ams_id": slot.ams_id, "tray_id": slot.tray_id},
-        )
+    _record_event(
+        db,
+        spool=spool,
+        sku_id=spool.sku_id,
+        event_type="loaded_to_ams",
+        message="Spool bound to AMS slot",
+        previous=previous,
+        current=_location_snapshot(spool),
     )
     db.commit()
     db.refresh(slot)
     return slot
+
+
+def record_print_filament_context(
+    db: Session,
+    *,
+    printer_id: int,
+    task_id: str | None,
+    gcode_file: str | None,
+    event_type: str,
+) -> None:
+    return None
+
+
+def process_ams_slot_filament(
+    db: Session,
+    *,
+    printer_id: int,
+    slot_model: AmsSlot,
+    parsed_slot: ParsedAmsSlot,
+) -> tuple[FilamentSpool | None, bool]:
+    previous_spool_id = slot_model.filament_spool_id
+    official_uid = _official_uid_from_slot(parsed_slot)
+    if parsed_slot.is_transitioning:
+        if official_uid:
+            return _find_spool_by_official_uid(db, official_uid), False
+        return (db.get(FilamentSpool, previous_spool_id), False) if previous_spool_id else (None, False)
+    if official_uid is None:
+        if _slot_is_empty_observation(parsed_slot):
+            if previous_spool_id is not None:
+                _record_ams_slot_unload(
+                    db,
+                    slot=slot_model,
+                    previous_spool_id=previous_spool_id,
+                    note="AMS slot reports empty",
+                )
+            slot_model.filament_spool_id = None
+            db.add(slot_model)
+            return None, False
+        if _slot_is_transition_without_payload(parsed_slot):
+            return (db.get(FilamentSpool, previous_spool_id), False) if previous_spool_id else (None, False)
+        if previous_spool_id is not None:
+            previous = db.get(FilamentSpool, previous_spool_id)
+            if previous is not None and previous.official_spool_uid is None:
+                if previous.sku_id is None and _slot_has_filament_payload(parsed_slot):
+                    matched, auto_created_sku = _resolve_sku_for_ams_slot(db, parsed_slot)
+                    if matched is not None:
+                        previous.sku_id = matched.id
+                        previous.nominal_weight_g = previous.nominal_weight_g or matched.nominal_weight_g
+                        _fill_sku_color_from_slot(db, matched, parsed_slot)
+                        _ensure_color_mapping_from_sku(db, matched)
+                        if not auto_created_sku:
+                            _open_one_from_stock_if_available(
+                                db,
+                                matched,
+                                spool=previous,
+                                note="AMS spool identified without official UID",
+                            )
+                        if auto_created_sku:
+                            config = dict(previous.config or {})
+                            config["needs_sku_review"] = True
+                            config["auto_created_sku_id"] = matched.id
+                            previous.config = config
+                _set_filament_loaded_location(db, previous, printer_id=printer_id, parsed_slot=parsed_slot)
+                _sync_ams_context(previous, parsed_slot)
+                db.add(slot_model)
+                db.add(previous)
+                return previous, False
+            _record_ams_slot_unload(
+                db,
+                slot=slot_model,
+                previous_spool_id=previous_spool_id,
+                note="AMS slot no longer reports an official spool UID",
+            )
+        sku, auto_created_sku = _resolve_sku_for_ams_slot(db, parsed_slot)
+        spool = _create_unknown_ams_spool(
+            db,
+            printer_id=printer_id,
+            parsed_slot=parsed_slot,
+            sku=sku,
+            auto_created_sku=auto_created_sku,
+            identity_source="manual",
+        )
+        if sku is not None and not auto_created_sku:
+            _open_one_from_stock_if_available(db, sku, spool=spool, note="AMS spool identified without official UID")
+            _fill_sku_color_from_slot(db, sku, parsed_slot)
+            _ensure_color_mapping_from_sku(db, sku)
+        _set_filament_loaded_location(db, spool, printer_id=printer_id, parsed_slot=parsed_slot)
+        _sync_ams_context(spool, parsed_slot)
+        slot_model.filament_spool_id = spool.id
+        db.add(slot_model)
+        db.add(spool)
+        return spool, True
+
+    spool = _find_spool_by_official_uid(db, official_uid)
+    created = spool is None
+    if spool is None:
+        sku, auto_created_sku = _resolve_sku_for_ams_slot(db, parsed_slot)
+        config = {"last_ams_remain_percent": parsed_slot.remain, "ams_raw": parsed_slot.raw}
+        if auto_created_sku:
+            config["needs_sku_review"] = True
+            config["auto_created_sku_id"] = sku.id if sku else None
+        spool = FilamentSpool(
+            sku_id=sku.id if sku else None,
+            official_spool_uid=official_uid,
+            identity_source="ams_official_id",
+            nominal_weight_g=(sku.nominal_weight_g if sku else _slot_nominal_weight_g(parsed_slot)),
+            status="loaded_in_ams" if sku else "unknown",
+            opened_at=utc_now() if sku else None,
+            current_printer_id=printer_id,
+            current_ams_id=parsed_slot.ams_id,
+            current_tray_id=parsed_slot.tray_id,
+            config=config,
+        )
+        db.add(spool)
+        db.flush()
+        if sku is not None and not auto_created_sku:
+            _open_one_from_stock_if_available(db, sku, spool=spool, note="AMS official spool identified")
+            _fill_sku_color_from_slot(db, sku, parsed_slot)
+            _ensure_color_mapping_from_sku(db, sku)
+            _record_event(
+                db,
+                spool=spool,
+                sku_id=sku.id,
+                event_type="opened_from_stock",
+                message="AMS official spool opened from matched SKU",
+                current=_spool_snapshot(spool),
+            )
+        elif sku is not None:
+            _record_event(
+                db,
+                spool=spool,
+                sku_id=sku.id,
+                event_type="needs_location",
+                message="AMS spool created with an auto-created SKU that needs review",
+                current=_spool_snapshot(spool),
+                data=_slot_match_context(parsed_slot),
+            )
+        else:
+            _record_event(
+                db,
+                spool=spool,
+                event_type="needs_location",
+                message="AMS spool requires SKU confirmation",
+                current=_spool_snapshot(spool),
+                data=_slot_match_context(parsed_slot),
+            )
+    elif spool.sku_id is None:
+        matched, auto_created_sku = _resolve_sku_for_ams_slot(db, parsed_slot)
+        if matched is not None:
+            spool.sku_id = matched.id
+            spool.nominal_weight_g = spool.nominal_weight_g or matched.nominal_weight_g
+            _fill_sku_color_from_slot(db, matched, parsed_slot)
+            _ensure_color_mapping_from_sku(db, matched)
+            if not auto_created_sku:
+                _open_one_from_stock_if_available(
+                    db,
+                    matched,
+                    spool=spool,
+                    note="AMS official spool completed from matched SKU",
+                )
+            if auto_created_sku:
+                config = dict(spool.config or {})
+                config["needs_sku_review"] = True
+                config["auto_created_sku_id"] = matched.id
+                spool.config = config
+
+    if not parsed_slot.is_transitioning:
+        if previous_spool_id is not None and previous_spool_id != spool.id:
+            _record_ams_slot_unload(
+                db,
+                slot=slot_model,
+                previous_spool_id=previous_spool_id,
+                note="AMS slot identity changed",
+            )
+        _set_filament_loaded_location(db, spool, printer_id=printer_id, parsed_slot=parsed_slot)
+        slot_model.filament_spool_id = spool.id
+    _sync_ams_context(spool, parsed_slot)
+    db.add(slot_model)
+    db.add(spool)
+    return spool, created
+
+
+def filament_brand_to_read(db: Session, brand: FilamentBrand) -> dict[str, Any]:
+    type_series_ids = [
+        row[0]
+        for row in db.execute(
+            select(FilamentTypeSeries.id).where(FilamentTypeSeries.brand_id == brand.id)
+        ).all()
+    ]
+    sku_count = 0
+    spool_count = 0
+    if type_series_ids:
+        sku_ids = {
+            row[0]
+            for row in db.execute(
+                select(FilamentSku.id).where(FilamentSku.type_series_id.in_(type_series_ids))
+            ).all()
+        }
+        sku_count = len(sku_ids)
+        if sku_ids:
+            spool_count = int(
+                db.scalar(select(func.count(FilamentSpool.id)).where(FilamentSpool.sku_id.in_(sku_ids))) or 0
+            )
+    return {
+        "id": brand.id,
+        "name": brand.name,
+        "aliases": brand.aliases or [],
+        "note": brand.note,
+        "type_series_count": len(type_series_ids),
+        "sku_count": sku_count,
+        "spool_count": spool_count,
+        "created_at": brand.created_at,
+        "updated_at": brand.updated_at,
+    }
+
+
+def filament_type_series_to_read(db: Session, type_series: FilamentTypeSeries) -> dict[str, Any]:
+    brand = type_series.brand
+    brands = [_brand_summary(brand)] if brand else []
+    sku_ids = [
+        row[0]
+        for row in db.execute(
+            select(FilamentSku.id).where(FilamentSku.type_series_id == type_series.id)
+        ).all()
+    ]
+    spool_count = 0
+    if sku_ids:
+        spool_count = int(db.scalar(select(func.count(FilamentSpool.id)).where(FilamentSpool.sku_id.in_(sku_ids))) or 0)
+    return {
+        "id": type_series.id,
+        "material_type": type_series.material_type,
+        "series_name": type_series.series_name,
+        "empty_spool_weight_g": type_series.empty_spool_weight_g,
+        "config": type_series.config or {},
+        "note": type_series.note,
+        "brand_id": type_series.brand_id,
+        "brand_name": brand.name if brand else None,
+        "brand_ids": [brand["id"] for brand in brands],
+        "brands": brands,
+        "sku_count": len(set(sku_ids)),
+        "spool_count": spool_count,
+        "created_at": type_series.created_at,
+        "updated_at": type_series.updated_at,
+    }
+
+
+def filament_sku_to_read(sku: FilamentSku) -> dict[str, Any]:
+    first_series = sku.type_series
+    first_brand = first_series.brand if first_series else None
+    type_series = [_type_series_summary(first_series)] if first_series else []
+    return {
+        "id": sku.id,
+        "type_series_id": sku.type_series_id,
+        "brand_id": first_brand.id if first_brand else None,
+        "brand_name": first_brand.name if first_brand else None,
+        "material": first_series.material_type if first_series else None,
+        "series": first_series.series_name if first_series else None,
+        "color_name": sku.color_name,
+        "color_hex": sku.color_hex,
+        "color_value": sku.color_hex,
+        "nominal_weight_g": sku.nominal_weight_g,
+        "empty_spool_weight_g": first_series.empty_spool_weight_g if first_series else None,
+        "filament_diameter_mm": 1.75,
+        "density_g_cm3": None,
+        "tray_info_idx": None,
+        "sealed_quantity": _sealed_quantity(sku),
+        "note": sku.note,
+        "type_series_ids": [sku.type_series_id] if sku.type_series_id else [],
+        "type_series": type_series,
+        "brands": _sku_brand_summaries(sku),
+        "opened_spool_count": sum(1 for spool in sku.spools if spool.status == "opened_in_storage"),
+        "ams_spool_count": sum(1 for spool in sku.spools if spool.status == "loaded_in_ams" or spool.current_ams_id),
+        "created_at": sku.created_at,
+        "updated_at": sku.updated_at,
+    }
+
+
+def filament_spool_to_read(spool: FilamentSpool) -> dict[str, Any]:
+    sku = spool.sku
+    first_series = sku.type_series if sku else None
+    first_brand = first_series.brand if first_series else None
+    return {
+        "id": spool.id,
+        "sku_id": spool.sku_id,
+        "legacy_spool_id": None,
+        "sku_label": _sku_label(sku),
+        "brand_id": first_brand.id if first_brand else None,
+        "brand_name": first_brand.name if first_brand else None,
+        "material": first_series.material_type if first_series else None,
+        "series": first_series.series_name if first_series else None,
+        "type_series": [_type_series_summary(first_series)] if first_series else [],
+        "brands": _sku_brand_summaries(sku) if sku else [],
+        "color_name": sku.color_name if sku else None,
+        "color_hex": sku.color_hex if sku else None,
+        "color_value": sku.color_hex if sku else None,
+        "official_spool_uid": spool.official_spool_uid,
+        "identity_key": spool.official_spool_uid,
+        "tray_uuid": spool.official_spool_uid,
+        "tag_uid": None,
+        "identity_source": spool.identity_source,
+        "nominal_weight_g": spool.nominal_weight_g,
+        "actual_weight_g": spool.actual_weight_g,
+        "initial_net_weight_g": spool.nominal_weight_g,
+        "current_remaining_g": spool.actual_weight_g,
+        "used_weight_g": max(0.0, (spool.nominal_weight_g or 0) - spool.actual_weight_g) if spool.actual_weight_g is not None else 0.0,
+        "empty_spool_weight_g": first_series.empty_spool_weight_g if first_series else None,
+        "status": spool.status,
+        "opened_at": spool.opened_at,
+        "first_loaded_at": spool.opened_at,
+        "last_used_at": None,
+        "current_printer_id": spool.current_printer_id,
+        "current_ams_id": spool.current_ams_id,
+        "current_tray_id": spool.current_tray_id,
+        "storage_location": spool.storage_location,
+        "manual_location": spool.storage_location,
+        "manual_quantity_protected": False,
+        "last_weighed_g": spool.actual_weight_g,
+        "last_ams_remain_percent": (spool.config or {}).get("last_ams_remain_percent"),
+        "note": spool.note,
+        "config": spool.config or {},
+        "created_at": spool.created_at,
+        "updated_at": spool.updated_at,
+    }
+
+
+def filament_color_mapping_to_read(mapping: FilamentColorMapping) -> dict[str, Any]:
+    return {
+        "id": mapping.id,
+        "brand_id": mapping.brand_id,
+        "brand_name": mapping.brand.name if mapping.brand else None,
+        "type_series_id": mapping.type_series_id,
+        "material_type": mapping.type_series.material_type if mapping.type_series else None,
+        "series_name": mapping.type_series.series_name if mapping.type_series else None,
+        "material": mapping.type_series.material_type if mapping.type_series else None,
+        "series": mapping.type_series.series_name if mapping.type_series else None,
+        "color_name": mapping.color_name,
+        "color_hex": mapping.color_hex,
+        "hex_value": mapping.color_hex,
+        "official_name": mapping.color_name,
+        "note": mapping.note,
+        "created_at": mapping.created_at,
+        "updated_at": mapping.updated_at,
+    }
+
+
+def _type_series_payload(values: dict[str, Any], *, partial: bool = False) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    if "brand_id" in values and values["brand_id"] is not None:
+        payload["brand_id"] = int(values["brand_id"])
+    elif not partial:
+        brand_ids = values.get("brand_ids") or []
+        if brand_ids:
+            payload["brand_id"] = int(brand_ids[0])
+        else:
+            raise ValueError("Brand is required")
+    if "material_type" in values:
+        material = _required_text(values["material_type"], "Material type")
+        payload["material_type"] = material if material in MATERIAL_TYPES else material
+    elif not partial:
+        raise ValueError("Material type is required")
+    if "series_name" in values:
+        payload["series_name"] = _required_text(values["series_name"], "Series name")
+    elif not partial:
+        raise ValueError("Series name is required")
+    if "empty_spool_weight_g" in values:
+        payload["empty_spool_weight_g"] = values["empty_spool_weight_g"]
+    if "config" in values:
+        payload["config"] = values["config"] or {}
+    elif not partial:
+        payload["config"] = {}
+    if "note" in values:
+        payload["note"] = values["note"]
+    return payload
+
+
+def _sku_payload(values: dict[str, Any], *, partial: bool = False) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    if "type_series_id" in values and values["type_series_id"] is not None:
+        payload["type_series_id"] = int(values["type_series_id"])
+    elif not partial:
+        type_series_ids = values.get("type_series_ids") or []
+        if type_series_ids:
+            payload["type_series_id"] = int(type_series_ids[0])
+        else:
+            raise ValueError("Type series is required")
+    if "color_name" in values:
+        payload["color_name"] = _clean_text(values["color_name"])
+    if "color_hex" in values:
+        payload["color_hex"] = normalize_color_hex(values["color_hex"]) if values["color_hex"] else None
+    if "nominal_weight_g" in values:
+        payload["nominal_weight_g"] = values["nominal_weight_g"]
+    elif not partial:
+        payload["nominal_weight_g"] = 1000.0
+    if "note" in values:
+        payload["note"] = values["note"]
+    return payload
+
+
+def _color_mapping_payload(db: Session, values: dict[str, Any]) -> dict[str, Any]:
+    brand_id = int(values["brand_id"])
+    type_series_id = int(values["type_series_id"])
+    if get_brand(db, brand_id) is None:
+        raise ValueError("Brand not found")
+    type_series = get_type_series(db, type_series_id)
+    if type_series is None:
+        raise ValueError("Type series not found")
+    if type_series.brand_id != brand_id:
+        raise ValueError("Type series does not belong to brand")
+    return {
+        "brand_id": brand_id,
+        "type_series_id": type_series_id,
+        "color_name": _required_text(values["color_name"], "Color name"),
+        "color_hex": normalize_color_hex(values["color_hex"]),
+        "note": values.get("note"),
+    }
+
+
+def _apply_color_mapping_to_sku_gaps(
+    db: Session,
+    *,
+    brand_id: int,
+    type_series_id: int,
+    color_name: str,
+    color_hex: str,
+    note: str | None = None,
+) -> int:
+    updated = 0
+    skus = list(db.scalars(select(FilamentSku).where(FilamentSku.type_series_id == type_series_id)).all())
+    for sku in skus:
+        changed = False
+        sku_color_name = _clean_text(sku.color_name)
+        sku_color_hex = _normalize_color_hex_or_none(sku.color_hex)
+        if sku_color_name and not sku_color_hex and _same(sku_color_name, color_name):
+            sku.color_hex = color_hex
+            changed = True
+        if sku_color_hex == color_hex and not sku_color_name:
+            sku.color_name = color_name
+            changed = True
+        if changed:
+            db.add(sku)
+            updated += 1
+    return updated
+
+
+def _apply_color_mapping_update_to_skus(
+    db: Session,
+    *,
+    previous: dict[str, Any],
+    current: dict[str, Any],
+) -> int:
+    updated = 0
+    previous_name = _clean_text(previous.get("color_name"))
+    previous_hex = _normalize_color_hex_or_none(previous.get("color_hex"))
+    if not previous_name or not previous_hex:
+        return updated
+    skus = list(
+        db.scalars(
+            select(FilamentSku).where(
+                FilamentSku.type_series_id == int(previous["type_series_id"]),
+                func.lower(FilamentSku.color_name) == previous_name.lower(),
+                FilamentSku.color_hex == previous_hex,
+            )
+        ).all()
+    )
+    for sku in skus:
+        changed = False
+        if sku.type_series_id != current["type_series_id"]:
+            sku.type_series_id = current["type_series_id"]
+            changed = True
+        if sku.color_name != current["color_name"]:
+            sku.color_name = current["color_name"]
+            changed = True
+        if sku.color_hex != current["color_hex"]:
+            sku.color_hex = current["color_hex"]
+            changed = True
+        if changed:
+            db.add(sku)
+            updated += 1
+    return updated
+
+
+def _apply_color_mappings_to_sku_gaps(db: Session) -> int:
+    updated = 0
+    mappings = list(db.scalars(select(FilamentColorMapping)).all())
+    for mapping in mappings:
+        updated += _apply_color_mapping_to_sku_gaps(
+            db,
+            brand_id=mapping.brand_id,
+            type_series_id=mapping.type_series_id,
+            color_name=mapping.color_name,
+            color_hex=mapping.color_hex,
+            note=mapping.note,
+        )
+    return updated
+
+
+def _ensure_color_mapping_from_sku(db: Session, sku: FilamentSku) -> bool:
+    color_name = _clean_text(sku.color_name)
+    color_hex = _normalize_color_hex_or_none(sku.color_hex)
+    if not color_name or not color_hex or sku.type_series_id is None:
+        return False
+    type_series = sku.type_series or get_type_series(db, sku.type_series_id)
+    if type_series is None:
+        return False
+    existing = _find_color_mapping(
+        db,
+        brand_id=type_series.brand_id,
+        type_series_id=type_series.id,
+        color_name=color_name,
+        color_hex=color_hex,
+    )
+    if existing is not None:
+        return False
+    same_hex = _find_color_mapping_by_hex(
+        db,
+        brand_id=type_series.brand_id,
+        type_series_id=type_series.id,
+        color_hex=color_hex,
+    )
+    if same_hex is not None:
+        same_hex.color_name = color_name
+        db.add(same_hex)
+        return True
+    mapping = FilamentColorMapping(
+        brand_id=type_series.brand_id,
+        type_series_id=type_series.id,
+        color_name=color_name,
+        color_hex=color_hex,
+    )
+    db.add(mapping)
+    db.flush()
+    return True
+
+
+def _ensure_color_mappings_from_skus(db: Session) -> int:
+    updated = 0
+    for sku in list(db.scalars(select(FilamentSku)).all()):
+        if _ensure_color_mapping_from_sku(db, sku):
+            updated += 1
+    return updated
+
+
+def _stock_balance(db: Session, sku: FilamentSku, *, create: bool = False) -> FilamentStockBalance:
+    balance = sku.stock_balance
+    if balance is None:
+        balance = db.get(FilamentStockBalance, sku.id)
+    if balance is None and create:
+        balance = FilamentStockBalance(sku_id=sku.id, sealed_quantity=0)
+        db.add(balance)
+        db.flush()
+        sku.stock_balance = balance
+    if balance is None:
+        return FilamentStockBalance(sku_id=sku.id, sealed_quantity=0)
+    return balance
+
+
+def _sealed_quantity(sku: FilamentSku) -> int:
+    if sku.stock_balance is not None:
+        return int(sku.stock_balance.sealed_quantity)
+    session = object_session(sku)
+    if session is None:
+        return 0
+    balance = session.get(FilamentStockBalance, sku.id)
+    return int(balance.sealed_quantity) if balance is not None else 0
+
+
+def _open_one_from_stock_if_available(
+    db: Session,
+    sku: FilamentSku,
+    *,
+    spool: FilamentSpool | None,
+    note: str,
+) -> bool:
+    balance = _stock_balance(db, sku, create=True)
+    if balance.sealed_quantity <= 0:
+        return False
+    previous = balance.sealed_quantity
+    balance.sealed_quantity -= 1
+    db.add(balance)
+    _record_event(
+        db,
+        spool=spool,
+        sku_id=sku.id,
+        event_type="opened_from_stock",
+        quantity_delta=-1,
+        message="Opened one spool from sealed stock",
+        previous={"sealed_quantity": previous},
+        current={"sealed_quantity": balance.sealed_quantity},
+        note=note,
+    )
+    return True
+
+
+def _sku_or_none(db: Session, sku_id: int | None) -> FilamentSku | None:
+    if sku_id is None:
+        return None
+    sku = get_sku(db, sku_id)
+    if sku is None:
+        raise ValueError("Filament SKU not found")
+    return sku
+
+
+def _find_spool_by_official_uid(db: Session, uid: str | None) -> FilamentSpool | None:
+    if not uid:
+        return None
+    return db.scalars(select(FilamentSpool).where(FilamentSpool.official_spool_uid == uid)).first()
+
+
+def _find_color_mapping(
+    db: Session,
+    *,
+    brand_id: int,
+    type_series_id: int,
+    color_name: str,
+    color_hex: str,
+) -> FilamentColorMapping | None:
+    return db.scalars(
+        select(FilamentColorMapping).where(
+            FilamentColorMapping.brand_id == brand_id,
+            FilamentColorMapping.type_series_id == type_series_id,
+            func.lower(FilamentColorMapping.color_name) == color_name.lower(),
+            FilamentColorMapping.color_hex == color_hex,
+        )
+    ).first()
+
+
+def _find_color_mapping_by_hex(
+    db: Session,
+    *,
+    brand_id: int,
+    type_series_id: int,
+    color_hex: str,
+) -> FilamentColorMapping | None:
+    return db.scalars(
+        select(FilamentColorMapping).where(
+            FilamentColorMapping.brand_id == brand_id,
+            FilamentColorMapping.type_series_id == type_series_id,
+            FilamentColorMapping.color_hex == color_hex,
+        )
+    ).first()
+
+
+def _official_uid_from_slot(slot: ParsedAmsSlot) -> str | None:
+    for value in (slot.tray_uuid, slot.tag_uid, slot.identity.identity_key):
+        uid = _official_uid_or_none(value)
+        if uid is not None:
+            return uid
+    return None
+
+
+def _official_uid_or_none(value: Any) -> str | None:
+    text = _clean_text(value)
+    if text is None:
+        return None
+    for prefix in ("bambu:tray_uuid:", "bambu:tag_uid:"):
+        if text.startswith(prefix):
+            text = text.removeprefix(prefix)
+            break
+    if not is_valid_identity_value(text):
+        return None
+    return text
+
+
+def _create_unknown_ams_spool(
+    db: Session,
+    *,
+    printer_id: int,
+    parsed_slot: ParsedAmsSlot,
+    sku: FilamentSku | None = None,
+    auto_created_sku: bool = False,
+    identity_source: str = "ams_official_id",
+) -> FilamentSpool:
+    config = {"last_ams_remain_percent": parsed_slot.remain, "ams_raw": parsed_slot.raw}
+    if auto_created_sku:
+        config["needs_sku_review"] = True
+        config["auto_created_sku_id"] = sku.id if sku else None
+    spool = FilamentSpool(
+        sku_id=sku.id if sku else None,
+        identity_source=identity_source,
+        nominal_weight_g=(sku.nominal_weight_g if sku else _slot_nominal_weight_g(parsed_slot)),
+        status="loaded_in_ams" if sku else "unknown",
+        opened_at=utc_now() if sku else None,
+        current_printer_id=printer_id,
+        current_ams_id=parsed_slot.ams_id,
+        current_tray_id=parsed_slot.tray_id,
+        config=config,
+    )
+    db.add(spool)
+    db.flush()
+    if sku is not None and auto_created_sku:
+        _record_event(
+            db,
+            spool=spool,
+            sku_id=sku.id,
+            event_type="needs_location",
+            message="AMS spool created with an auto-created SKU that needs review",
+            current=_spool_snapshot(spool),
+            data=_slot_match_context(parsed_slot),
+        )
+    elif sku is None:
+        _record_event(
+            db,
+            spool=spool,
+            event_type="needs_location",
+            message="AMS spool requires SKU confirmation",
+            current=_spool_snapshot(spool),
+            data=_slot_match_context(parsed_slot),
+        )
+    return spool
+
+
+def _record_ams_slot_unload(
+    db: Session,
+    *,
+    slot: AmsSlot,
+    previous_spool_id: int | None,
+    note: str,
+) -> None:
+    if previous_spool_id is None:
+        return
+    spool = db.get(FilamentSpool, previous_spool_id)
+    if spool is None:
+        return
+    was_here = (
+        spool.current_printer_id == slot.printer_id
+        and spool.current_ams_id == slot.ams_id
+        and spool.current_tray_id == slot.tray_id
+    )
+    if not was_here:
+        return
+    previous = _location_snapshot(spool)
+    spool.current_printer_id = None
+    spool.current_ams_id = None
+    spool.current_tray_id = None
+    spool.status = "needs_location" if spool.status != "empty" else spool.status
+    db.add(spool)
+    _record_event(
+        db,
+        spool=spool,
+        sku_id=spool.sku_id,
+        event_type="unloaded_from_ams",
+        message="Spool unloaded from AMS",
+        previous=previous,
+        current=_location_snapshot(spool),
+        note=note,
+    )
+    _record_event(
+        db,
+        spool=spool,
+        sku_id=spool.sku_id,
+        event_type="needs_location",
+        message="Storage location must be set after AMS unload",
+        current=_location_snapshot(spool),
+    )
+
+
+def _set_filament_loaded_location(
+    db: Session,
+    spool: FilamentSpool,
+    *,
+    printer_id: int,
+    parsed_slot: ParsedAmsSlot,
+) -> None:
+    previous = _location_snapshot(spool)
+    unchanged = (
+        spool.current_printer_id == printer_id
+        and spool.current_ams_id == parsed_slot.ams_id
+        and spool.current_tray_id == parsed_slot.tray_id
+        and spool.status == "loaded_in_ams"
+    )
+    spool.current_printer_id = printer_id
+    spool.current_ams_id = parsed_slot.ams_id
+    spool.current_tray_id = parsed_slot.tray_id
+    spool.storage_location = None
+    if spool.status != "empty":
+        spool.status = "loaded_in_ams" if spool.sku_id is not None else "unknown"
+    if spool.opened_at is None and spool.sku_id is not None:
+        spool.opened_at = utc_now()
+    if not unchanged:
+        _record_event(
+            db,
+            spool=spool,
+            sku_id=spool.sku_id,
+            event_type="loaded_to_ams",
+            message="AMS slot location observed",
+            previous=previous,
+            current=_location_snapshot(spool),
+        )
+    db.add(spool)
+
+
+def _sync_ams_context(spool: FilamentSpool, slot: ParsedAmsSlot) -> None:
+    config = dict(spool.config or {})
+    config["last_ams_remain_percent"] = slot.remain
+    config["ams_raw"] = slot.raw
+    spool.config = config
+
+
+def _match_sku_for_slot(db: Session, slot: ParsedAmsSlot) -> FilamentSku | None:
+    _apply_color_mappings_to_sku_gaps(db)
+    material = _clean_text(slot.material)
+    series = _clean_text(slot.series)
+    color_hex = _normalize_color_hex_or_none(slot.color)
+    color_name = _slot_color_name(slot)
+    candidates = list(db.scalars(select(FilamentSku)).all())
+    matches: list[FilamentSku] = []
+    for sku in candidates:
+        if not _sku_type_series_matches(sku, material=material, series=series):
+            continue
+        if color_hex and sku.color_hex and sku.color_hex != color_hex:
+            continue
+        if color_name and sku.color_name and not _same(sku.color_name, color_name):
+            continue
+        if (sku.color_hex or sku.color_name) and not (
+            (color_hex and sku.color_hex == color_hex) or (color_name and sku.color_name and _same(sku.color_name, color_name))
+        ):
+            continue
+        matches.append(sku)
+    unique = {sku.id: sku for sku in matches}
+    return next(iter(unique.values())) if len(unique) == 1 else None
+
+
+def _resolve_sku_for_ams_slot(db: Session, slot: ParsedAmsSlot) -> tuple[FilamentSku | None, bool]:
+    sku = _match_sku_for_slot(db, slot)
+    if sku is not None:
+        return sku, False
+    if not _slot_has_filament_payload(slot):
+        return None, False
+    return _find_or_create_sku_from_ams_slot(db, slot)
+
+
+def _find_or_create_sku_from_ams_slot(db: Session, slot: ParsedAmsSlot) -> tuple[FilamentSku | None, bool]:
+    if not _slot_has_filament_payload(slot):
+        return None, False
+    material = _clean_text(slot.material) or "Other"
+    series = _clean_text(slot.series) or "Unknown"
+    brand = _find_or_create_ams_brand(db, slot)
+    type_series = _find_or_create_ams_type_series(db, brand=brand, material=material, series=series, slot=slot)
+    color_hex = _normalize_color_hex_or_none(slot.color)
+    color_name = _slot_color_name(slot)
+    existing = _find_sku_for_type_series_color(
+        db,
+        type_series_id=type_series.id,
+        color_hex=color_hex,
+        color_name=color_name,
+    )
+    if existing is not None:
+        _fill_sku_color_from_slot(db, existing, slot)
+        _ensure_color_mapping_from_sku(db, existing)
+        return existing, False
+    sku = FilamentSku(
+        type_series_id=type_series.id,
+        color_name=color_name,
+        color_hex=color_hex,
+        nominal_weight_g=_slot_nominal_weight_g(slot) or 1000.0,
+        note="Auto-created from AMS RFID. Please review SKU details.",
+    )
+    db.add(sku)
+    db.flush()
+    _ensure_color_mapping_from_sku(db, sku)
+    return sku, True
+
+
+def _find_or_create_ams_brand(db: Session, slot: ParsedAmsSlot) -> FilamentBrand:
+    brand_name = _ams_brand_name(slot)
+    existing = _find_brand_by_name_or_alias(db, brand_name)
+    if existing is not None:
+        return existing
+    brand = FilamentBrand(name=brand_name, aliases=[], note="Auto-created from AMS RFID. Please review brand details.")
+    db.add(brand)
+    db.flush()
+    return brand
+
+
+def _find_or_create_ams_type_series(
+    db: Session,
+    *,
+    brand: FilamentBrand,
+    material: str,
+    series: str,
+    slot: ParsedAmsSlot,
+) -> FilamentTypeSeries:
+    existing = db.scalars(
+        select(FilamentTypeSeries).where(
+            FilamentTypeSeries.brand_id == brand.id,
+            func.lower(FilamentTypeSeries.material_type) == material.lower(),
+            func.lower(FilamentTypeSeries.series_name) == series.lower(),
+        )
+    ).first()
+    if existing is not None:
+        return existing
+    type_series = FilamentTypeSeries(
+        brand_id=brand.id,
+        material_type=material,
+        series_name=series,
+        config={"auto_created_from_ams": True, "ams_raw": slot.raw},
+        note="Auto-created from AMS RFID. Please review type / series details.",
+    )
+    db.add(type_series)
+    db.flush()
+    return type_series
+
+
+def _find_sku_for_type_series_color(
+    db: Session,
+    *,
+    type_series_id: int,
+    color_hex: str | None,
+    color_name: str | None,
+) -> FilamentSku | None:
+    query = select(FilamentSku).where(FilamentSku.type_series_id == type_series_id)
+    if color_hex:
+        query = query.where(FilamentSku.color_hex == color_hex)
+    elif color_name:
+        query = query.where(func.lower(FilamentSku.color_name) == color_name.lower())
+    else:
+        return None
+    rows = list(db.scalars(query).all())
+    return rows[0] if len(rows) == 1 else None
+
+
+def _find_brand_by_name_or_alias(db: Session, brand_name: str) -> FilamentBrand | None:
+    key = _brand_match_key(brand_name)
+    for brand in list_brands(db):
+        if _brand_match_key(brand.name) == key:
+            return brand
+        if any(_brand_match_key(alias) == key for alias in (brand.aliases or [])):
+            return brand
+    return None
+
+
+def _ams_brand_name(slot: ParsedAmsSlot) -> str:
+    raw = slot.raw if isinstance(slot.raw, dict) else {}
+    return (
+        _clean_text(
+            raw.get("tray_brand")
+            or raw.get("brand")
+            or raw.get("filament_brand")
+            or raw.get("filament_brand_name")
+            or raw.get("vendor")
+            or raw.get("manufacturer")
+        )
+        or "BambuLab"
+    )
+
+
+def _brand_match_key(value: Any) -> str:
+    return (_clean_text(value) or "").replace(" ", "").replace("-", "").replace("_", "").lower()
+
+
+def _sku_type_series_matches(sku: FilamentSku, *, material: str | None, series: str | None) -> bool:
+    type_series = sku.type_series
+    if type_series is None:
+        return material is None and series is None
+    if material and not _same(type_series.material_type, material):
+        return False
+    if series and not _series_matches(type_series, material=material, series=series):
+        return False
+    return True
+
+
+def _series_matches(type_series: FilamentTypeSeries, *, material: str | None, series: str | None) -> bool:
+    if series is None:
+        return True
+    series_norm = _norm(series)
+    type_norm = _norm(type_series.series_name)
+    material_norm = _norm(material)
+    candidates = {type_norm}
+    if material_norm:
+        candidates.add(_norm(f"{material} {type_series.series_name}"))
+    return series_norm in candidates or type_norm in series_norm or series_norm in type_norm
+
+
+def _fill_sku_color_from_slot(db: Session, sku: FilamentSku, slot: ParsedAmsSlot) -> None:
+    changed = False
+    color_name = _slot_color_name(slot)
+    if color_name and not sku.color_name:
+        sku.color_name = color_name
+        changed = True
+    color_hex = _normalize_color_hex_or_none(slot.color)
+    if color_hex and not sku.color_hex:
+        sku.color_hex = color_hex
+        changed = True
+    if changed:
+        db.add(sku)
+
+
+def _record_event(
+    db: Session,
+    *,
+    event_type: str,
+    message: str,
+    spool: FilamentSpool | None = None,
+    sku_id: int | None = None,
+    previous: dict[str, Any] | None = None,
+    current: dict[str, Any] | None = None,
+    quantity_delta: int | None = None,
+    note: str | None = None,
+    data: dict[str, Any] | None = None,
+) -> None:
+    db.add(
+        FilamentSpoolEvent(
+            spool_id=spool.id if spool else None,
+            sku_id=sku_id,
+            printer_id=spool.current_printer_id if spool else None,
+            ams_id=spool.current_ams_id if spool else None,
+            tray_id=spool.current_tray_id if spool else None,
+            event_type=event_type,
+            previous=previous,
+            current=current,
+            quantity_delta=quantity_delta,
+            message=message,
+            note=note,
+            data=data,
+        )
+    )
+
+
+def _spool_snapshot(spool: FilamentSpool) -> dict[str, Any]:
+    return {
+        "sku_id": spool.sku_id,
+        "official_spool_uid": spool.official_spool_uid,
+        "identity_source": spool.identity_source,
+        "nominal_weight_g": spool.nominal_weight_g,
+        "actual_weight_g": spool.actual_weight_g,
+        "status": spool.status,
+        "opened_at": spool.opened_at.isoformat() if spool.opened_at else None,
+        **_location_snapshot(spool),
+        "note": spool.note,
+    }
+
+
+def _location_snapshot(spool: FilamentSpool) -> dict[str, Any]:
+    return {
+        "printer_id": spool.current_printer_id,
+        "ams_id": spool.current_ams_id,
+        "tray_id": spool.current_tray_id,
+        "storage_location": spool.storage_location,
+    }
+
+
+def _slot_match_context(slot: ParsedAmsSlot) -> dict[str, Any]:
+    return {
+        "ams_id": slot.ams_id,
+        "tray_id": slot.tray_id,
+        "material": slot.material,
+        "series": slot.series,
+        "color": slot.color,
+        "color_name": _slot_color_name(slot),
+        "remain": slot.remain,
+    }
+
+
+def _slot_has_filament_payload(slot: ParsedAmsSlot) -> bool:
+    raw = slot.raw if isinstance(slot.raw, dict) else {}
+    fields = (slot.material, slot.series, slot.color, slot.color_name)
+    if any(_clean_text(value) for value in fields):
+        return True
+    return _raw_has_filament_payload(raw)
+
+
+def _raw_has_filament_payload(raw: dict[str, Any]) -> bool:
+    fields = (
+        raw.get("tray_type"),
+        raw.get("tray_sub_brands"),
+        raw.get("tray_color"),
+        raw.get("color"),
+        raw.get("tray_id_name"),
+        raw.get("tray_info_idx"),
+        raw.get("filament_name"),
+        raw.get("tray_color_name"),
+        raw.get("color_name"),
+        raw.get("filament_color_name"),
+        raw.get("color_display_name"),
+    )
+    if any(_clean_text(value) for value in fields):
+        return True
+    cols = raw.get("cols")
+    if isinstance(cols, list) and any(_clean_text(value) for value in cols):
+        return True
+    return False
+
+
+def _is_phantom_ams_spool(spool: FilamentSpool) -> bool:
+    if spool.sku_id is not None or spool.official_spool_uid:
+        return False
+    if spool.status not in {"unknown", "needs_location"}:
+        return False
+    config = spool.config if isinstance(spool.config, dict) else {}
+    raw = config.get("ams_raw")
+    if not isinstance(raw, dict) or _raw_has_filament_payload(raw):
+        return False
+    state = (
+        _clean_text(raw.get("tray_state"))
+        or _clean_text(raw.get("slot_state"))
+        or _clean_text(raw.get("tray_status"))
+        or _clean_text(raw.get("state"))
+    )
+    return (state or "").lower() in {"4", "5", "10", "17", "21", "25", "27", "loading", "unloading", "reading", "busy", "transitioning"}
+
+
+def _slot_is_empty_observation(slot: ParsedAmsSlot) -> bool:
+    state = _slot_state_text(slot)
+    return state in {"0", "1", "empty"} and not _slot_has_filament_payload(slot)
+
+
+def _slot_is_transition_without_payload(slot: ParsedAmsSlot) -> bool:
+    if _slot_has_filament_payload(slot):
+        return False
+    state = _slot_state_text(slot)
+    return slot.is_transitioning or state in {
+        "4",
+        "5",
+        "10",
+        "17",
+        "21",
+        "25",
+        "27",
+        "loading",
+        "unloading",
+        "reading",
+        "rfid_reading",
+        "rfid_reading_or_transitioning",
+        "busy",
+        "transitioning",
+    }
+
+
+def _slot_state_text(slot: ParsedAmsSlot) -> str:
+    raw = slot.raw if isinstance(slot.raw, dict) else {}
+    value = (
+        _clean_text(slot.slot_state)
+        or _clean_text(raw.get("tray_state"))
+        or _clean_text(raw.get("slot_state"))
+        or _clean_text(raw.get("tray_status"))
+        or _clean_text(raw.get("state"))
+    )
+    return (value or "").lower()
+
+
+def _slot_nominal_weight_g(slot: ParsedAmsSlot) -> float | None:
+    raw = slot.raw if isinstance(slot.raw, dict) else {}
+    for key in (
+        "tray_weight",
+        "tray_weight_g",
+        "filament_weight",
+        "filament_weight_g",
+        "nominal_weight_g",
+        "net_weight",
+        "net_weight_g",
+        "weight",
+        "weight_g",
+    ):
+        parsed = _positive_float_or_none(raw.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _brand_summary(brand: FilamentBrand) -> dict[str, Any]:
+    return {"id": brand.id, "name": brand.name, "aliases": brand.aliases or []}
+
+
+def _type_series_summary(type_series: FilamentTypeSeries) -> dict[str, Any]:
+    brand = type_series.brand
+    return {
+        "id": type_series.id,
+        "brand_id": type_series.brand_id,
+        "brand_name": brand.name if brand else None,
+        "material_type": type_series.material_type,
+        "series_name": type_series.series_name,
+        "empty_spool_weight_g": type_series.empty_spool_weight_g,
+        "brand_ids": [type_series.brand_id] if type_series.brand_id else [],
+        "brands": [_brand_summary(brand)] if brand else [],
+    }
+
+
+def _sku_brand_summaries(sku: FilamentSku | None) -> list[dict[str, Any]]:
+    if sku is None or sku.type_series is None or sku.type_series.brand is None:
+        return []
+    return [_brand_summary(sku.type_series.brand)]
+
+
+def _sku_label(sku: FilamentSku | None) -> str | None:
+    if sku is None:
+        return None
+    series = [_series_label(sku.type_series)] if sku.type_series else []
+    color = sku.color_name or sku.color_hex
+    parts = [", ".join(series), color]
+    return " / ".join(part for part in parts if part) or f"SKU {sku.id}"
+
+
+def _series_label(type_series: FilamentTypeSeries) -> str:
+    return f"{type_series.material_type} {type_series.series_name}".strip()
+
+
+def _slot_color_name(slot: ParsedAmsSlot) -> str | None:
+    return _clean_text(
+        slot.color_name
+        or slot.raw.get("tray_color_name")
+        or slot.raw.get("color_name")
+        or slot.raw.get("filament_color_name")
+        or slot.raw.get("color_display_name")
+    )
+
+
+def normalize_color_hex(value: Any) -> str:
+    text = _clean_text(value)
+    if text is None:
+        raise ValueError("Color HEX is required")
+    compact = text.removeprefix("#").replace(" ", "").replace("_", "").replace("-", "").upper()
+    if len(compact) == 8:
+        compact = compact[:6]
+    if len(compact) != 6 or any(char not in "0123456789ABCDEF" for char in compact):
+        raise ValueError("Color HEX must be 6 or 8 hexadecimal characters")
+    return compact
+
+
+def _normalize_color_hex_or_none(value: Any) -> str | None:
+    try:
+        return normalize_color_hex(value)
+    except ValueError:
+        return None
+
+
+def _required_text(value: Any, label: str) -> str:
+    text = _clean_text(value)
+    if text is None:
+        raise ValueError(f"{label} is required")
+    return text
+
+
+def _clean_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _positive_float_or_none(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _clean_aliases(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    aliases: list[str] = []
+    for value in values:
+        text = _clean_text(value)
+        if text is None:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        aliases.append(text)
+    return aliases
+
+
+def _unique_ints(values: list[int]) -> list[int]:
+    result: list[int] = []
+    seen: set[int] = set()
+    for value in values:
+        item = int(value)
+        if item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
+
+
+def _same(left: Any, right: Any) -> bool:
+    return _norm(left) == _norm(right)
+
+
+def _norm(value: Any) -> str:
+    return (_clean_text(value) or "").replace("-", " ").replace("_", " ").strip().lower()

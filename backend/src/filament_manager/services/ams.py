@@ -218,6 +218,7 @@ def _unknown_unit_overview(slots: list[AmsSlot], active: AmsSlot | None) -> dict
 
 def _slot_payload(slot: AmsSlot, *, display_name: str | None = None, active: AmsSlot | None = None) -> dict[str, Any]:
     location_label = _location_label(slot, display_name)
+    context = _filament_context(slot)
     return {
         "id": slot.id,
         "printer_id": slot.printer_id,
@@ -240,8 +241,13 @@ def _slot_payload(slot: AmsSlot, *, display_name: str | None = None, active: Ams
         "identity_confidence": slot.identity_confidence,
         "identity_warning": slot.identity_warning,
         "is_transitioning": slot.is_transitioning,
-        "spool_id": slot.spool_id,
+        "filament_spool_id": slot.filament_spool_id,
+        "filament_brand_id": context["brand_id"],
+        "filament_brand_name": context["brand_name"],
+        "filament_material": context["material"],
+        "filament_series": context["series"],
         "tray_id_name": slot.tray_id_name,
+        "tray_color_name": slot.tray_color_name,
         "tray_info_idx": slot.tray_info_idx,
         "nozzle_temp_min": slot.nozzle_temp_min,
         "nozzle_temp_max": slot.nozzle_temp_max,
@@ -274,6 +280,7 @@ def _active_slot_from_snapshot(snapshot: DeviceStatusSnapshot | None, slots: lis
 
 
 def _active_slot_payload(slot: AmsSlot) -> dict[str, Any]:
+    context = _filament_context(slot)
     return {
         "ams_id": slot.ams_id,
         "tray_id": slot.tray_id,
@@ -283,7 +290,27 @@ def _active_slot_payload(slot: AmsSlot) -> dict[str, Any]:
         "location_label": _location_label(slot, None),
         "material": slot.material,
         "color": slot.color,
+        "filament_brand_id": context["brand_id"],
+        "filament_brand_name": context["brand_name"],
+        "filament_material": context["material"],
+        "filament_series": context["series"],
+        "tray_id_name": slot.tray_id_name,
+        "tray_color_name": slot.tray_color_name,
         "remain": slot.remain,
+    }
+
+
+def _filament_context(slot: AmsSlot) -> dict[str, Any]:
+    sku = slot.filament_spool.sku if slot.filament_spool and slot.filament_spool.sku else None
+    if sku is None or sku.type_series is None:
+        return {"brand_id": None, "brand_name": None, "material": None, "series": None}
+    type_series = sku.type_series
+    brand = type_series.brand
+    return {
+        "brand_id": brand.id if brand else None,
+        "brand_name": brand.name if brand else None,
+        "material": type_series.material_type,
+        "series": type_series.series_name,
     }
 
 

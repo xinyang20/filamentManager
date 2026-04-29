@@ -12,12 +12,32 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
     },
   });
   const text = await response.text();
-  const body = text ? JSON.parse(text) : null;
+  const body = parseApiBody(text, response.headers.get("content-type"));
   if (!response.ok) {
-    const detail = body?.detail ? JSON.stringify(body.detail) : text;
+    const detail = extractApiError(body, text);
     throw new Error(`HTTP ${response.status}: ${detail || response.statusText}`);
   }
   return body as T;
+}
+
+function parseApiBody(text: string, contentType: string | null): unknown {
+  if (!text) return null;
+  if (!contentType?.toLowerCase().includes("json")) return text;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+function extractApiError(body: unknown, fallback: string): string {
+  if (body && typeof body === "object" && "detail" in body) {
+    const detail = (body as { detail?: unknown }).detail;
+    return typeof detail === "string" ? detail : JSON.stringify(detail);
+  }
+  if (typeof body === "string") return body;
+  if (body !== null && body !== undefined) return JSON.stringify(body);
+  return fallback;
 }
 
 const ISO_DATE_TIME_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(Z|[+-]\d{2}:\d{2})?$/;

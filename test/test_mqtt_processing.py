@@ -25,10 +25,11 @@ def test_valid_tray_uuid_discovers_spool_and_slot(api_client, printer_payload, f
     slots = api_client.get(f"/api/printers/{printer_id}/ams/slots").json()
     assert slots[0]["identity_source"] == "tray_uuid"
     assert slots[0]["identity_key"] == "bambu:tray_uuid:11111111-2222-3333-4444-555555555555"
-    assert slots[0]["spool_id"] is not None
+    assert slots[0]["filament_spool_id"] is not None
 
-    spools = api_client.get("/api/spools").json()
-    assert spools[0]["identity_source"] == "tray_uuid"
+    spools = api_client.get("/api/filament/spools").json()
+    assert spools[0]["identity_source"] == "ams_official_id"
+    assert spools[0]["official_spool_uid"] == "11111111-2222-3333-4444-555555555555"
     assert spools[0]["current_ams_id"] == "0"
     assert spools[0]["current_tray_id"] == "0"
 
@@ -56,7 +57,7 @@ def test_unidentified_slot_requires_manual_binding(api_client, printer_payload, 
     slots = api_client.get(f"/api/printers/{printer_id}/ams/slots").json()
     assert slots[0]["identity_source"] == "manual_required"
     assert slots[0]["identity_key"] is None
-    assert slots[0]["spool_id"] is None
+    assert slots[0]["filament_spool_id"] is not None
     assert any(item["event_type"] == "spool.unidentified" for item in api_client.get("/api/debug/events").json())
 
 
@@ -69,11 +70,10 @@ def test_remain_minus_one_does_not_attach_or_move_spool(api_client, printer_payl
     slots = api_client.get(f"/api/printers/{printer_id}/ams/slots").json()
     assert slots[0]["remain"] == -1
     assert slots[0]["is_transitioning"] is True
-    assert slots[0]["spool_id"] is None
+    assert slots[0]["filament_spool_id"] is None
 
-    spools = api_client.get("/api/spools").json()
-    assert spools[0]["current_ams_id"] is None
-    assert spools[0]["current_tray_id"] is None
+    spools = api_client.get("/api/filament/spools").json()
+    assert spools == []
 
 
 def test_state_machine_deduplicates_repeated_push_status(api_client, printer_payload, fixture_dir) -> None:

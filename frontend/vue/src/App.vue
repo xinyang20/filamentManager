@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import {
   Activity,
+  AlertCircle,
   Archive,
   Bell,
   Boxes,
@@ -21,6 +22,7 @@ import {
   Loader2,
   Network,
   PencilLine,
+  Plus,
   PlugZap,
   RefreshCw,
   Save,
@@ -32,6 +34,7 @@ import {
   Thermometer,
   Trash2,
   Unplug,
+  Upload,
   Wrench,
   X,
 } from "lucide-vue-next";
@@ -47,6 +50,14 @@ import type {
   DashboardSummaryItem,
   DeviceCapabilities,
   DiscoveryCandidate,
+  FilamentBrand,
+  FilamentColorMappingGap,
+  FilamentColorMapping,
+  FilamentInventorySummary,
+  FilamentSku,
+  FilamentSpool,
+  FilamentSpoolEvents,
+  FilamentTypeSeries,
   HmsCodeInfo,
   HmsCodeStats,
   MaintenanceOverview,
@@ -60,7 +71,6 @@ import type {
   PrintLogEntry,
   PrintLogList,
   PrintLogSummary,
-  Spool,
   StorageFile,
   StorageSummary,
   SystemInfo,
@@ -68,12 +78,36 @@ import type {
   UnifiedEvent,
 } from "./types";
 
-const viewKeys = ["overview", "dashboard", "events", "metrics", "printLog", "storage", "ams", "inventory", "maintenance", "notifications", "printers", "debug"] as const;
+const viewKeys = [
+  "overview",
+  "dashboard",
+  "events",
+  "metrics",
+  "printLog",
+  "storage",
+  "ams",
+  "inventory",
+  "maintenance",
+  "notifications",
+  "printers",
+  "debug",
+] as const;
 type ViewKey = (typeof viewKeys)[number];
+type InventoryPageKey = "stock" | "brands" | "types" | "skus" | "colors";
 type Locale = keyof typeof translations;
 type NavGroupKey = "monitoring" | "assets" | "system";
+type SortDirection = "asc" | "desc";
+type InventoryDialogKey =
+  | "brand"
+  | "typeSeries"
+  | "sku"
+  | "colorMapping"
+  | "spoolCreate"
+  | "spoolDetail"
+  | "stockAdjust"
+  | "skuConfirm";
 
-const storedView = window.localStorage.getItem("filamentManager.activeView") as ViewKey | null;
+const storedView = window.localStorage.getItem("filamentManager.activeView");
 
 const navItems = [
   { key: "overview", labelKey: "nav.overview", icon: Activity, group: "monitoring" },
@@ -113,6 +147,7 @@ const experimentalFeatureViews: Partial<Record<ViewKey, ExperimentalFeatureKey>>
 const locale = ref<Locale>("zh-CN");
 const experimentalFeatures = reactive<Record<ExperimentalFeatureKey, boolean>>(loadExperimentalFeatureSettings());
 const activeView = ref<ViewKey>(resolveInitialView(storedView));
+const inventoryPage = ref<InventoryPageKey>(resolveInitialInventoryPage(storedView));
 const printers = ref<Printer[]>([]);
 const selectedPrinterId = ref<number | null>(null);
 const dashboardSummary = ref<DashboardSummaryItem[]>([]);
@@ -144,11 +179,41 @@ const timelapseNoteDrafts = reactive<Record<string, string>>({});
 const stateSnapshot = ref<Record<string, any> | null>(null);
 const amsSlots = ref<Record<string, any>[]>([]);
 const amsOverview = ref<AmsOverview | null>(null);
+const inventoryAmsOverviews = ref<Record<string, AmsOverview>>({});
 const amsLabelDrafts = reactive<Record<string, string>>({});
 const amsLabelEditing = reactive<Record<string, boolean>>({});
 const amsSensorRange = ref("24");
 const amsSensorHistories = ref<Record<string, AmsSensorHistory>>({});
-const spools = ref<Spool[]>([]);
+const spools = ref<Record<string, any>[]>([]);
+const filamentBrands = ref<FilamentBrand[]>([]);
+const filamentTypeSeries = ref<FilamentTypeSeries[]>([]);
+const filamentColorMappings = ref<FilamentColorMapping[]>([]);
+const filamentColorMappingGaps = ref<FilamentColorMappingGap[]>([]);
+const filamentSkus = ref<FilamentSku[]>([]);
+const filamentSpools = ref<FilamentSpool[]>([]);
+const filamentInventorySummary = ref<FilamentInventorySummary | null>(null);
+const inventoryTab = ref<"skus" | "spools" | "ams" | "detail">("skus");
+const selectedFilamentSpoolId = ref<number | null>(null);
+const selectedFilamentSpoolEvents = ref<FilamentSpoolEvents | null>(null);
+const inventoryDialog = reactive<{
+  key: InventoryDialogKey | null;
+  context: Record<string, any> | null;
+}>({
+  key: null,
+  context: null,
+});
+const inventoryTableSorts = reactive<Record<string, { key: string; direction: SortDirection }>>({
+  pendingConfirm: { key: "id", direction: "asc" },
+  needsLocation: { key: "id", direction: "asc" },
+  sealedStock: { key: "id", direction: "asc" },
+  amsLoaded: { key: "printer", direction: "asc" },
+  openedUnused: { key: "id", direction: "asc" },
+  brands: { key: "id", direction: "asc" },
+  typeSeries: { key: "id", direction: "asc" },
+  skus: { key: "id", direction: "asc" },
+  colorMappings: { key: "id", direction: "asc" },
+  colorGaps: { key: "id", direction: "asc" },
+});
 const maintenanceOverview = ref<MaintenanceOverview | null>(null);
 const maintenanceItems = ref<PrinterMaintenance[]>([]);
 const maintenanceNotes = reactive<Record<number, string>>({});
@@ -181,6 +246,11 @@ let eventSource: EventSource | null = null;
 let pollingTimer: number | null = null;
 let loadingTokenSeq = 0;
 const activeLoadingTokens = new Set<number>();
+const pinyinCollator = new Intl.Collator("zh-Hans-CN-u-co-pinyin", {
+  numeric: true,
+  sensitivity: "base",
+});
+const inventoryChartColors = ["#00ae42", "#0086d6", "#f4a925", "#c12e1f", "#5e43b7", "#8e9089", "#ff6a13", "#2842ad"];
 
 const printerForm = reactive({
   name: "Printer",
@@ -218,17 +288,112 @@ const notificationRuleForm = reactive({
 });
 const exportOptions = reactive({
   type: "json",
-  sections: ["config", "print_logs", "ams_history", "maintenance_history", "events", "notifications"] as string[],
+  sections: [
+    "config",
+    "filament_catalog",
+    "filament_color_mappings",
+    "ams_current",
+    "print_logs",
+    "ams_history",
+    "maintenance_history",
+    "events",
+    "notifications",
+    "storage",
+    "telemetry",
+  ] as string[],
+});
+const importOptions = reactive({
+  mode: "merge",
+});
+const importFileInput = ref<HTMLInputElement | null>(null);
+const importResult = ref<Record<string, any> | null>(null);
+
+const filamentBrandForm = reactive({
+  name: "",
+  aliases: "",
+  default_empty_spool_weight_g: null as number | null,
+  note: "",
+});
+const editingFilamentBrandId = ref<number | null>(null);
+
+const filamentTypeSeriesForm = reactive({
+  brand_id: null as number | null,
+  material_type: "PLA",
+  series_name: "",
+  empty_spool_weight_g: null as number | null,
+  note: "",
+});
+const editingFilamentTypeSeriesId = ref<number | null>(null);
+
+const filamentColorMappingForm = reactive({
+  brand_id: null as number | null,
+  type_series_id: null as number | null,
+  material: "PLA",
+  series: "",
+  hex_value: "",
+  official_name: "",
+  note: "",
+});
+const editingFilamentColorMappingId = ref<number | null>(null);
+
+const filamentSkuForm = reactive({
+  brand_id: null as number | null,
+  type_series_id: null as number | null,
+  material: "PLA",
+  series: "",
+  color_name: "",
+  color_value: "",
+  nominal_weight_g: 1000,
+  empty_spool_weight_g: null as number | null,
+  filament_diameter_mm: 1.75,
+  tray_info_idx: "",
+  sealed_quantity: 0,
+  note: "",
+});
+const editingFilamentSkuId = ref<number | null>(null);
+const filamentSkuFilters = reactive({
+  search: "",
+  brand_id: null as number | null,
+  type_series_id: null as number | null,
+  nominal_weight_g: null as number | null,
+  color_state: "all",
 });
 
-const spoolForm = reactive({
-  display_name: "",
-  brand: "",
-  material: "",
-  series: "",
-  color: "",
-  sealed_quantity: 1,
-  status: "sealed",
+const filamentSpoolForm = reactive({
+  brand_id: null as number | null,
+  type_series_id: null as number | null,
+  sku_id: null as number | null,
+  status: "opened_in_storage",
+  tray_uuid: "",
+  tag_uid: "",
+  current_remaining_g: null as number | null,
+  manual_location: "",
+  note: "",
+});
+const sealedStockAdjustForm = reactive({
+  sku_id: null as number | null,
+  current_quantity: 0,
+  target_quantity: 0,
+  note: "",
+});
+
+const quantityAdjustForm = reactive({
+  current_remaining_g: null as number | null,
+  remain_percent: null as number | null,
+  source: "manual_adjust",
+  note: "",
+});
+const locationAdjustForm = reactive({
+  printer_id: null as number | null,
+  ams_id: "",
+  tray_id: "",
+  manual_location: "",
+  note: "",
+});
+const dryingEventForm = reactive({
+  duration_minutes: null as number | null,
+  temperature_c: null as number | null,
+  note: "",
 });
 
 const bindForm = reactive({
@@ -242,6 +407,10 @@ const printerSelectOptions = computed(() =>
     ? printers.value.map((printer) => ({ label: `${printer.name} · ${printer.host}`, value: printer.id }))
     : [{ label: t("common.noPrinter"), value: null, disabled: true }],
 );
+const locationPrinterOptions = computed(() => [
+  { label: t("common.noPrinter"), value: null },
+  ...printers.value.map((printer) => ({ label: `${printer.name} · ${printer.host}`, value: printer.id })),
+]);
 const localeOptions = computed(() => [
   { label: "简体中文", value: "zh-CN" },
   { label: "English", value: "en-US" },
@@ -294,11 +463,20 @@ const notificationChannelOptions = computed(() => [
 ]);
 const exportSectionItems = computed(() => [
   { key: "config", label: t("export.sectionConfig") },
+  { key: "filament_catalog", label: t("export.sectionFilamentCatalog") },
+  { key: "filament_color_mappings", label: t("export.sectionFilamentColorMappings") },
+  { key: "ams_current", label: t("export.sectionAmsCurrent") },
   { key: "print_logs", label: t("export.sectionPrintLogs") },
   { key: "ams_history", label: t("export.sectionAmsHistory") },
   { key: "maintenance_history", label: t("export.sectionMaintenance") },
   { key: "events", label: t("export.sectionEvents") },
   { key: "notifications", label: t("export.sectionNotifications") },
+  { key: "storage", label: t("export.sectionStorage") },
+  { key: "telemetry", label: t("export.sectionTelemetry") },
+]);
+const importModeOptions = computed(() => [
+  { label: t("export.importModeMerge"), value: "merge" },
+  { label: t("export.importModeReplace"), value: "replace" },
 ]);
 const metricRangeOptions = computed(() => [
   { label: t("metrics.range1h"), value: "1h" },
@@ -316,8 +494,10 @@ const storageSortOptions = computed(() => [
   { label: t("storage.sortNameDesc"), value: "name_desc" },
 ]);
 const amsSensorRangeOptions = computed(() => [
-  { label: "24h", value: "24" },
-  { label: "7d", value: "168" },
+  { label: t("metrics.range6h"), value: "6" },
+  { label: t("metrics.range24h"), value: "24" },
+  { label: t("metrics.range7d"), value: "168" },
+  { label: t("metrics.range30d"), value: "720" },
 ]);
 const spoolStatusOptions = computed(() => [
   { label: displayCell("sealed"), value: "sealed" },
@@ -325,6 +505,277 @@ const spoolStatusOptions = computed(() => [
   { label: displayCell("active"), value: "active" },
   { label: displayCell("archived"), value: "archived" },
 ]);
+const filamentInventoryTabOptions = computed(() => [
+  { label: t("inventory.skuStock"), value: "skus" },
+  { label: t("inventory.realSpools"), value: "spools" },
+  { label: t("inventory.amsCurrent"), value: "ams" },
+  { label: t("inventory.spoolDetail"), value: "detail" },
+]);
+const filamentSpoolStatusOptions = computed(() => [
+  { label: displayCell("opened_in_storage"), value: "opened_in_storage" },
+  { label: displayCell("loaded_in_ams"), value: "loaded_in_ams" },
+  { label: displayCell("needs_location"), value: "needs_location" },
+  { label: displayCell("empty"), value: "empty" },
+  { label: displayCell("archived"), value: "archived" },
+  { label: displayCell("unknown"), value: "unknown" },
+]);
+const inventoryPageOptions = computed(() => [
+  { key: "stock" as const, label: t("inventory.stockManagement") },
+  { key: "brands" as const, label: t("inventory.brands") },
+  { key: "types" as const, label: t("inventory.typeSeries") },
+  { key: "skus" as const, label: t("inventory.skus") },
+  { key: "colors" as const, label: t("inventory.colorMappings") },
+]);
+const quantityAdjustSourceOptions = computed(() => [
+  { label: t("inventory.manualAdjust"), value: "manual_adjust" },
+  { label: t("inventory.weighing"), value: "weighing" },
+]);
+const filamentBrandOptions = computed(() => [
+  { label: t("inventory.noBrand"), value: null },
+  ...filamentBrands.value.map((brand) => ({ label: brand.name, value: brand.id })),
+]);
+const filamentRequiredBrandOptions = computed(() =>
+  filamentBrands.value.map((brand) => ({ label: brand.name, value: brand.id })),
+);
+const filamentTypeSeriesOptions = computed(() =>
+  filamentTypeSeries.value.map((row) => ({
+    label: [row.brand_name, filamentTypeSeriesLabel(row)].filter(Boolean).join(" · "),
+    value: row.id,
+  })),
+);
+const filamentColorMappingTypeSeriesOptions = computed(() =>
+  filamentTypeSeries.value
+    .filter((row) => !filamentColorMappingForm.brand_id || row.brand_id === filamentColorMappingForm.brand_id)
+    .map((row) => ({
+      label: [row.brand_name, filamentTypeSeriesLabel(row)].filter(Boolean).join(" · "),
+      value: row.id,
+    })),
+);
+const filamentSkuOptions = computed(() => [
+  { label: t("inventory.noSku"), value: null },
+  ...filamentSkus.value.map((sku) => ({ label: filamentSkuLabel(sku), value: sku.id })),
+]);
+const filamentSkuFilterBrandOptions = computed(() => [
+  { label: t("inventory.allBrands"), value: null },
+  ...filamentBrands.value.map((brand) => ({ label: brand.name, value: brand.id })),
+]);
+const filamentSkuFilterTypeSeriesOptions = computed(() => [
+  { label: t("inventory.allTypeSeries"), value: null },
+  ...filamentTypeSeries.value
+    .filter((row) => !filamentSkuFilters.brand_id || row.brand_id === filamentSkuFilters.brand_id)
+    .map((row) => ({
+      label: [row.brand_name, filamentTypeSeriesLabel(row)].filter(Boolean).join(" · "),
+      value: row.id,
+    })),
+]);
+const filamentSkuWeightOptions = computed(() => {
+  const weights = Array.from(
+    new Set(
+      filamentSkus.value
+        .map((sku) => numeric(sku.nominal_weight_g))
+        .filter((value): value is number => value !== null && value >= 0)
+        .map((value) => Math.round(value)),
+    ),
+  ).sort((left, right) => left - right);
+  return [
+    { label: t("inventory.allWeights"), value: null },
+    ...weights.map((weight) => ({ label: filamentWeight(weight), value: weight })),
+  ];
+});
+const filamentSkuColorStateOptions = computed(() => [
+  { label: t("inventory.allColorStates"), value: "all" },
+  { label: t("inventory.colorComplete"), value: "complete" },
+  { label: t("inventory.colorIncomplete"), value: "incomplete" },
+  { label: t("inventory.missingColorName"), value: "missing_name" },
+  { label: t("inventory.missingColorHex"), value: "missing_hex" },
+]);
+const filteredFilamentSkus = computed(() =>
+  filamentSkus.value.filter((sku) => {
+    if (filamentSkuFilters.brand_id && sku.brand_id !== filamentSkuFilters.brand_id) return false;
+    if (filamentSkuFilters.type_series_id && sku.type_series_id !== filamentSkuFilters.type_series_id) return false;
+    if (filamentSkuFilters.nominal_weight_g !== null) {
+      const weight = numeric(sku.nominal_weight_g);
+      if (weight === null || Math.round(weight) !== filamentSkuFilters.nominal_weight_g) return false;
+    }
+    if (!filamentSkuMatchesColorState(sku, filamentSkuFilters.color_state)) return false;
+    const query = filamentSkuFilters.search.trim().toLowerCase();
+    return !query || filamentSkuSearchText(sku).includes(query);
+  }),
+);
+const filamentSpoolBrandOptions = computed(() => [
+  { label: t("inventory.noBrand"), value: null },
+  ...filamentBrands.value.map((brand) => ({ label: brand.name, value: brand.id })),
+]);
+const filamentSpoolTypeSeriesOptions = computed(() => {
+  if (!filamentSpoolForm.brand_id) return [{ label: t("inventory.selectBrandFirst"), value: null, disabled: true }];
+  return [
+    { label: t("inventory.noTypeSeries"), value: null },
+    ...filamentTypeSeries.value
+      .filter((row) => row.brand_id === filamentSpoolForm.brand_id)
+      .map((row) => ({ label: filamentTypeSeriesLabel(row), value: row.id })),
+  ];
+});
+const filamentSpoolSkuOptions = computed(() => {
+  if (!filamentSpoolForm.type_series_id) return [{ label: t("inventory.selectTypeSeriesFirst"), value: null, disabled: true }];
+  return [
+    { label: t("inventory.noSku"), value: null },
+    ...filamentSkus.value
+      .filter((sku) => sku.type_series_id === filamentSpoolForm.type_series_id)
+      .map((sku) => ({ label: filamentSkuCompactLabel(sku), value: sku.id })),
+  ];
+});
+watch(
+  () => filamentColorMappingForm.brand_id,
+  (brandId) => {
+    if (!brandId || !filamentColorMappingForm.type_series_id) return;
+    const selected = filamentTypeSeries.value.find((row) => row.id === filamentColorMappingForm.type_series_id);
+    if (selected && selected.brand_id !== brandId) filamentColorMappingForm.type_series_id = null;
+  },
+);
+watch(
+  () => filamentSkuFilters.brand_id,
+  (brandId) => {
+    const selected = filamentTypeSeries.value.find((row) => row.id === filamentSkuFilters.type_series_id);
+    if (!brandId || (selected && selected.brand_id !== brandId)) filamentSkuFilters.type_series_id = null;
+  },
+);
+watch(
+  () => filamentSpoolForm.brand_id,
+  (brandId) => {
+    const selectedType = filamentTypeSeries.value.find((row) => row.id === filamentSpoolForm.type_series_id);
+    if (!brandId || (selectedType && selectedType.brand_id !== brandId)) filamentSpoolForm.type_series_id = null;
+    const selectedSku = filamentSkus.value.find((sku) => sku.id === filamentSpoolForm.sku_id);
+    if (!brandId || (selectedSku && selectedSku.brand_id !== brandId)) filamentSpoolForm.sku_id = null;
+  },
+);
+watch(
+  () => filamentSpoolForm.type_series_id,
+  (typeSeriesId) => {
+    const selectedSku = filamentSkus.value.find((sku) => sku.id === filamentSpoolForm.sku_id);
+    if (!typeSeriesId || (selectedSku && selectedSku.type_series_id !== typeSeriesId)) filamentSpoolForm.sku_id = null;
+  },
+);
+watch(
+  () => filamentSpoolForm.sku_id,
+  (skuId) => {
+    const sku = filamentSkus.value.find((row) => row.id === skuId);
+    if (!sku) return;
+    filamentSpoolForm.type_series_id = sku.type_series_id ?? null;
+    filamentSpoolForm.brand_id = sku.brand_id ?? null;
+  },
+);
+const selectedFilamentSpool = computed(() =>
+  filamentSpools.value.find((spool) => spool.id === selectedFilamentSpoolId.value) || filamentSpools.value[0] || null,
+);
+const filamentAmsRows = computed(() =>
+  amsSlots.value.map((slot) => ({
+    slot,
+    spool: filamentSpools.value.find((item) => item.id === Number(slot.filament_spool_id)) || null,
+  })),
+);
+const filamentStockSkus = computed(() => filamentSkus.value.filter((sku) => sku.sealed_quantity > 0));
+const filamentOpenedUnusedSpools = computed(() =>
+  filamentSpools.value.filter((spool) => {
+    if (spool.current_ams_id || spool.current_tray_id) return false;
+    if (!["opened_in_storage", "needs_location", "unknown"].includes(spool.status)) return false;
+    const remaining = filamentSpoolRemainingWeight(spool);
+    if (remaining !== null) return remaining > 0;
+    const remainPercent = numeric(spool.last_ams_remain_percent);
+    if (remainPercent !== null) return remainPercent > 0;
+    return true;
+  }),
+);
+const sortedNeedsLocationSpools = computed(() =>
+  sortInventoryRows(filamentInventorySummary.value?.needs_location_spools || [], "needsLocation"),
+);
+const pendingConfirmSpools = computed(() => filamentSpools.value.filter((spool) => isFilamentSpoolPendingConfirm(spool)));
+const sortedPendingConfirmSpools = computed(() => sortInventoryRows(pendingConfirmSpools.value, "pendingConfirm"));
+const sortedFilamentStockSkus = computed(() => sortInventoryRows(filamentStockSkus.value, "sealedStock"));
+const sortedFilamentAmsRows = computed(() => sortInventoryRows(filamentAmsRows.value, "amsLoaded"));
+const sortedFilamentOpenedUnusedSpools = computed(() => sortInventoryRows(filamentOpenedUnusedSpools.value, "openedUnused"));
+const sortedFilamentBrands = computed(() => sortInventoryRows(filamentBrands.value, "brands"));
+const sortedFilamentTypeSeries = computed(() => sortInventoryRows(filamentTypeSeries.value, "typeSeries"));
+const sortedFilteredFilamentSkus = computed(() => sortInventoryRows(filteredFilamentSkus.value, "skus"));
+const sortedFilamentColorMappings = computed(() => sortInventoryRows(filamentColorMappings.value, "colorMappings"));
+const sortedFilamentColorMappingGaps = computed(() => sortInventoryRows(filamentColorMappingGaps.value, "colorGaps"));
+const inventoryRealSpools = computed(() => filamentSpools.value.filter((spool) => !["empty", "archived"].includes(spool.status)));
+const inventorySealedWeightG = computed(() =>
+  filamentSkus.value.reduce((total, sku) => total + Number(sku.sealed_quantity || 0) * (numeric(sku.nominal_weight_g) || 0), 0),
+);
+const inventoryRealSpoolWeightG = computed(() =>
+  inventoryRealSpools.value.reduce((total, spool) => {
+    const remaining = filamentSpoolRemainingWeight(spool);
+    return total + (remaining ?? numeric(spool.nominal_weight_g) ?? 0);
+  }, 0),
+);
+const inventoryTotalWeightG = computed(() => inventorySealedWeightG.value + inventoryRealSpoolWeightG.value);
+const inventoryTotalRolls = computed(() =>
+  filamentSkus.value.reduce((total, sku) => total + Number(sku.sealed_quantity || 0), 0) + inventoryRealSpools.value.length,
+);
+const inventoryPendingConfirmCount = computed(() => pendingConfirmSpools.value.length);
+const inventoryTypeBreakdown = computed(() => {
+  const rows = new Map<string, { key: string; label: string; grams: number; rolls: number }>();
+  const add = (keyValue: unknown, grams: number, rolls: number) => {
+    const key = String(keyValue || t("inventory.unknownType"));
+    if (!rows.has(key)) rows.set(key, { key, label: key, grams: 0, rolls: 0 });
+    const row = rows.get(key)!;
+    row.grams += grams;
+    row.rolls += rolls;
+  };
+  for (const sku of filamentSkus.value) {
+    const quantity = Number(sku.sealed_quantity || 0);
+    if (quantity <= 0) continue;
+    add(sku.material, quantity * (numeric(sku.nominal_weight_g) || 0), quantity);
+  }
+  for (const spool of inventoryRealSpools.value) {
+    add(spool.material, filamentSpoolRemainingWeight(spool) ?? numeric(spool.nominal_weight_g) ?? 0, 1);
+  }
+  return [...rows.values()].sort((left, right) => right.grams - left.grams || pinyinCollator.compare(left.label, right.label));
+});
+const inventoryMaxTypeWeightG = computed(() => Math.max(1, ...inventoryTypeBreakdown.value.map((row) => row.grams)));
+const inventoryTypePieStyle = computed(() => {
+  const total = inventoryTypeBreakdown.value.reduce((sum, row) => sum + row.grams, 0);
+  if (total <= 0) return { background: "rgba(18, 28, 24, 0.08)" };
+  let cursor = 0;
+  const stops = inventoryTypeBreakdown.value.map((row, index) => {
+    const start = cursor;
+    cursor += (row.grams / total) * 100;
+    const color = inventoryChartColors[index % inventoryChartColors.length];
+    return `${color} ${start.toFixed(2)}% ${cursor.toFixed(2)}%`;
+  });
+  return { background: `conic-gradient(${stops.join(", ")})` };
+});
+const filamentColorMappingByContext = computed(() => {
+  const rows = new Map<string, FilamentColorMapping>();
+  for (const mapping of filamentColorMappings.value) {
+    const key = filamentColorMappingKey(mapping, mapping.color_hex || mapping.hex_value);
+    if (key) rows.set(key, mapping);
+  }
+  return rows;
+});
+const unmappedFilamentColors = computed(() => {
+  const rows = new Map<string, { hex: string; brand_id: number; brand_name: string; material: string; series: string; sources: Set<string> }>();
+  const add = (value: unknown, source: string, context: Record<string, any> | null | undefined) => {
+    const hex = normalizeFilamentHex(value);
+    const normalized = normalizeFilamentColorContext(context);
+    if (!hex || !normalized) return;
+    const key = filamentColorMappingKey(normalized, hex);
+    if (!key || filamentColorMappingByContext.value.has(key)) return;
+    if (!rows.has(key)) rows.set(key, { hex, ...normalized, sources: new Set() });
+    rows.get(key)?.sources.add(source);
+  };
+  for (const slot of amsSlots.value) {
+    const context = slotFilamentColorContext(slot);
+    add(slot.color || slot.tray_color, slot.location_label || `AMS ${formatCell(slot.ams_id)} / ${formatCell(slot.tray_id)}`, context);
+    const cols = Array.isArray(slot.raw?.cols) ? slot.raw.cols : [];
+    for (const color of cols) add(color, slot.location_label || `AMS ${formatCell(slot.ams_id)} / ${formatCell(slot.tray_id)}`, context);
+  }
+  for (const sku of filamentSkus.value) add(sku.color_value, filamentSkuLabel(sku), sku);
+  for (const spool of filamentSpools.value) add(spool.color_value, filamentSpoolLabel(spool), spool);
+  return [...rows.values()]
+    .map((row) => ({ ...row, sources: [...row.sources].slice(0, 3).join(" · ") }))
+    .sort((left, right) => [left.brand_name, left.material, left.series, left.hex].join("|").localeCompare([right.brand_name, right.material, right.series, right.hex].join("|")));
+});
 const experimentalFeatureItems = computed(() => [
   {
     key: "timelapse" as const,
@@ -599,6 +1050,10 @@ watch(storageTotalPages, (pages) => {
   if (storagePage.value > pages) storagePage.value = pages;
 });
 
+watch(inventoryPage, (page) => {
+  window.localStorage.setItem("filamentManager.inventoryPage", page);
+});
+
 watch(experimentalFeatures, () => {
   saveExperimentalFeatureSettings();
   if (!isViewEnabled(activeView.value)) {
@@ -649,7 +1104,7 @@ async function loadCurrent() {
     await loadNotifications();
     return;
   }
-  if (activeView.value === "inventory") {
+  if (isFilamentManagementView(activeView.value)) {
     await loadInventory();
     return;
   }
@@ -1077,25 +1532,572 @@ async function performMaintenance(item: PrinterMaintenance) {
 }
 
 async function loadInventory() {
-  spools.value = await apiRequest<Spool[]>("/spools");
+  const [
+    brandResult,
+    typeSeriesResult,
+    colorMappingResult,
+    gapResult,
+    skuResult,
+    spoolResult,
+    summaryResult,
+    inventoryAmsResult,
+  ] = await Promise.all([
+    apiRequest<FilamentBrand[]>("/filament/brands"),
+    apiRequest<FilamentTypeSeries[]>("/filament/type-series"),
+    apiRequest<FilamentColorMapping[]>("/filament/color-mappings"),
+    apiRequest<FilamentColorMappingGap[]>("/filament/color-mapping-gaps"),
+    apiRequest<FilamentSku[]>("/filament/skus"),
+    apiRequest<FilamentSpool[]>("/filament/spools"),
+    apiRequest<FilamentInventorySummary>("/filament/inventory/summary"),
+    loadInventoryAmsGlobal(),
+  ]);
+  filamentBrands.value = brandResult;
+  filamentTypeSeries.value = typeSeriesResult;
+  filamentColorMappings.value = colorMappingResult;
+  filamentColorMappingGaps.value = gapResult;
+  filamentSkus.value = skuResult;
+  filamentSpools.value = spoolResult;
+  filamentInventorySummary.value = summaryResult;
+  amsSlots.value = inventoryAmsResult.slots;
+  inventoryAmsOverviews.value = inventoryAmsResult.overviews;
+  spools.value = spoolResult.map((spool) => ({
+    id: spool.legacy_spool_id || spool.id,
+    display_name: spool.sku_label || `${t("table.spool")} ${spool.id}`,
+    material: spool.material,
+    series: spool.series,
+    color: spool.color_value || spool.color_name,
+    status: spool.status,
+    sealed_quantity: 0,
+    current_printer_id: spool.current_printer_id,
+    current_ams_id: spool.current_ams_id,
+    current_tray_id: spool.current_tray_id,
+  }));
+  if (!selectedFilamentSpoolId.value && spoolResult.length) {
+    selectedFilamentSpoolId.value = spoolResult[0].id;
+  }
+  if (selectedFilamentSpoolId.value) {
+    await loadFilamentSpoolEvents(selectedFilamentSpoolId.value);
+  }
 }
 
-async function createSpool() {
+async function loadInventoryAmsGlobal(): Promise<{ slots: Record<string, any>[]; overviews: Record<string, AmsOverview> }> {
+  if (!printers.value.length) return { slots: [], overviews: {} };
+  const rows = await Promise.all(
+    printers.value.map(async (printer) => {
+      const [slotResult, overviewResult] = await Promise.all([
+        apiRequest<Record<string, any>[]>(`/printers/${printer.id}/ams/slots`),
+        apiRequest<AmsOverview>(`/printers/${printer.id}/ams/overview`),
+      ]);
+      return {
+        printer,
+        slots: slotResult.map((slot) => ({
+          ...slot,
+          printer_id: slot.printer_id ?? printer.id,
+          printer_name: printer.name,
+          printer_host: printer.host,
+        })),
+        overview: overviewResult,
+      };
+    }),
+  );
+  return {
+    slots: rows.flatMap((row) => row.slots),
+    overviews: Object.fromEntries(rows.map((row) => [String(row.printer.id), row.overview])),
+  };
+}
+
+async function loadFilamentSpoolEvents(spoolId: number) {
+  selectedFilamentSpoolEvents.value = await apiRequest<FilamentSpoolEvents>(`/filament/spools/${spoolId}/events`);
+}
+
+function openInventoryDialog(key: InventoryDialogKey, context: Record<string, any> | null = null) {
+  inventoryDialog.key = key;
+  inventoryDialog.context = context;
+}
+
+function closeInventoryDialog() {
+  inventoryDialog.key = null;
+  inventoryDialog.context = null;
+}
+
+function openFilamentBrandCreate() {
+  resetFilamentBrandForm();
+  openInventoryDialog("brand");
+}
+
+function resetFilamentBrandForm() {
+  editingFilamentBrandId.value = null;
+  filamentBrandForm.name = "";
+  filamentBrandForm.aliases = "";
+  filamentBrandForm.note = "";
+  filamentBrandForm.default_empty_spool_weight_g = null;
+}
+
+function editFilamentBrand(brand: FilamentBrand) {
+  editingFilamentBrandId.value = brand.id;
+  filamentBrandForm.name = brand.name;
+  filamentBrandForm.aliases = (brand.aliases || []).join(", ");
+  filamentBrandForm.note = brand.note || "";
+  filamentBrandForm.default_empty_spool_weight_g = null;
+  openInventoryDialog("brand", brand);
+}
+
+async function saveFilamentBrand() {
+  if (!filamentBrandForm.name.trim()) return;
   await withLoading(async () => {
-    await apiRequest<Spool>("/spools", {
-      method: "POST",
+    const editingId = editingFilamentBrandId.value;
+    await apiRequest<FilamentBrand>(editingId ? `/filament/brands/${editingId}` : "/filament/brands", {
+      method: editingId ? "PATCH" : "POST",
       body: JSON.stringify({
-        ...spoolForm,
-        brand: spoolForm.brand || null,
-        material: spoolForm.material || null,
-        series: spoolForm.series || null,
-        color: spoolForm.color || null,
-        sealed_quantity: Number(spoolForm.sealed_quantity),
+        name: filamentBrandForm.name.trim(),
+        aliases: filamentBrandForm.aliases.split(",").map((item) => item.trim()).filter(Boolean),
+        note: filamentBrandForm.note || null,
       }),
     });
-    spoolForm.display_name = "";
+    resetFilamentBrandForm();
+    closeInventoryDialog();
     await loadInventory();
-    message.value = t("message.spoolCreated");
+    message.value = t(editingId ? "inventory.brandUpdated" : "inventory.brandCreated");
+  });
+}
+
+async function deleteFilamentBrand(brand: FilamentBrand) {
+  const confirmed = window.confirm(t("inventory.deleteBrandConfirm", { id: brand.id }));
+  if (!confirmed) return;
+  await withLoading(async () => {
+    await apiRequest(`/filament/brands/${brand.id}`, { method: "DELETE" });
+    if (editingFilamentBrandId.value === brand.id) resetFilamentBrandForm();
+    await loadInventory();
+    message.value = t("inventory.brandDeleted");
+  });
+}
+
+function openFilamentTypeSeriesCreate() {
+  resetFilamentTypeSeriesForm();
+  openInventoryDialog("typeSeries");
+}
+
+function resetFilamentTypeSeriesForm() {
+  editingFilamentTypeSeriesId.value = null;
+  Object.assign(filamentTypeSeriesForm, {
+    brand_id: null,
+    material_type: "PLA",
+    series_name: "",
+    empty_spool_weight_g: null,
+    note: "",
+  });
+}
+
+function editFilamentTypeSeries(row: FilamentTypeSeries) {
+  editingFilamentTypeSeriesId.value = row.id;
+  Object.assign(filamentTypeSeriesForm, {
+    brand_id: row.brand_id ?? row.brand_ids?.[0] ?? null,
+    material_type: row.material_type,
+    series_name: row.series_name,
+    empty_spool_weight_g: row.empty_spool_weight_g ?? null,
+    note: row.note || "",
+  });
+  openInventoryDialog("typeSeries", row);
+}
+
+async function saveFilamentTypeSeries() {
+  if (!filamentTypeSeriesForm.brand_id || !filamentTypeSeriesForm.material_type.trim() || !filamentTypeSeriesForm.series_name.trim()) return;
+  await withLoading(async () => {
+    const editingId = editingFilamentTypeSeriesId.value;
+    await apiRequest<FilamentTypeSeries>(editingId ? `/filament/type-series/${editingId}` : "/filament/type-series", {
+      method: editingId ? "PATCH" : "POST",
+      body: JSON.stringify({
+        brand_id: filamentTypeSeriesForm.brand_id,
+        material_type: filamentTypeSeriesForm.material_type.trim(),
+        series_name: filamentTypeSeriesForm.series_name.trim(),
+        empty_spool_weight_g: optionalNumber(filamentTypeSeriesForm.empty_spool_weight_g),
+        note: filamentTypeSeriesForm.note || null,
+      }),
+    });
+    resetFilamentTypeSeriesForm();
+    closeInventoryDialog();
+    await loadInventory();
+    message.value = t(editingId ? "inventory.typeSeriesUpdated" : "inventory.typeSeriesCreated");
+  });
+}
+
+async function deleteFilamentTypeSeries(row: FilamentTypeSeries) {
+  const confirmed = window.confirm(t("inventory.deleteTypeSeriesConfirm", { id: row.id }));
+  if (!confirmed) return;
+  await withLoading(async () => {
+    await apiRequest(`/filament/type-series/${row.id}`, { method: "DELETE" });
+    if (editingFilamentTypeSeriesId.value === row.id) resetFilamentTypeSeriesForm();
+    await loadInventory();
+    message.value = t("inventory.typeSeriesDeleted");
+  });
+}
+
+function openFilamentColorMappingCreate() {
+  resetFilamentColorMappingForm();
+  openInventoryDialog("colorMapping");
+}
+
+function resetFilamentColorMappingForm() {
+  editingFilamentColorMappingId.value = null;
+  filamentColorMappingForm.brand_id = null;
+  filamentColorMappingForm.type_series_id = null;
+  filamentColorMappingForm.material = "PLA";
+  filamentColorMappingForm.series = "";
+  filamentColorMappingForm.hex_value = "";
+  filamentColorMappingForm.official_name = "";
+  filamentColorMappingForm.note = "";
+}
+
+function editFilamentColorMapping(mapping: FilamentColorMapping) {
+  editingFilamentColorMappingId.value = mapping.id;
+  filamentColorMappingForm.brand_id = mapping.brand_id ?? null;
+  filamentColorMappingForm.type_series_id = mapping.type_series_id ?? null;
+  filamentColorMappingForm.material = mapping.material || "PLA";
+  filamentColorMappingForm.series = mapping.series || "";
+  filamentColorMappingForm.hex_value = mapping.color_hex || mapping.hex_value || "";
+  filamentColorMappingForm.official_name = mapping.color_name || mapping.official_name || "";
+  filamentColorMappingForm.note = mapping.note || "";
+  openInventoryDialog("colorMapping", mapping);
+}
+
+function startFilamentColorMapping(value: unknown, context?: Record<string, any> | null) {
+  const hex = normalizeFilamentHex(value);
+  if (!hex) return;
+  const normalized = normalizeFilamentColorContext(context);
+  inventoryPage.value = "colors";
+  editingFilamentColorMappingId.value = null;
+  filamentColorMappingForm.brand_id = normalized?.brand_id ?? null;
+  filamentColorMappingForm.type_series_id = normalized?.type_series_id ?? null;
+  filamentColorMappingForm.material = normalized?.material || "PLA";
+  filamentColorMappingForm.series = normalized?.series || "";
+  filamentColorMappingForm.hex_value = hex;
+  filamentColorMappingForm.official_name = "";
+  filamentColorMappingForm.note = "";
+  openInventoryDialog("colorMapping", normalized || null);
+}
+
+async function saveFilamentColorMapping() {
+  const typeSeriesId =
+    filamentColorMappingForm.type_series_id ||
+    findTypeSeriesId(filamentColorMappingForm.material, filamentColorMappingForm.series, filamentColorMappingForm.brand_id);
+  if (!filamentColorMappingForm.brand_id || !typeSeriesId || !filamentColorMappingForm.hex_value.trim() || !filamentColorMappingForm.official_name.trim()) return;
+  await withLoading(async () => {
+    const editingId = editingFilamentColorMappingId.value;
+    await apiRequest<FilamentColorMapping>(editingId ? `/filament/color-mappings/${editingId}` : "/filament/color-mappings", {
+      method: editingId ? "PATCH" : "POST",
+      body: JSON.stringify({
+        brand_id: filamentColorMappingForm.brand_id,
+        type_series_id: typeSeriesId,
+        color_hex: filamentColorMappingForm.hex_value,
+        color_name: filamentColorMappingForm.official_name.trim(),
+        note: filamentColorMappingForm.note || null,
+      }),
+    });
+    resetFilamentColorMappingForm();
+    closeInventoryDialog();
+    await loadInventory();
+    message.value = t(editingId ? "inventory.colorMappingUpdated" : "inventory.colorMappingCreated");
+  });
+}
+
+async function deleteFilamentColorMapping(mapping: FilamentColorMapping) {
+  await withLoading(async () => {
+    await apiRequest(`/filament/color-mappings/${mapping.id}`, { method: "DELETE" });
+    if (editingFilamentColorMappingId.value === mapping.id) resetFilamentColorMappingForm();
+    await loadInventory();
+    message.value = t("inventory.colorMappingDeleted");
+  });
+}
+
+function filamentSkuPayload() {
+  const nominalWeight = optionalNumber(filamentSkuForm.nominal_weight_g);
+  return {
+    type_series_id: filamentSkuForm.type_series_id,
+    color_name: filamentSkuForm.color_name || null,
+    color_hex: filamentSkuForm.color_value || null,
+    nominal_weight_g: nominalWeight ?? 1000,
+    sealed_quantity: editingFilamentSkuId.value ? undefined : optionalNumber(filamentSkuForm.sealed_quantity) ?? 0,
+    note: filamentSkuForm.note || null,
+  };
+}
+
+function openFilamentSkuCreate() {
+  resetFilamentSkuForm();
+  openInventoryDialog("sku");
+}
+
+function resetFilamentSkuForm() {
+  editingFilamentSkuId.value = null;
+  Object.assign(filamentSkuForm, {
+    brand_id: null,
+    type_series_id: null,
+    material: "PLA",
+    series: "",
+    color_name: "",
+    color_value: "",
+    nominal_weight_g: 1000,
+    empty_spool_weight_g: null,
+    filament_diameter_mm: 1.75,
+    tray_info_idx: "",
+    sealed_quantity: 0,
+    note: "",
+  });
+}
+
+function editFilamentSku(sku: FilamentSku) {
+  editingFilamentSkuId.value = sku.id;
+  Object.assign(filamentSkuForm, {
+    brand_id: sku.brand_id ?? null,
+    type_series_id: sku.type_series_id ?? sku.type_series_ids?.[0] ?? null,
+    material: sku.material || "PLA",
+    series: sku.series || "",
+    color_name: sku.color_name || "",
+    color_value: sku.color_hex || sku.color_value || "",
+    nominal_weight_g: sku.nominal_weight_g,
+    empty_spool_weight_g: sku.empty_spool_weight_g ?? null,
+    filament_diameter_mm: sku.filament_diameter_mm,
+    tray_info_idx: sku.tray_info_idx || "",
+    sealed_quantity: sku.sealed_quantity,
+    note: sku.note || "",
+  });
+  openInventoryDialog("sku", sku);
+}
+
+function cancelFilamentSkuEdit() {
+  resetFilamentSkuForm();
+  closeInventoryDialog();
+}
+
+function resetFilamentSkuFilters() {
+  Object.assign(filamentSkuFilters, {
+    search: "",
+    brand_id: null,
+    type_series_id: null,
+    nominal_weight_g: null,
+    color_state: "all",
+  });
+}
+
+async function saveFilamentSku() {
+  if (!filamentSkuForm.type_series_id) return;
+  await withLoading(async () => {
+    const editingId = editingFilamentSkuId.value;
+    const previousSku = editingId ? filamentSkus.value.find((sku) => sku.id === editingId) : null;
+    const targetSealedQuantity = Math.max(0, Math.round(optionalNumber(filamentSkuForm.sealed_quantity) ?? 0));
+    await apiRequest<FilamentSku>(editingId ? `/filament/skus/${editingId}` : "/filament/skus", {
+      method: editingId ? "PATCH" : "POST",
+      body: JSON.stringify(filamentSkuPayload()),
+    });
+    if (editingId && previousSku) {
+      const delta = targetSealedQuantity - Number(previousSku.sealed_quantity || 0);
+      if (delta !== 0) {
+        await apiRequest<FilamentSku>(`/filament/skus/${editingId}/sealed-stock-adjust`, {
+          method: "POST",
+          body: JSON.stringify({ delta, reason: "sku edit" }),
+        });
+      }
+    }
+    resetFilamentSkuForm();
+    closeInventoryDialog();
+    await loadInventory();
+    message.value = t(editingId ? "inventory.skuUpdated" : "inventory.skuCreated");
+  });
+}
+
+async function deleteFilamentSku(sku: FilamentSku) {
+  const sealedQuantity = Number(sku.sealed_quantity || 0);
+  const realSpoolCount = Number(sku.opened_spool_count || 0) + Number(sku.ams_spool_count || 0);
+  const forceDelete = sealedQuantity > 0 && realSpoolCount === 0;
+  const confirmed = window.confirm(
+    t(forceDelete ? "inventory.forceDeleteSkuConfirm" : "inventory.deleteSkuConfirm", {
+      id: sku.id,
+      quantity: sealedQuantity,
+    }),
+  );
+  if (!confirmed) return;
+  await withLoading(async () => {
+    await apiRequest(`/filament/skus/${sku.id}${forceDelete ? "?force=true" : ""}`, { method: "DELETE" });
+    if (editingFilamentSkuId.value === sku.id) resetFilamentSkuForm();
+    await loadInventory();
+    message.value = t("inventory.skuDeleted");
+  });
+}
+
+function openSealedStockAdjust(sku: FilamentSku) {
+  sealedStockAdjustForm.sku_id = sku.id;
+  sealedStockAdjustForm.current_quantity = Number(sku.sealed_quantity || 0);
+  sealedStockAdjustForm.target_quantity = Number(sku.sealed_quantity || 0);
+  sealedStockAdjustForm.note = "";
+  openInventoryDialog("stockAdjust", sku);
+}
+
+async function saveSealedStockAdjust() {
+  const sku = filamentSkus.value.find((item) => item.id === sealedStockAdjustForm.sku_id);
+  if (!sku) return;
+  const target = Math.max(0, Math.round(optionalNumber(sealedStockAdjustForm.target_quantity) ?? 0));
+  const delta = target - Number(sku.sealed_quantity || 0);
+  await withLoading(async () => {
+    if (delta !== 0) {
+      await apiRequest<FilamentSku>(`/filament/skus/${sku.id}/sealed-stock-adjust`, {
+        method: "POST",
+        body: JSON.stringify({ delta, reason: sealedStockAdjustForm.note || "stock dialog" }),
+      });
+    }
+    closeInventoryDialog();
+    await loadInventory();
+    message.value = t("inventory.stockAdjusted");
+  });
+}
+
+async function adjustFilamentSkuStock(sku: FilamentSku, delta: number) {
+  await withLoading(async () => {
+    await apiRequest<FilamentSku>(`/filament/skus/${sku.id}/sealed-stock-adjust`, {
+      method: "POST",
+      body: JSON.stringify({ delta, reason: "manual" }),
+    });
+    await loadInventory();
+    message.value = t("inventory.stockAdjusted");
+  });
+}
+
+function openConfirmFilamentSpoolSku(spool: FilamentSpool | Record<string, any>) {
+  openInventoryDialog("skuConfirm", spool);
+}
+
+function editSkuFromConfirmDialog() {
+  const spool = inventoryDialog.context;
+  const sku = filamentSkus.value.find((item) => item.id === Number(spool?.sku_id));
+  if (!sku) return;
+  inventoryPage.value = "skus";
+  editFilamentSku(sku);
+}
+
+function inventoryDialogSkuLabel(): string {
+  const sku = inventoryDialog.context as FilamentSku | null;
+  return sku ? filamentSkuLabel(sku) : "—";
+}
+
+function inventoryDialogSpoolLabel(): string {
+  return filamentSpoolLabel(inventoryDialog.context);
+}
+
+async function confirmFilamentSpoolSku(spool: FilamentSpool | Record<string, any>) {
+  const spoolId = Number(spool.id);
+  if (!Number.isFinite(spoolId)) return;
+  await withLoading(async () => {
+    await apiRequest<FilamentSpool>(`/filament/spools/${spoolId}/confirm-sku`, { method: "POST" });
+    closeInventoryDialog();
+    await loadInventory();
+    message.value = t("inventory.skuConfirmed");
+  });
+}
+
+function openCreateFilamentSpoolDialog() {
+  Object.assign(filamentSpoolForm, {
+    brand_id: null,
+    type_series_id: null,
+    sku_id: null,
+    status: "opened_in_storage",
+    tray_uuid: "",
+    tag_uid: "",
+    current_remaining_g: null,
+    manual_location: "",
+    note: "",
+  });
+  openInventoryDialog("spoolCreate");
+}
+
+async function createFilamentSpool() {
+  await withLoading(async () => {
+    const spool = await apiRequest<FilamentSpool>("/filament/spools", {
+      method: "POST",
+      body: JSON.stringify({
+        sku_id: filamentSpoolForm.sku_id || null,
+        status: filamentSpoolForm.status,
+        official_spool_uid: filamentSpoolForm.tray_uuid || filamentSpoolForm.tag_uid || null,
+        actual_weight_g: optionalNumber(filamentSpoolForm.current_remaining_g),
+        storage_location: filamentSpoolForm.manual_location || null,
+        note: filamentSpoolForm.note || null,
+      }),
+    });
+    selectedFilamentSpoolId.value = spool.id;
+    filamentSpoolForm.tray_uuid = "";
+    filamentSpoolForm.tag_uid = "";
+    filamentSpoolForm.current_remaining_g = null;
+    filamentSpoolForm.manual_location = "";
+    filamentSpoolForm.note = "";
+    closeInventoryDialog();
+    await loadInventory();
+    message.value = t("inventory.spoolCreated");
+  });
+}
+
+async function openFilamentSpoolDialog(spool: FilamentSpool | Record<string, any>) {
+  await selectFilamentSpool(spool);
+  openInventoryDialog("spoolDetail", spool);
+}
+
+async function selectFilamentSpool(spool: FilamentSpool | Record<string, any>) {
+  selectedFilamentSpoolId.value = Number(spool.id);
+  quantityAdjustForm.current_remaining_g = spool.actual_weight_g ?? spool.current_remaining_g ?? null;
+  quantityAdjustForm.remain_percent = spool.last_ams_remain_percent ?? null;
+  quantityAdjustForm.note = "";
+  locationAdjustForm.printer_id = spool.current_printer_id ?? null;
+  locationAdjustForm.ams_id = spool.current_ams_id || "";
+  locationAdjustForm.tray_id = spool.current_tray_id || "";
+  locationAdjustForm.manual_location = spool.storage_location || spool.manual_location || "";
+  locationAdjustForm.note = "";
+  await loadFilamentSpoolEvents(Number(spool.id));
+}
+
+async function adjustSelectedFilamentQuantity() {
+  if (!selectedFilamentSpool.value) return;
+  let actualWeight = optionalNumber(quantityAdjustForm.current_remaining_g);
+  if (actualWeight === null) {
+    const percent = optionalNumber(quantityAdjustForm.remain_percent);
+    const nominal = numeric(
+      selectedFilamentSpool.value.nominal_weight_g ?? selectedFilamentSpool.value.initial_net_weight_g,
+    );
+    if (percent !== null && nominal !== null && nominal > 0) {
+      actualWeight = (nominal * percent) / 100;
+    }
+  }
+  if (actualWeight === null) {
+    error.value = t("inventory.remainingWeightRequired");
+    return;
+  }
+  await withLoading(async () => {
+    await apiRequest<FilamentSpool>(`/filament/spools/${selectedFilamentSpool.value!.id}/weight`, {
+      method: "POST",
+      body: JSON.stringify({
+        actual_weight_g: actualWeight,
+        note: quantityAdjustForm.note || null,
+      }),
+    });
+    quantityAdjustForm.note = "";
+    closeInventoryDialog();
+    await loadInventory();
+    message.value = t("inventory.quantityAdjusted");
+  });
+}
+
+async function updateSelectedFilamentLocation() {
+  if (!selectedFilamentSpool.value) return;
+  await withLoading(async () => {
+    await apiRequest<FilamentSpool>(`/filament/spools/${selectedFilamentSpool.value!.id}/location`, {
+      method: "POST",
+      body: JSON.stringify({
+        printer_id: optionalNumber(locationAdjustForm.printer_id),
+        ams_id: locationAdjustForm.ams_id || null,
+        tray_id: locationAdjustForm.tray_id || null,
+        storage_location: locationAdjustForm.manual_location || null,
+        note: locationAdjustForm.note || null,
+      }),
+    });
+    locationAdjustForm.note = "";
+    closeInventoryDialog();
+    await loadInventory();
+    message.value = t("inventory.locationSaved");
   });
 }
 
@@ -1271,6 +2273,7 @@ async function downloadExport() {
     type: exportOptions.type,
     sections: exportOptions.sections.join(","),
   });
+  if (exportOptions.type === "json") params.set("mode", "backup");
   await withLoading(async () => {
     const response = await fetch(`${API_BASE}/export?${params.toString()}`);
     if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
@@ -1282,6 +2285,31 @@ async function downloadExport() {
     link.click();
     URL.revokeObjectURL(url);
   });
+}
+
+async function importBackupFile(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const payload = JSON.parse(text) as Record<string, any>;
+    const confirmed = importOptions.mode !== "replace" || window.confirm(t("export.importReplaceConfirm"));
+    if (!confirmed) return;
+    await withLoading(async () => {
+      importResult.value = await apiRequest<Record<string, any>>("/import", {
+        method: "POST",
+        body: JSON.stringify({ mode: importOptions.mode, payload }),
+      });
+      await refreshPrinters();
+      await loadCurrent();
+      message.value = t("export.importComplete");
+    });
+  } catch (error) {
+    message.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    input.value = "";
+  }
 }
 
 async function loadEvents() {
@@ -1445,10 +2473,24 @@ function saveExperimentalFeatureSettings() {
   window.localStorage.setItem("filamentManager.experimentalFeatures", JSON.stringify(experimentalFeatures));
 }
 
-function resolveInitialView(view: ViewKey | null) {
+function resolveInitialView(view: string | null) {
+  if (view === "filamentBrands" || view === "filamentSkus" || view === "filamentSpools") return "inventory";
   if (!viewKeys.includes(view as ViewKey)) return "overview";
   const next = view as ViewKey;
   return isViewEnabled(next) ? next : "overview";
+}
+
+function resolveInitialInventoryPage(view: string | null): InventoryPageKey {
+  if (view === "filamentBrands") return "brands";
+  if (view === "filamentSkus") return "skus";
+  if (view === "filamentSpools") return "stock";
+  const stored = window.localStorage.getItem("filamentManager.inventoryPage");
+  if (stored === "stock" || stored === "brands" || stored === "types" || stored === "skus" || stored === "colors") return stored;
+  return "stock";
+}
+
+function isFilamentManagementView(view: ViewKey) {
+  return view === "inventory";
 }
 
 function isViewEnabled(view: ViewKey) {
@@ -1691,6 +2733,463 @@ function displayCell(value: unknown): string {
   if (typeof value === "boolean") return boolLabel(value);
   if (typeof value === "string") return valueLabel(value);
   return formatCell(value);
+}
+
+function normalizeFilamentHex(value: unknown): string | null {
+  const text = String(value || "")
+    .trim()
+    .replace(/^#/, "")
+    .replace(/[\s_-]/g, "")
+    .toUpperCase();
+  const compact = text.length === 8 ? text.slice(0, 6) : text;
+  return /^[0-9A-F]{6}$/.test(compact) ? compact : null;
+}
+
+function normalizeFilamentColorContext(context: Record<string, any> | null | undefined) {
+  if (!context) return null;
+  const brandId = numeric(context.brand_id ?? context.filament_brand_id);
+  const brandName = context.brand_name ?? context.filament_brand_name;
+  const typeSeriesId = numeric(context.type_series_id ?? context.filament_type_series_id);
+  const material = String(context.material ?? context.filament_material ?? context.tray_type ?? "").trim();
+  const series = String(context.series ?? context.filament_series ?? context.tray_sub_brands ?? "").trim();
+  if (brandId === null || !material || !series) return null;
+  return {
+    brand_id: Math.round(brandId),
+    brand_name: String(brandName || ""),
+    type_series_id: typeSeriesId === null ? findTypeSeriesId(material, series, Math.round(brandId)) : Math.round(typeSeriesId),
+    material,
+    series,
+  };
+}
+
+function filamentColorMappingKey(context: Record<string, any> | null | undefined, value: unknown): string | null {
+  const normalized = normalizeFilamentColorContext(context);
+  const hex = normalizeFilamentHex(value);
+  if (!normalized || !hex) return null;
+  return [normalized.brand_id, normalized.material.toLowerCase(), normalized.series.toLowerCase(), hex].join("|");
+}
+
+function mappedFilamentColorName(value: unknown, context?: Record<string, any> | null): string | null {
+  const key = filamentColorMappingKey(context, value);
+  const mapping = key ? filamentColorMappingByContext.value.get(key) : null;
+  return mapping?.color_name || mapping?.official_name || null;
+}
+
+function filamentColorDisplay(value: unknown, fallbackName?: unknown, context?: Record<string, any> | null): string {
+  const mapped = mappedFilamentColorName(value, context);
+  if (mapped) return mapped;
+  if (fallbackName) return String(fallbackName);
+  const hex = normalizeFilamentHex(value);
+  return hex || formatCell(value);
+}
+
+function colorNeedsMapping(value: unknown, context?: Record<string, any> | null): boolean {
+  const hex = normalizeFilamentHex(value);
+  const ownName = String(
+    context?.color_name ||
+      context?.official_name ||
+      context?.tray_color_name ||
+      context?.filament_color_name ||
+      context?.color_display_name ||
+      "",
+  ).trim();
+  if (hex && ownName) return false;
+  const key = filamentColorMappingKey(context, value);
+  return Boolean(key && !filamentColorMappingByContext.value.has(key));
+}
+
+function slotFilamentColorContext(slot: Record<string, any> | null | undefined) {
+  if (!slot) return null;
+  const direct = normalizeFilamentColorContext(slot);
+  if (direct) return direct;
+  return filamentSpools.value.find((item) => item.id === Number(slot.filament_spool_id)) || null;
+}
+
+function filamentSkuMatchesColorState(sku: FilamentSku, state: string): boolean {
+  const hasName = Boolean(String(sku.color_name || "").trim());
+  const hasHex = Boolean(normalizeFilamentHex(sku.color_hex || sku.color_value));
+  if (state === "complete") return hasName && hasHex;
+  if (state === "incomplete") return !hasName || !hasHex;
+  if (state === "missing_name") return !hasName;
+  if (state === "missing_hex") return !hasHex;
+  return true;
+}
+
+function filamentSkuSearchText(sku: FilamentSku): string {
+  const weight = numeric(sku.nominal_weight_g);
+  return [
+    sku.id,
+    sku.brand_name,
+    filamentBrandDisplay(sku.brands),
+    sku.material,
+    sku.series,
+    filamentTypeSeriesDisplay(sku.type_series),
+    sku.color_name,
+    sku.color_hex,
+    sku.color_value,
+    sku.nominal_weight_g,
+    weight !== null ? `${Math.round(weight)}g` : null,
+    weight !== null ? `${Math.round(weight)} g` : null,
+    weight !== null && weight % 1000 === 0 ? `${Math.round(weight / 1000)}kg` : null,
+    sku.sealed_quantity,
+    sku.note,
+  ]
+    .map((value) => String(value ?? ""))
+    .join(" ")
+    .toLowerCase();
+}
+
+function filamentSkuLabel(sku: FilamentSku | Record<string, any>): string {
+  const colorValue = sku.color_hex || sku.color_value;
+  const color = colorValue || sku.color_name ? filamentColorDisplay(colorValue, sku.color_name, sku) : null;
+  return [sku.brand_name, sku.series, sku.material, color]
+    .filter(Boolean)
+    .join(" · ") || `SKU ${sku.id}`;
+}
+
+function filamentSkuCompactLabel(sku: FilamentSku): string {
+  const colorValue = sku.color_hex || sku.color_value;
+  const color = colorValue || sku.color_name ? filamentColorDisplay(colorValue, sku.color_name, sku) : null;
+  const weight = numeric(sku.nominal_weight_g);
+  return [color || `SKU ${sku.id}`, weight !== null ? `${Math.round(weight)} g` : null].filter(Boolean).join(" · ");
+}
+
+function filamentSpoolLabel(spool: FilamentSpool | Record<string, any> | null | undefined): string {
+  if (!spool) return "—";
+  const colorValue = spool.color_hex || spool.color_value;
+  const color = colorValue || spool.color_name ? filamentColorDisplay(colorValue, spool.color_name, spool) : null;
+  return [spool.brand_name, spool.series, spool.material, color].filter(Boolean).join(" · ") || spool.sku_label || `#${spool.id}`;
+}
+
+function filamentSpoolCurrentPlace(spool: FilamentSpool | Record<string, any> | null | undefined): string {
+  if (!spool) return "—";
+  const amsRow = filamentAmsRows.value.find((row) => row.spool?.id === spool.id);
+  if (amsRow) return filamentAmsSlotLocationLabel(amsRow.slot);
+  return filamentSpoolLocation(spool);
+}
+
+function filamentAmsFilamentLabel(slot: Record<string, any>, spool: FilamentSpool | Record<string, any> | null | undefined): string {
+  return spool ? filamentSpoolLabel(spool) : slotMaterialColorLabel(slot);
+}
+
+function printerDisplayName(printerId: unknown): string {
+  const id = numeric(printerId);
+  const printer = printers.value.find((item) => item.id === id);
+  return printer?.name || formatCell(printerId);
+}
+
+function amsUnitForSlot(slot: Record<string, any> | null | undefined): Record<string, any> | null {
+  if (!slot) return null;
+  const overview = activeView.value === "ams"
+    ? amsOverview.value
+    : inventoryAmsOverviews.value[String(slot.printer_id)] || amsOverview.value;
+  if (overview) return overview.units.find((unit) => String(unit.ams_id) === String(slot.ams_id)) || null;
+  return null;
+}
+
+function filamentAmsSlotLocationLabel(slot: Record<string, any> | null | undefined): string {
+  if (!slot) return "—";
+  const unit = amsUnitForSlot(slot);
+  if (unit) return `${amsTitle(unit)} / ${slotDisplayLabel(slot)}`;
+  return slot.location_label || `AMS ${formatCell(slot.ams_id)} / ${slotDisplayLabel(slot)}`;
+}
+
+function filamentTypeSeriesLabel(row: FilamentTypeSeries | Record<string, any> | null | undefined): string {
+  if (!row) return "—";
+  return [row.material_type, row.series_name].filter(Boolean).join(" · ") || `#${row.id}`;
+}
+
+function filamentTypeSeriesDisplay(rows: Record<string, any>[] | undefined): string {
+  if (!rows?.length) return "—";
+  return rows.map((row) => filamentTypeSeriesLabel(row)).join(", ");
+}
+
+function filamentBrandDisplay(rows: Record<string, any>[] | undefined): string {
+  if (!rows?.length) return "—";
+  return rows.map((row) => row.name).filter(Boolean).join(", ") || "—";
+}
+
+function findTypeSeriesId(material: unknown, series: unknown, brandId?: number | null): number | null {
+  const materialText = String(material || "").trim().toLowerCase();
+  const seriesText = String(series || "").trim().toLowerCase();
+  const row = filamentTypeSeries.value.find(
+    (item) =>
+      item.material_type.toLowerCase() === materialText &&
+      item.series_name.toLowerCase() === seriesText &&
+      (!brandId || item.brand_id === brandId),
+  );
+  return row?.id ?? null;
+}
+
+function slotColorName(slot: Record<string, any> | null | undefined): string | null {
+  if (!slot) return null;
+  const explicit = slot.tray_color_name || slot.color_name || slot.filament_color_name || slot.color_display_name;
+  if (explicit) return String(explicit);
+  const name = slot.tray_id_name;
+  if (!name) return null;
+  const text = String(name).trim();
+  const compact = text.replace(/[-_]/g, "");
+  if (/^[a-z0-9]+$/i.test(compact) && /\d/.test(compact) && !/\s/.test(text)) return null;
+  const parts = text.split(/\s+/);
+  let startIndex = -1;
+  for (const prefix of [slot.series, slot.material]) {
+    const prefixParts = String(prefix || "")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((part) => part.toLowerCase());
+    if (!prefixParts.length) continue;
+    const lowerParts = parts.map((part) => part.toLowerCase());
+    for (let index = 0; index <= lowerParts.length - prefixParts.length; index += 1) {
+      if (prefixParts.every((part, offset) => lowerParts[index + offset] === part)) {
+        startIndex = index + prefixParts.length;
+        break;
+      }
+    }
+    if (startIndex >= 0) break;
+  }
+  const candidate = startIndex >= 0 ? parts.slice(startIndex).join(" ").trim() : text;
+  const hex = String(slot.color || slot.tray_color || "").replace("#", "").toLowerCase();
+  if (candidate.replace("#", "").toLowerCase() === hex) return null;
+  return candidate || null;
+}
+
+function slotColorLabel(slot: Record<string, any> | null | undefined): string {
+  const rawColor = slot?.color || slot?.tray_color;
+  return mappedFilamentColorName(rawColor, slotFilamentColorContext(slot)) || slotColorName(slot) || formatCell(normalizeFilamentHex(rawColor) || rawColor);
+}
+
+function slotMaterialColorLabel(slot: Record<string, any> | null | undefined): string {
+  if (!slot) return "—";
+  return [slot.material, slot.series, slotColorLabel(slot)].filter(Boolean).join(" · ") || formatCell(slot.color || slot.tray_color);
+}
+
+function filamentSpoolLocation(spool: FilamentSpool | Record<string, any> | null | undefined): string {
+  if (!spool) return "—";
+  if (spool.current_ams_id || spool.current_tray_id) {
+    return `AMS ${formatCell(spool.current_ams_id)} / ${t("form.slotId")} ${formatCell(spool.current_tray_id)}`;
+  }
+  return spool.storage_location || spool.manual_location || "—";
+}
+
+function filamentWeight(value: unknown): string {
+  const parsed = numeric(value);
+  return parsed === null ? "—" : `${Math.round(parsed)} g`;
+}
+
+function filamentKg(value: unknown): string {
+  const parsed = numeric(value);
+  if (parsed === null) return "—";
+  return `${(parsed / 1000).toFixed(parsed >= 10000 ? 1 : 2)} kg`;
+}
+
+function skuSealedWeight(sku: FilamentSku | Record<string, any>): number {
+  return Number(sku.sealed_quantity || 0) * (numeric(sku.nominal_weight_g) || 0);
+}
+
+function skuOpenedWeight(sku: FilamentSku | Record<string, any>): number {
+  return filamentSpools.value
+    .filter((spool) => spool.sku_id === sku.id && !["empty", "archived"].includes(spool.status))
+    .reduce((total, spool) => total + (filamentSpoolRemainingWeight(spool) ?? numeric(spool.nominal_weight_g) ?? 0), 0);
+}
+
+async function jumpToInventorySection(id: string) {
+  await nextTick();
+  document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function optionalNumber(value: unknown): number | null {
+  return numeric(value);
+}
+
+function toggleInventorySort(table: string, key: string) {
+  const state = inventoryTableSorts[table] || { key: "id", direction: "asc" as SortDirection };
+  inventoryTableSorts[table] = {
+    key,
+    direction: state.key === key && state.direction === "asc" ? "desc" : "asc",
+  };
+}
+
+function inventorySortIndicator(table: string, key: string): string {
+  const state = inventoryTableSorts[table];
+  if (!state || state.key !== key) return "";
+  return state.direction === "asc" ? "↑" : "↓";
+}
+
+function sortInventoryRows<T>(rows: readonly T[], table: string): T[] {
+  const state = inventoryTableSorts[table] || { key: "id", direction: "asc" as SortDirection };
+  const direction = state.direction === "desc" ? -1 : 1;
+  return [...rows].sort((left, right) => {
+    const primary = compareInventoryValues(
+      inventorySortValue(table, left, state.key),
+      inventorySortValue(table, right, state.key),
+    );
+    if (primary !== 0) return primary * direction;
+    return compareInventoryValues(inventoryRowId(left), inventoryRowId(right));
+  });
+}
+
+function inventorySortValue(table: string, row: unknown, key: string): unknown {
+  const item = row as Record<string, any>;
+  if (table === "needsLocation") {
+    if (key === "id") return item.id;
+    if (key === "spool") return filamentSpoolLabel(item);
+    if (key === "location") return filamentSpoolLocation(item);
+    if (key === "identity") return item.official_spool_uid || item.identity_key;
+  }
+  if (table === "pendingConfirm") {
+    if (key === "id") return item.id;
+    if (key === "spool") return filamentSpoolLabel(item);
+    if (key === "remaining") return filamentSpoolRemainingWeight(item) ?? numeric(item.last_ams_remain_percent);
+    if (key === "location") return filamentSpoolCurrentPlace(item);
+    if (key === "status") return displayCell(item.status);
+  }
+  if (table === "sealedStock" || table === "skus") {
+    if (key === "id") return item.id;
+    if (key === "filament") return filamentSkuLabel(item);
+    if (key === "brand") return filamentBrandDisplay(item.brands) || item.brand_name;
+    if (key === "material") return filamentTypeSeriesDisplay(item.type_series) || [item.material, item.series].filter(Boolean).join(" ");
+    if (key === "color") return filamentColorDisplay(item.color_hex || item.color_value, item.color_name, item);
+    if (key === "weight") return item.nominal_weight_g;
+    if (key === "sealed") return item.sealed_quantity;
+  }
+  if (table === "amsLoaded") {
+    const slot = item.slot || {};
+    const spool = item.spool || null;
+    if (key === "printer") return slot.printer_name || printerDisplayName(slot.printer_id);
+    if (key === "slot") return filamentAmsSlotLocationLabel(slot);
+    if (key === "filament") return filamentAmsFilamentLabel(slot, spool);
+    if (key === "remaining") return filamentAmsRemainingWeight(slot, spool) ?? numeric(slot.remain);
+    if (key === "status") return filamentAmsState(slot, spool);
+  }
+  if (table === "openedUnused") {
+    if (key === "id") return item.id;
+    if (key === "spool") return filamentSpoolLabel(item);
+    if (key === "status") return displayCell(item.status);
+    if (key === "remaining") return filamentSpoolRemainingWeight(item) ?? numeric(item.last_ams_remain_percent);
+    if (key === "location") return filamentSpoolLocation(item);
+    if (key === "identity") return item.identity_key || item.official_spool_uid;
+  }
+  if (table === "brands") {
+    if (key === "id") return item.id;
+    if (key === "brand") return item.name;
+    if (key === "aliases") return (item.aliases || []).join(", ");
+    if (key === "typeSeries") return item.type_series_count;
+    if (key === "skus") return item.sku_count;
+    if (key === "spools") return item.spool_count;
+    if (key === "note") return item.note;
+  }
+  if (table === "typeSeries") {
+    if (key === "id") return item.id;
+    if (key === "brand") return filamentBrandDisplay(item.brands) || item.brand_name;
+    if (key === "material") return filamentTypeSeriesLabel(item);
+    if (key === "emptyWeight") return item.empty_spool_weight_g;
+    if (key === "skus") return item.sku_count;
+    if (key === "spools") return item.spool_count;
+  }
+  if (table === "colorMappings") {
+    if (key === "id") return item.id;
+    if (key === "brand") return item.brand_name;
+    if (key === "material") return [item.material_type || item.material, item.series_name || item.series].filter(Boolean).join(" ");
+    if (key === "hex") return item.color_hex || item.hex_value;
+    if (key === "color") return item.color_name || item.official_name;
+    if (key === "note") return item.note;
+  }
+  if (table === "colorGaps") {
+    if (key === "id") return item.sku_id;
+    if (key === "brand") return filamentBrandDisplay(item.brands);
+    if (key === "material") return filamentTypeSeriesDisplay(item.type_series);
+    if (key === "color") return item.color_name;
+    if (key === "hex") return item.color_hex;
+    if (key === "source") return (item.missing || []).join(", ");
+  }
+  return item[key] ?? inventoryRowId(row);
+}
+
+function inventoryRowId(row: unknown): unknown {
+  const item = row as Record<string, any>;
+  return item.id ?? item.sku_id ?? item.slot?.id ?? item.slot?.global_tray_id ?? item.slot?.tray_id;
+}
+
+function compareInventoryValues(left: unknown, right: unknown): number {
+  const leftEmpty = left === null || left === undefined || left === "";
+  const rightEmpty = right === null || right === undefined || right === "";
+  if (leftEmpty && rightEmpty) return 0;
+  if (leftEmpty) return 1;
+  if (rightEmpty) return -1;
+  const leftNumber = typeof left === "number" ? left : null;
+  const rightNumber = typeof right === "number" ? right : null;
+  if (leftNumber !== null && rightNumber !== null) return leftNumber - rightNumber;
+  return pinyinCollator.compare(String(left), String(right));
+}
+
+function filamentRemainPercent(spool: FilamentSpool | Record<string, any> | null | undefined): string {
+  if (!spool) return "—";
+  if (spool.last_ams_remain_percent !== null && spool.last_ams_remain_percent !== undefined) {
+    return `${spool.last_ams_remain_percent}%`;
+  }
+  const remaining = numeric(spool.actual_weight_g ?? spool.current_remaining_g);
+  const initial = numeric(spool.nominal_weight_g ?? spool.initial_net_weight_g);
+  if (remaining === null || initial === null || initial <= 0) return "—";
+  return `${Math.round((remaining / initial) * 100)}%`;
+}
+
+function filamentSpoolRemainingWeight(spool: FilamentSpool | Record<string, any> | null | undefined): number | null {
+  if (!spool) return null;
+  const measured = numeric(spool.actual_weight_g ?? spool.current_remaining_g);
+  if (measured !== null && measured >= 0) return measured;
+  const remain = numeric(spool.last_ams_remain_percent);
+  const nominal = numeric(spool.nominal_weight_g ?? spool.initial_net_weight_g);
+  if (remain === null || remain < 0 || nominal === null || nominal <= 0) return null;
+  return (nominal * remain) / 100;
+}
+
+function filamentSpoolRemainingLabel(spool: FilamentSpool | Record<string, any> | null | undefined): string {
+  const percent = filamentRemainPercent(spool);
+  const weight = filamentSpoolRemainingWeight(spool);
+  if (weight === null) return percent;
+  return `${percent} / ${Math.round(weight)} g`;
+}
+
+function filamentAmsRemainingWeight(slot: Record<string, any>, spool: FilamentSpool | Record<string, any> | null | undefined): number | null {
+  const reported = [
+    slot.remaining_weight_g,
+    slot.remain_weight_g,
+    slot.remain_g,
+    slot.tray_remaining_weight_g,
+    slot.raw?.remaining_weight_g,
+    slot.raw?.remain_weight_g,
+    slot.raw?.remain_g,
+    slot.raw?.tray_remaining_weight_g,
+    slot.raw?.remaining_weight,
+    slot.raw?.remain_weight,
+    slot.raw?.tray_remaining_weight,
+  ].map((value) => numeric(value)).find((value) => value !== null && value >= 0);
+  if (reported !== undefined) return reported;
+  const remain = numeric(slot.remain);
+  const nominal = numeric(spool?.nominal_weight_g ?? spool?.initial_net_weight_g);
+  if (remain === null || remain < 0 || nominal === null || nominal <= 0) return null;
+  return (nominal * remain) / 100;
+}
+
+function filamentAmsRemainingLabel(slot: Record<string, any>, spool: FilamentSpool | Record<string, any> | null | undefined): string {
+  const remain = numeric(slot.remain);
+  const percent = remain !== null && remain >= 0 ? `${Math.round(remain)}%` : "—";
+  const weight = filamentAmsRemainingWeight(slot, spool);
+  if (weight === null) return percent;
+  return `${percent} / ${Math.round(weight)} g`;
+}
+
+function filamentAmsState(slot: Record<string, any>, spool: FilamentSpool | null): string {
+  if (slot.is_transitioning) return t("inventory.transitioning");
+  if (!slot.filament_spool_id && slot.identity_source === "manual_required") return t("inventory.manualRequired");
+  if (isFilamentSpoolPendingConfirm(spool)) return t("inventory.pendingConfirm");
+  if (spool) return t("inventory.bound");
+  return t("inventory.unbound");
+}
+
+function isFilamentSpoolPendingConfirm(spool: FilamentSpool | Record<string, any> | null | undefined): boolean {
+  return Boolean(spool && (spool.status === "unknown" || spool.config?.needs_sku_review));
 }
 
 function fanDisplayPercent(item: unknown): number | null {
@@ -2204,7 +3703,7 @@ function dashboardAmsActiveSlotLabel(slot: Record<string, any> | null | undefine
 
 function dashboardActiveMaterialLabel(slot: Record<string, any> | null | undefined) {
   if (!slot) return "--";
-  const parts = [slot.material || slot.tray_type, slot.series || slot.tray_sub_brands].filter(Boolean).map(String);
+  const parts = [slot.material || slot.tray_type, slot.series || slot.tray_sub_brands, slotColorLabel(slot)].filter(Boolean).map(String);
   const remain = numeric(slot.remain);
   if (remain !== null && remain >= 0) parts.push(`${Math.round(remain)}%`);
   return parts.length ? parts.join(" · ") : "--";
@@ -2508,15 +4007,15 @@ function slotHistoryChanges(kind: "material" | "remain" | "rfid" | "calibration"
 }
 
 function slotHistoryValue(sample: AmsSlotHistorySample, kind: string) {
-  if (kind === "material") return `${softCell(sample.material)} / ${softCell(sample.color)}`;
+  if (kind === "material") return `${softCell(sample.material)} / ${filamentColorDisplay(sample.color)}`;
   if (kind === "remain") return softCell(sample.remain);
   if (kind === "rfid") return softCell(sample.rfid_status);
   return `K ${softCell(sample.k)} / ${softCell(sample.cali_idx)}`;
 }
 
 function filamentColor(value: unknown) {
-  const text = String(value || "").replace("#", "");
-  return /^[0-9a-fA-F]{6,8}$/.test(text) ? `#${text.slice(0, 6)}` : "#d7dce2";
+  const hex = normalizeFilamentHex(value);
+  return hex ? `#${hex}` : "#d7dce2";
 }
 </script>
 
@@ -3101,7 +4600,7 @@ function filamentColor(value: unknown) {
             <AppSelect v-model="storageSort" :options="storageSortOptions" />
           </div>
         </div>
-        <div class="metric-grid small">
+        <div class="metric-grid small spool-detail-summary">
           <div v-for="item in storageStats" :key="item.label" class="metric-card">
             <div class="metric-label">{{ item.label }}</div>
             <div class="metric-value">{{ item.value }}</div>
@@ -3172,7 +4671,8 @@ function filamentColor(value: unknown) {
       </section>
 
       <section v-else-if="activeView === 'ams'" class="view">
-        <div class="toolbar">
+        <div class="toolbar ams-toolbar">
+          <span class="toolbar-field-label">{{ t("ams.historyRange") }}</span>
           <AppSelect v-model="amsSensorRange" :options="amsSensorRangeOptions" @change="withLoading(loadAmsSensorHistories)" />
         </div>
         <div class="metric-grid overview-metrics">
@@ -3266,7 +4766,7 @@ function filamentColor(value: unknown) {
                     <div class="ams-slot-topline">
                       <div>
                         <span class="mini-label">{{ slotDisplayLabel(slot) }}</span>
-                        <strong><span class="swatch" :style="{ background: filamentColor(slot.color) }"></span>{{ softCell(slot.material) }}</strong>
+                        <strong><span class="swatch" :style="{ background: filamentColor(slot.color) }"></span>{{ slotMaterialColorLabel(slot) }}</strong>
                       </div>
                       <button class="icon-button compact" type="button" :title="t('table.details')" @click="openSlotDetails(slot)">
                         <Eye :size="15" />
@@ -3295,48 +4795,380 @@ function filamentColor(value: unknown) {
       </section>
 
       <section v-else-if="activeView === 'inventory'" class="view">
-        <section v-if="isSectionVisible('inventory.spools')" class="panel">
+        <div class="inventory-tabs" role="tablist">
+          <button
+            v-for="item in inventoryPageOptions"
+            :key="item.key"
+            type="button"
+            :class="{ active: inventoryPage === item.key }"
+            @click="inventoryPage = item.key"
+          >
+            {{ item.label }}
+          </button>
+        </div>
+
+        <template v-if="inventoryPage === 'stock'">
+        <div class="metric-grid small">
+          <div class="metric-card"><div class="metric-label">{{ t("inventory.totalStock") }}</div><div class="metric-value">{{ filamentKg(inventoryTotalWeightG) }}</div><div class="metric-foot">{{ inventoryTotalRolls }} {{ t("inventory.rolls") }}</div></div>
+          <div class="metric-card"><div class="metric-label">{{ t("inventory.skus") }}</div><div class="metric-value">{{ filamentInventorySummary?.totals.sku_count || 0 }}</div></div>
+          <div class="metric-card"><div class="metric-label">{{ t("inventory.sealedStock") }}</div><div class="metric-value">{{ filamentKg(inventorySealedWeightG) }}</div><div class="metric-foot">{{ filamentInventorySummary?.totals.sealed_quantity || 0 }} {{ t("inventory.rolls") }}</div></div>
+          <div class="metric-card"><div class="metric-label">{{ t("inventory.openedStock") }}</div><div class="metric-value">{{ filamentKg(inventoryRealSpoolWeightG) }}</div><div class="metric-foot">{{ inventoryRealSpools.length }} {{ t("inventory.rolls") }}</div></div>
+          <div class="metric-card"><div class="metric-label">{{ t("inventory.amsLoaded") }}</div><div class="metric-value">{{ filamentInventorySummary?.totals.ams_spool_count || 0 }}</div></div>
+          <button class="metric-card metric-button" type="button" @click="jumpToInventorySection('inventory-pending-confirm')"><div class="metric-label">{{ t("inventory.pendingConfirm") }}</div><div class="metric-value">{{ inventoryPendingConfirmCount }}</div><div class="metric-foot">{{ t("inventory.jumpToPending") }}</div></button>
+        </div>
+        <div class="inventory-split-grid inventory-main-grid">
+        <section class="panel inventory-panel">
           <div class="panel-header">
-            <h3>{{ t("inventory.spools") }}</h3>
-            <div class="widget-tools">
-              <Archive :size="18" />
-              <button class="icon-button compact" type="button" :title="t('layout.collapse')" @click="toggleSectionCollapsed('inventory.spools')">
-                <ChevronDown v-if="isSectionCollapsed('inventory.spools')" :size="15" />
-                <ChevronUp v-else :size="15" />
-              </button>
-              <button class="icon-button compact" type="button" :title="t('layout.hide')" @click="toggleSectionHidden('inventory.spools')"><X :size="15" /></button>
+            <h3>{{ t("inventory.stockAnalysis") }}</h3>
+            <button class="icon-button compact" type="button" :title="t('inventory.addSpool')" @click="openCreateFilamentSpoolDialog"><Plus :size="16" /></button>
+          </div>
+          <div class="inventory-visual-grid">
+            <div class="inventory-pie" :style="inventoryTypePieStyle"><span>{{ filamentKg(inventoryTotalWeightG) }}</span></div>
+            <div class="inventory-breakdown">
+              <div class="slot-section-title">
+                <h4>{{ t("inventory.typeBreakdown") }}</h4>
+                <span>{{ filamentKg(inventoryTotalWeightG) }}</span>
+              </div>
+              <div v-if="!inventoryTypeBreakdown.length" class="slot-empty-state">{{ t("inventory.noStockData") }}</div>
+              <div v-for="(row, index) in inventoryTypeBreakdown" :key="row.key" class="inventory-breakdown-row">
+                <div class="inventory-breakdown-label"><strong>{{ row.label }}</strong><span>{{ filamentKg(row.grams) }} / {{ row.rolls }} {{ t("inventory.rolls") }}</span></div>
+                <div class="inventory-bar"><span :style="{ width: `${Math.max(4, Math.round((row.grams / inventoryMaxTypeWeightG) * 100))}%`, background: inventoryChartColors[index % inventoryChartColors.length] }"></span></div>
+              </div>
             </div>
           </div>
-          <div v-show="!isSectionCollapsed('inventory.spools')" class="form-grid compact-form">
-            <input v-model="spoolForm.display_name" :placeholder="t('form.name')" />
-            <input v-model="spoolForm.material" :placeholder="t('form.material')" />
-            <input v-model="spoolForm.series" :placeholder="t('form.series')" />
-            <input v-model="spoolForm.color" :placeholder="t('form.color')" />
-            <input v-model.number="spoolForm.sealed_quantity" type="number" min="0" :placeholder="t('form.sealedQty')" />
-            <AppSelect v-model="spoolForm.status" :options="spoolStatusOptions" />
-            <button class="primary" type="button" @click="createSpool"><Save :size="17" />{{ t("common.create") }}</button>
-          </div>
-          <div v-show="!isSectionCollapsed('inventory.spools')" class="bind-row">
-            <input v-model="bindForm.slot_id" :placeholder="t('form.slotId')" />
-            <input v-model="bindForm.spool_id" :placeholder="t('form.spoolId')" />
-            <button class="secondary" type="button" @click="bindSlot"><Wrench :size="17" />{{ t("common.bind") }}</button>
-          </div>
-          <div v-show="!isSectionCollapsed('inventory.spools')" class="table-wrap">
+        </section>
+        <section id="inventory-ams-loaded" class="panel">
+          <div class="panel-header"><h3>{{ t("inventory.amsLoaded") }}</h3><Boxes :size="18" /></div>
+          <div class="table-wrap">
             <table>
-              <thead><tr><th>{{ t("table.id") }}</th><th>{{ t("table.name") }}</th><th>{{ t("table.material") }}</th><th>{{ t("table.status") }}</th><th>{{ t("table.location") }}</th></tr></thead>
+              <thead><tr>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('amsLoaded', 'printer')">{{ t("table.printer") }} <span>{{ inventorySortIndicator("amsLoaded", "printer") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('amsLoaded', 'slot')">{{ t("ams.slots") }} <span>{{ inventorySortIndicator("amsLoaded", "slot") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('amsLoaded', 'filament')">{{ t("table.filament") }} <span>{{ inventorySortIndicator("amsLoaded", "filament") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('amsLoaded', 'remaining')">{{ t("inventory.remaining") }} <span>{{ inventorySortIndicator("amsLoaded", "remaining") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('amsLoaded', 'status')">{{ t("table.status") }} <span>{{ inventorySortIndicator("amsLoaded", "status") }}</span></button></th>
+                <th>{{ t("table.actions") }}</th>
+              </tr></thead>
               <tbody>
-                <tr v-if="!spools.length"><td colspan="5" class="empty">{{ t("inventory.noSpools") }}</td></tr>
-                <tr v-for="spool in spools" :key="spool.id">
-                  <td>{{ spool.id }}</td>
-                  <td>{{ spool.display_name }}</td>
-                  <td>{{ formatCell(spool.material) }}</td>
-                  <td>{{ displayCell(spool.status) }}</td>
-                  <td>{{ formatCell(spool.current_ams_id) }} / {{ formatCell(spool.current_tray_id) }}</td>
+                <tr v-if="!sortedFilamentAmsRows.length"><td colspan="6" class="empty">{{ t("ams.noSlots") }}</td></tr>
+                <tr v-for="row in sortedFilamentAmsRows" :key="row.slot.id" :class="{ 'pending-row': row.spool && isFilamentSpoolPendingConfirm(row.spool) }">
+                  <td>{{ row.slot.printer_name || printerDisplayName(row.slot.printer_id) }}</td>
+                  <td>{{ filamentAmsSlotLocationLabel(row.slot) }}</td>
+                  <td><span class="swatch" :style="{ background: filamentColor(row.spool?.color_hex || row.spool?.color_value || row.slot.color || row.slot.tray_color) }"></span>{{ filamentAmsFilamentLabel(row.slot, row.spool) }}</td>
+                  <td>{{ filamentAmsRemainingLabel(row.slot, row.spool) }}</td>
+                  <td class="inventory-inline-action">
+                    <span>{{ filamentAmsState(row.slot, row.spool) }}</span>
+                    <button
+                      v-if="row.spool && isFilamentSpoolPendingConfirm(row.spool)"
+                      class="text-action compact"
+                      type="button"
+                      :title="t('inventory.confirmSkuTitle')"
+                      @click.stop="openConfirmFilamentSpoolSku(row.spool)"
+                    >
+                      {{ t("inventory.confirmSku") }}
+                    </button>
+                  </td>
+                  <td class="inventory-inline-action">
+                    <button v-if="row.spool" class="icon-button compact" type="button" :title="t('common.edit')" @click="openFilamentSpoolDialog(row.spool)"><PencilLine :size="15" /></button>
+                  </td>
                 </tr>
               </tbody>
             </table>
           </div>
         </section>
+        </div>
+        <div class="inventory-split-grid">
+        <section class="panel">
+          <div class="panel-header"><h3>{{ t("inventory.sealedStock") }}</h3><Archive :size="18" /></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('sealedStock', 'id')">{{ t("table.id") }} <span>{{ inventorySortIndicator("sealedStock", "id") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('sealedStock', 'filament')">{{ t("table.filament") }} <span>{{ inventorySortIndicator("sealedStock", "filament") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('sealedStock', 'sealed')">{{ t("form.sealedQty") }} <span>{{ inventorySortIndicator("sealedStock", "sealed") }}</span></button></th>
+                <th>{{ t("inventory.sealedWeight") }}</th>
+                <th>{{ t("inventory.openedWeight") }}</th>
+                <th>{{ t("table.actions") }}</th>
+              </tr></thead>
+              <tbody>
+                <tr v-if="!sortedFilamentStockSkus.length"><td colspan="6" class="empty">{{ t("inventory.noSealedStock") }}</td></tr>
+                <tr v-for="sku in sortedFilamentStockSkus" :key="sku.id">
+                  <td>{{ sku.id }}</td>
+                  <td><span class="swatch" :style="{ background: filamentColor(sku.color_hex || sku.color_value) }"></span>{{ filamentSkuLabel(sku) }}</td>
+                  <td>{{ sku.sealed_quantity }}</td>
+                  <td>{{ filamentWeight(skuSealedWeight(sku)) }}</td>
+                  <td>{{ filamentWeight(skuOpenedWeight(sku)) }}</td>
+                  <td class="inventory-inline-action">
+                    <button class="icon-button compact" type="button" :title="t('inventory.adjustStock')" @click="openSealedStockAdjust(sku)"><PencilLine :size="15" /></button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel-header"><h3>{{ t("inventory.openedUnused") }}</h3><Archive :size="18" /></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('openedUnused', 'id')">{{ t("table.id") }} <span>{{ inventorySortIndicator("openedUnused", "id") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('openedUnused', 'spool')">{{ t("table.spool") }} <span>{{ inventorySortIndicator("openedUnused", "spool") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('openedUnused', 'status')">{{ t("table.status") }} <span>{{ inventorySortIndicator("openedUnused", "status") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('openedUnused', 'remaining')">{{ t("inventory.remaining") }} <span>{{ inventorySortIndicator("openedUnused", "remaining") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('openedUnused', 'location')">{{ t("table.location") }} <span>{{ inventorySortIndicator("openedUnused", "location") }}</span></button></th>
+                <th>{{ t("table.actions") }}</th>
+              </tr></thead>
+              <tbody>
+                <tr v-if="!sortedFilamentOpenedUnusedSpools.length"><td colspan="6" class="empty">{{ t("inventory.noOpenedUnused") }}</td></tr>
+                <tr v-for="spool in sortedFilamentOpenedUnusedSpools" :key="spool.id" :class="{ selected: selectedFilamentSpoolId === spool.id }">
+                  <td>{{ spool.id }}</td>
+                  <td><span class="swatch" :style="{ background: filamentColor(spool.color_hex || spool.color_value) }"></span>{{ filamentSpoolLabel(spool) }}</td>
+                  <td>{{ displayCell(spool.status) }}</td>
+                  <td>{{ filamentSpoolRemainingLabel(spool) }}</td>
+                  <td>{{ filamentSpoolLocation(spool) }}</td>
+                  <td class="inventory-inline-action">
+                    <button class="icon-button compact" type="button" :title="t('common.edit')" @click="openFilamentSpoolDialog(spool)"><PencilLine :size="15" /></button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+        </div>
+        <section v-if="inventoryPendingConfirmCount" id="inventory-pending-confirm" class="panel">
+          <div class="panel-header"><h3>{{ t("inventory.pendingConfirm") }}</h3><AlertCircle :size="18" /></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('pendingConfirm', 'id')">{{ t("table.id") }} <span>{{ inventorySortIndicator("pendingConfirm", "id") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('pendingConfirm', 'spool')">{{ t("table.spool") }} <span>{{ inventorySortIndicator("pendingConfirm", "spool") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('pendingConfirm', 'remaining')">{{ t("inventory.remaining") }} <span>{{ inventorySortIndicator("pendingConfirm", "remaining") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('pendingConfirm', 'location')">{{ t("table.location") }} <span>{{ inventorySortIndicator("pendingConfirm", "location") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('pendingConfirm', 'status')">{{ t("table.status") }} <span>{{ inventorySortIndicator("pendingConfirm", "status") }}</span></button></th>
+                <th>{{ t("table.actions") }}</th>
+              </tr></thead>
+              <tbody>
+                <tr v-if="!sortedPendingConfirmSpools.length"><td colspan="6" class="empty">{{ t("inventory.noPendingConfirm") }}</td></tr>
+                <tr v-for="spool in sortedPendingConfirmSpools" :key="spool.id" class="pending-row">
+                  <td>{{ spool.id }}</td>
+                  <td><span class="swatch" :style="{ background: filamentColor(spool.color_hex || spool.color_value) }"></span>{{ filamentSpoolLabel(spool) }}</td>
+                  <td>{{ filamentSpoolRemainingLabel(spool) }}</td>
+                  <td>{{ filamentSpoolCurrentPlace(spool) }}</td>
+                  <td>{{ displayCell(spool.status) }}</td>
+                  <td class="inventory-inline-action">
+                    <button class="text-action compact" type="button" :title="t('inventory.confirmSkuTitle')" @click="openConfirmFilamentSpoolSku(spool)">{{ t("inventory.confirmSku") }}</button>
+                    <button class="icon-button compact" type="button" :title="t('common.edit')" @click="openFilamentSpoolDialog(spool)"><PencilLine :size="15" /></button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+        <section v-if="sortedNeedsLocationSpools.length" class="panel">
+          <div class="panel-header"><h3>{{ t("inventory.needsLocation") }}</h3><Archive :size="18" /></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('needsLocation', 'id')">{{ t("table.id") }} <span>{{ inventorySortIndicator("needsLocation", "id") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('needsLocation', 'spool')">{{ t("table.spool") }} <span>{{ inventorySortIndicator("needsLocation", "spool") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('needsLocation', 'location')">{{ t("table.location") }} <span>{{ inventorySortIndicator("needsLocation", "location") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('needsLocation', 'identity')">{{ t("inventory.identity") }} <span>{{ inventorySortIndicator("needsLocation", "identity") }}</span></button></th>
+                <th>{{ t("table.actions") }}</th>
+              </tr></thead>
+              <tbody>
+                <tr v-for="spool in sortedNeedsLocationSpools" :key="spool.id">
+                  <td>{{ spool.id }}</td>
+                  <td>{{ filamentSpoolLabel(spool) }}</td>
+                  <td>{{ filamentSpoolLocation(spool) }}</td>
+                  <td class="mono">{{ formatCell(spool.official_spool_uid || spool.identity_key) }}</td>
+                  <td class="inventory-inline-action">
+                    <button class="icon-button compact" type="button" :title="t('common.edit')" @click="openFilamentSpoolDialog(spool)"><PencilLine :size="15" /></button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+        </template>
+
+        <template v-else-if="inventoryPage === 'brands'">
+        <section class="panel">
+          <div class="panel-header"><h3>{{ t("inventory.brands") }}</h3><button class="icon-button compact" type="button" :title="t('inventory.addBrand')" @click="openFilamentBrandCreate"><Plus :size="16" /></button></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('brands', 'id')">{{ t("table.id") }} <span>{{ inventorySortIndicator("brands", "id") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('brands', 'brand')">{{ t("form.brand") }} <span>{{ inventorySortIndicator("brands", "brand") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('brands', 'aliases')">{{ t("inventory.aliases") }} <span>{{ inventorySortIndicator("brands", "aliases") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('brands', 'typeSeries')">{{ t("inventory.typeSeries") }} <span>{{ inventorySortIndicator("brands", "typeSeries") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('brands', 'skus')">{{ t("inventory.skus") }} <span>{{ inventorySortIndicator("brands", "skus") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('brands', 'spools')">{{ t("inventory.spools") }} <span>{{ inventorySortIndicator("brands", "spools") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('brands', 'note')">{{ t("form.note") }} <span>{{ inventorySortIndicator("brands", "note") }}</span></button></th>
+                <th>{{ t("table.actions") }}</th>
+              </tr></thead>
+              <tbody>
+                <tr v-if="!sortedFilamentBrands.length"><td colspan="8" class="empty">{{ t("inventory.noBrands") }}</td></tr>
+                <tr v-for="brand in sortedFilamentBrands" :key="brand.id">
+                  <td>{{ brand.id }}</td>
+                  <td>{{ brand.name }}</td>
+                  <td>{{ (brand.aliases || []).join(", ") || "—" }}</td>
+                  <td>{{ brand.type_series_count || 0 }}</td>
+                  <td>{{ brand.sku_count || 0 }}</td>
+                  <td>{{ brand.spool_count || 0 }}</td>
+                  <td>{{ formatCell(brand.note) }}</td>
+                  <td class="inventory-inline-action">
+                    <button class="icon-button compact" type="button" :title="t('common.edit')" @click="editFilamentBrand(brand)"><PencilLine :size="15" /></button>
+                    <button class="icon-button compact danger" type="button" :title="t('common.delete')" @click="deleteFilamentBrand(brand)"><Trash2 :size="15" /></button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+        </template>
+
+        <template v-else-if="inventoryPage === 'types'">
+        <section class="panel">
+          <div class="panel-header"><h3>{{ t("inventory.typeSeries") }}</h3><button class="icon-button compact" type="button" :title="t('inventory.addTypeSeries')" @click="openFilamentTypeSeriesCreate"><Plus :size="16" /></button></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('typeSeries', 'id')">{{ t("table.id") }} <span>{{ inventorySortIndicator("typeSeries", "id") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('typeSeries', 'brand')">{{ t("form.brand") }} <span>{{ inventorySortIndicator("typeSeries", "brand") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('typeSeries', 'material')">{{ t("table.material") }} <span>{{ inventorySortIndicator("typeSeries", "material") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('typeSeries', 'emptyWeight')">{{ t("inventory.emptySpoolWeight") }} <span>{{ inventorySortIndicator("typeSeries", "emptyWeight") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('typeSeries', 'skus')">{{ t("inventory.skus") }} <span>{{ inventorySortIndicator("typeSeries", "skus") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('typeSeries', 'spools')">{{ t("inventory.spools") }} <span>{{ inventorySortIndicator("typeSeries", "spools") }}</span></button></th>
+                <th>{{ t("table.actions") }}</th>
+              </tr></thead>
+              <tbody>
+                <tr v-if="!sortedFilamentTypeSeries.length"><td colspan="7" class="empty">{{ t("inventory.noTypeSeries") }}</td></tr>
+                <tr v-for="row in sortedFilamentTypeSeries" :key="row.id">
+                  <td>{{ row.id }}</td>
+                  <td>{{ filamentBrandDisplay(row.brands) }}</td>
+                  <td>{{ filamentTypeSeriesLabel(row) }}</td>
+                  <td>{{ filamentWeight(row.empty_spool_weight_g) }}</td>
+                  <td>{{ row.sku_count }}</td>
+                  <td>{{ row.spool_count }}</td>
+                  <td class="inventory-inline-action">
+                    <button class="icon-button compact" type="button" :title="t('common.edit')" @click="editFilamentTypeSeries(row)"><PencilLine :size="15" /></button>
+                    <button class="icon-button compact danger" type="button" :title="t('common.delete')" @click="deleteFilamentTypeSeries(row)"><Trash2 :size="15" /></button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+        </template>
+
+        <template v-else-if="inventoryPage === 'skus'">
+        <section class="panel">
+          <div class="panel-header"><h3>{{ t("inventory.skus") }}</h3><button class="icon-button compact" type="button" :title="t('inventory.addSku')" @click="openFilamentSkuCreate"><Plus :size="16" /></button></div>
+          <div class="toolbar filters sku-filter-toolbar">
+            <label class="search-field">
+              <Search :size="16" />
+              <input v-model="filamentSkuFilters.search" :placeholder="t('inventory.searchSku')" />
+            </label>
+            <AppSelect v-model="filamentSkuFilters.brand_id" :options="filamentSkuFilterBrandOptions" />
+            <AppSelect v-model="filamentSkuFilters.type_series_id" :options="filamentSkuFilterTypeSeriesOptions" />
+            <AppSelect v-model="filamentSkuFilters.nominal_weight_g" :options="filamentSkuWeightOptions" />
+            <AppSelect v-model="filamentSkuFilters.color_state" :options="filamentSkuColorStateOptions" />
+            <button class="secondary" type="button" @click="resetFilamentSkuFilters">{{ t("common.clear") }}</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('skus', 'id')">{{ t("table.id") }} <span>{{ inventorySortIndicator("skus", "id") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('skus', 'brand')">{{ t("form.brand") }} <span>{{ inventorySortIndicator("skus", "brand") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('skus', 'material')">{{ t("table.material") }} <span>{{ inventorySortIndicator("skus", "material") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('skus', 'color')">{{ t("inventory.officialColorName") }} <span>{{ inventorySortIndicator("skus", "color") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('skus', 'weight')">{{ t("inventory.nominalWeight") }} <span>{{ inventorySortIndicator("skus", "weight") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('skus', 'sealed')">{{ t("form.sealedQty") }} <span>{{ inventorySortIndicator("skus", "sealed") }}</span></button></th>
+                <th>{{ t("table.actions") }}</th>
+              </tr></thead>
+              <tbody>
+                <tr v-if="!sortedFilteredFilamentSkus.length"><td colspan="7" class="empty">{{ t("inventory.noSkuMatches") }}</td></tr>
+                <tr v-for="sku in sortedFilteredFilamentSkus" :key="sku.id">
+                  <td>{{ sku.id }}</td>
+                  <td>{{ filamentBrandDisplay(sku.brands) }}</td>
+                  <td>{{ filamentTypeSeriesDisplay(sku.type_series) }}</td>
+                  <td>
+                    <span class="swatch" :style="{ background: filamentColor(sku.color_hex || sku.color_value) }"></span>{{ filamentColorDisplay(sku.color_hex || sku.color_value, sku.color_name, sku) }}
+                    <button v-if="colorNeedsMapping(sku.color_hex || sku.color_value, sku)" class="text-action compact" type="button" @click="startFilamentColorMapping(sku.color_hex || sku.color_value, sku)">{{ t("inventory.addOfficialName") }}</button>
+                  </td>
+                  <td>{{ filamentWeight(sku.nominal_weight_g) }}</td>
+                  <td>{{ sku.sealed_quantity }}</td>
+                  <td class="inventory-inline-action">
+                    <button class="icon-button compact" type="button" :title="t('common.edit')" @click="editFilamentSku(sku)"><PencilLine :size="15" /></button>
+                    <button class="icon-button compact danger" type="button" :title="t('common.delete')" @click="deleteFilamentSku(sku)"><Trash2 :size="15" /></button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+        </template>
+
+        <template v-else-if="inventoryPage === 'colors'">
+        <section class="panel">
+          <div class="panel-header"><h3>{{ t("inventory.colorMappings") }}</h3><button class="icon-button compact" type="button" :title="t('inventory.addColorMapping')" @click="openFilamentColorMappingCreate"><Plus :size="16" /></button></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('colorMappings', 'id')">{{ t("table.id") }} <span>{{ inventorySortIndicator("colorMappings", "id") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('colorMappings', 'brand')">{{ t("form.brand") }} <span>{{ inventorySortIndicator("colorMappings", "brand") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('colorMappings', 'material')">{{ t("table.material") }} <span>{{ inventorySortIndicator("colorMappings", "material") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('colorMappings', 'hex')">{{ t("inventory.hexValue") }} <span>{{ inventorySortIndicator("colorMappings", "hex") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('colorMappings', 'color')">{{ t("inventory.officialColorName") }} <span>{{ inventorySortIndicator("colorMappings", "color") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('colorMappings', 'note')">{{ t("form.note") }} <span>{{ inventorySortIndicator("colorMappings", "note") }}</span></button></th>
+                <th>{{ t("table.actions") }}</th>
+              </tr></thead>
+              <tbody>
+                <tr v-if="!sortedFilamentColorMappings.length"><td colspan="7" class="empty">{{ t("inventory.noColorMappings") }}</td></tr>
+                <tr v-for="mapping in sortedFilamentColorMappings" :key="mapping.id">
+                  <td>{{ mapping.id }}</td>
+                  <td>{{ formatCell(mapping.brand_name) }}</td>
+                  <td>{{ formatCell(mapping.material_type || mapping.material) }} / {{ formatCell(mapping.series_name || mapping.series) }}</td>
+                  <td><span class="swatch" :style="{ background: filamentColor(mapping.color_hex || mapping.hex_value) }"></span><span class="mono">{{ mapping.color_hex || mapping.hex_value }}</span></td>
+                  <td>{{ mapping.color_name || mapping.official_name }}</td>
+                  <td>{{ formatCell(mapping.note) }}</td>
+                  <td class="inventory-inline-action">
+                    <button class="icon-button compact" type="button" :title="t('common.edit')" @click="editFilamentColorMapping(mapping)"><PencilLine :size="15" /></button>
+                    <button class="icon-button compact danger" type="button" :title="t('common.delete')" @click="deleteFilamentColorMapping(mapping)"><Trash2 :size="15" /></button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel-header"><h3>{{ t("inventory.incompleteSkuColors") }}</h3><Archive :size="18" /></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('colorGaps', 'id')">{{ t("table.id") }} <span>{{ inventorySortIndicator("colorGaps", "id") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('colorGaps', 'brand')">{{ t("form.brand") }} <span>{{ inventorySortIndicator("colorGaps", "brand") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('colorGaps', 'material')">{{ t("table.material") }} <span>{{ inventorySortIndicator("colorGaps", "material") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('colorGaps', 'color')">{{ t("inventory.officialColorName") }} <span>{{ inventorySortIndicator("colorGaps", "color") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('colorGaps', 'hex')">{{ t("inventory.hexValue") }} <span>{{ inventorySortIndicator("colorGaps", "hex") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('colorGaps', 'source')">{{ t("inventory.source") }} <span>{{ inventorySortIndicator("colorGaps", "source") }}</span></button></th>
+              </tr></thead>
+              <tbody>
+                <tr v-if="!sortedFilamentColorMappingGaps.length"><td colspan="6" class="empty">{{ t("inventory.noColorGaps") }}</td></tr>
+                <tr v-for="row in sortedFilamentColorMappingGaps" :key="row.sku_id">
+                  <td>{{ row.sku_id }}</td>
+                  <td>{{ filamentBrandDisplay(row.brands) }}</td>
+                  <td>{{ filamentTypeSeriesDisplay(row.type_series) }}</td>
+                  <td>{{ formatCell(row.color_name) }}</td>
+                  <td><span class="swatch" :style="{ background: filamentColor(row.color_hex) }"></span><span class="mono">{{ formatCell(row.color_hex) }}</span></td>
+                  <td>{{ row.missing.join(", ") }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+        </template>
+
       </section>
 
       <section v-else-if="activeView === 'maintenance'" class="view">
@@ -3688,6 +5520,7 @@ function filamentColor(value: unknown) {
         </section>
         <section class="panel export-panel">
           <div class="panel-header"><h3>{{ t("export.title") }}</h3><FileDown :size="18" /></div>
+          <p class="panel-subtitle">{{ t("export.backupHint") }}</p>
           <div class="export-controls">
             <AppSelect v-model="exportOptions.type" :options="[{ label: 'JSON', value: 'json' }, { label: 'CSV ZIP', value: 'csv' }]" />
             <button class="primary" type="button" @click="downloadExport"><Download :size="17" />{{ t("export.download") }}</button>
@@ -3702,6 +5535,16 @@ function filamentColor(value: unknown) {
               {{ section.label }}
             </label>
           </div>
+        </section>
+        <section class="panel export-panel">
+          <div class="panel-header"><h3>{{ t("export.importTitle") }}</h3><Upload :size="18" /></div>
+          <p class="panel-subtitle">{{ t("export.importHint") }}</p>
+          <div class="export-controls">
+            <AppSelect v-model="importOptions.mode" :options="importModeOptions" />
+            <button class="primary" type="button" @click="importFileInput?.click()"><Upload :size="17" />{{ t("export.importJson") }}</button>
+            <input ref="importFileInput" class="hidden-file-input" type="file" accept="application/json,.json" @change="importBackupFile" />
+          </div>
+          <pre v-if="importResult" class="json-block import-result">{{ JSON.stringify(importResult.counts || importResult, null, 2) }}</pre>
         </section>
         <div class="grid two wide debug-grid">
           <section class="panel debug-card">
@@ -3727,6 +5570,183 @@ function filamentColor(value: unknown) {
         </div>
       </section>
     </main>
+
+    <div v-if="inventoryDialog.key" class="modal-backdrop" @click.self="closeInventoryDialog">
+      <section v-if="inventoryDialog.key === 'brand'" class="modal-panel">
+        <div class="modal-header">
+          <h3>{{ editingFilamentBrandId ? t("inventory.editBrand") : t("inventory.addBrand") }}</h3>
+          <button class="icon-button" type="button" :title="t('common.close')" @click="closeInventoryDialog"><X :size="17" /></button>
+        </div>
+        <form class="form-grid compact-form modal-form" @submit.prevent="saveFilamentBrand">
+          <label class="field-label"><span>{{ t("form.brand") }}</span><input v-model="filamentBrandForm.name" :placeholder="t('form.brand')" /></label>
+          <label class="field-label"><span>{{ t("inventory.aliases") }}</span><input v-model="filamentBrandForm.aliases" :placeholder="t('inventory.aliases')" /></label>
+          <label class="field-label"><span>{{ t("form.note") }}</span><input v-model="filamentBrandForm.note" :placeholder="t('form.note')" /></label>
+          <div class="modal-actions">
+            <button class="secondary" type="button" @click="closeInventoryDialog">{{ t("common.cancel") }}</button>
+            <button class="primary" type="submit"><Save :size="17" />{{ t("common.save") }}</button>
+          </div>
+        </form>
+      </section>
+
+      <section v-else-if="inventoryDialog.key === 'typeSeries'" class="modal-panel">
+        <div class="modal-header">
+          <h3>{{ editingFilamentTypeSeriesId ? t("inventory.editTypeSeries") : t("inventory.addTypeSeries") }}</h3>
+          <button class="icon-button" type="button" :title="t('common.close')" @click="closeInventoryDialog"><X :size="17" /></button>
+        </div>
+        <form class="form-grid compact-form modal-form" @submit.prevent="saveFilamentTypeSeries">
+          <label class="field-label"><span>{{ t("form.brand") }}</span><AppSelect v-model="filamentTypeSeriesForm.brand_id" :options="filamentRequiredBrandOptions" :placeholder="t('form.brand')" /></label>
+          <label class="field-label"><span>{{ t("form.material") }}</span><input v-model="filamentTypeSeriesForm.material_type" :placeholder="t('form.material')" /></label>
+          <label class="field-label"><span>{{ t("form.series") }}</span><input v-model="filamentTypeSeriesForm.series_name" :placeholder="t('form.series')" /></label>
+          <label class="field-label"><span>{{ t("inventory.emptySpoolWeight") }}</span><input v-model.number="filamentTypeSeriesForm.empty_spool_weight_g" type="number" min="0" :placeholder="t('inventory.emptySpoolWeight')" /></label>
+          <label class="field-label"><span>{{ t("form.note") }}</span><input v-model="filamentTypeSeriesForm.note" :placeholder="t('form.note')" /></label>
+          <div class="modal-actions">
+            <button class="secondary" type="button" @click="closeInventoryDialog">{{ t("common.cancel") }}</button>
+            <button class="primary" type="submit"><Save :size="17" />{{ t("common.save") }}</button>
+          </div>
+        </form>
+      </section>
+
+      <section v-else-if="inventoryDialog.key === 'sku'" class="modal-panel">
+        <div class="modal-header">
+          <h3>{{ editingFilamentSkuId ? t("inventory.editSku") : t("inventory.addSku") }}</h3>
+          <button class="icon-button" type="button" :title="t('common.close')" @click="closeInventoryDialog"><X :size="17" /></button>
+        </div>
+        <form class="form-grid compact-form modal-form" @submit.prevent="saveFilamentSku">
+          <label class="field-label"><span>{{ t("inventory.typeSeries") }}</span><AppSelect v-model="filamentSkuForm.type_series_id" :options="filamentTypeSeriesOptions" :placeholder="t('inventory.typeSeries')" /></label>
+          <label class="field-label"><span>{{ t("inventory.officialColorName") }}</span><input v-model="filamentSkuForm.color_name" :placeholder="t('inventory.officialColorName')" /></label>
+          <label class="field-label"><span>{{ t("inventory.hexValue") }}</span><input v-model="filamentSkuForm.color_value" :placeholder="t('inventory.hexValue')" /></label>
+          <label class="field-label"><span>{{ t("inventory.nominalWeight") }}</span><input v-model.number="filamentSkuForm.nominal_weight_g" type="number" min="0" :placeholder="t('inventory.nominalWeight')" /></label>
+          <label class="field-label"><span>{{ t("form.sealedQty") }}</span><input v-model.number="filamentSkuForm.sealed_quantity" type="number" min="0" :placeholder="t('form.sealedQty')" /></label>
+          <label class="field-label"><span>{{ t("form.note") }}</span><input v-model="filamentSkuForm.note" :placeholder="t('form.note')" /></label>
+          <div class="modal-actions">
+            <button class="secondary" type="button" @click="cancelFilamentSkuEdit">{{ t("common.cancel") }}</button>
+            <button class="primary" type="submit"><Save :size="17" />{{ t("common.save") }}</button>
+          </div>
+        </form>
+      </section>
+
+      <section v-else-if="inventoryDialog.key === 'colorMapping'" class="modal-panel">
+        <div class="modal-header">
+          <h3>{{ editingFilamentColorMappingId ? t("inventory.editColorMapping") : t("inventory.addColorMapping") }}</h3>
+          <button class="icon-button" type="button" :title="t('common.close')" @click="closeInventoryDialog"><X :size="17" /></button>
+        </div>
+        <form class="form-grid compact-form modal-form" @submit.prevent="saveFilamentColorMapping">
+          <label class="field-label"><span>{{ t("form.brand") }}</span><AppSelect v-model="filamentColorMappingForm.brand_id" :options="filamentRequiredBrandOptions" /></label>
+          <label class="field-label"><span>{{ t("inventory.typeSeries") }}</span><AppSelect v-model="filamentColorMappingForm.type_series_id" :options="filamentColorMappingTypeSeriesOptions" /></label>
+          <label class="field-label"><span>{{ t("inventory.hexValue") }}</span><input v-model="filamentColorMappingForm.hex_value" :placeholder="t('inventory.hexValue')" /></label>
+          <label class="field-label"><span>{{ t("inventory.officialColorName") }}</span><input v-model="filamentColorMappingForm.official_name" :placeholder="t('inventory.officialColorName')" /></label>
+          <label class="field-label"><span>{{ t("form.note") }}</span><input v-model="filamentColorMappingForm.note" :placeholder="t('form.note')" /></label>
+          <div class="modal-actions">
+            <button class="secondary" type="button" @click="closeInventoryDialog">{{ t("common.cancel") }}</button>
+            <button class="primary" type="submit"><Save :size="17" />{{ t("common.save") }}</button>
+          </div>
+        </form>
+      </section>
+
+      <section v-else-if="inventoryDialog.key === 'stockAdjust'" class="modal-panel">
+        <div class="modal-header">
+          <div class="modal-title-stack">
+            <h3>{{ t("inventory.adjustStock") }}</h3>
+            <p>{{ inventoryDialogSkuLabel() }}</p>
+          </div>
+          <button class="icon-button" type="button" :title="t('common.close')" @click="closeInventoryDialog"><X :size="17" /></button>
+        </div>
+        <form class="form-grid compact-form modal-form" @submit.prevent="saveSealedStockAdjust">
+          <label class="field-label"><span>{{ t("inventory.currentSealedQty") }}</span><input :value="sealedStockAdjustForm.current_quantity" disabled :placeholder="t('inventory.currentSealedQty')" /></label>
+          <label class="field-label"><span>{{ t("inventory.targetSealedQty") }}</span><input v-model.number="sealedStockAdjustForm.target_quantity" type="number" min="0" :placeholder="t('inventory.targetSealedQty')" /></label>
+          <label class="field-label"><span>{{ t("form.note") }}</span><input v-model="sealedStockAdjustForm.note" :placeholder="t('form.note')" /></label>
+          <div class="modal-actions">
+            <button class="secondary" type="button" @click="closeInventoryDialog">{{ t("common.cancel") }}</button>
+            <button class="primary" type="submit"><Save :size="17" />{{ t("common.save") }}</button>
+          </div>
+        </form>
+      </section>
+
+      <section v-else-if="inventoryDialog.key === 'spoolCreate'" class="modal-panel wide-modal">
+        <div class="modal-header">
+          <h3>{{ t("inventory.addSpool") }}</h3>
+          <button class="icon-button" type="button" :title="t('common.close')" @click="closeInventoryDialog"><X :size="17" /></button>
+        </div>
+        <form class="form-grid compact-form modal-form" @submit.prevent="createFilamentSpool">
+          <label class="field-label"><span>{{ t("form.brand") }}</span><AppSelect v-model="filamentSpoolForm.brand_id" :options="filamentSpoolBrandOptions" :placeholder="t('form.brand')" /></label>
+          <label class="field-label"><span>{{ t("inventory.typeSeries") }}</span><AppSelect v-model="filamentSpoolForm.type_series_id" :options="filamentSpoolTypeSeriesOptions" :placeholder="t('inventory.typeSeries')" /></label>
+          <label class="field-label"><span>{{ t("inventory.skus") }}</span><AppSelect v-model="filamentSpoolForm.sku_id" :options="filamentSpoolSkuOptions" :placeholder="t('inventory.skus')" /></label>
+          <label class="field-label"><span>{{ t("table.status") }}</span><AppSelect v-model="filamentSpoolForm.status" :options="filamentSpoolStatusOptions" /></label>
+          <label class="field-label"><span>{{ t("fields.tray_uuid") }}</span><input v-model="filamentSpoolForm.tray_uuid" :placeholder="t('fields.tray_uuid')" /></label>
+          <label class="field-label"><span>{{ t("fields.tag_uid") }}</span><input v-model="filamentSpoolForm.tag_uid" :placeholder="t('fields.tag_uid')" /></label>
+          <label class="field-label"><span>{{ t("inventory.remainingWeight") }}</span><input v-model.number="filamentSpoolForm.current_remaining_g" type="number" min="0" :placeholder="t('inventory.remainingWeight')" /></label>
+          <label class="field-label"><span>{{ t("inventory.manualLocation") }}</span><input v-model="filamentSpoolForm.manual_location" :placeholder="t('inventory.manualLocation')" /></label>
+          <label class="field-label"><span>{{ t("form.note") }}</span><input v-model="filamentSpoolForm.note" :placeholder="t('form.note')" /></label>
+          <div class="modal-actions">
+            <button class="secondary" type="button" @click="closeInventoryDialog">{{ t("common.cancel") }}</button>
+            <button class="primary" type="submit"><Save :size="17" />{{ t("common.save") }}</button>
+          </div>
+        </form>
+      </section>
+
+      <section v-else-if="inventoryDialog.key === 'spoolDetail' && selectedFilamentSpool" class="modal-panel wide-modal">
+        <div class="modal-header">
+          <div class="modal-title-stack">
+            <h3>{{ t("inventory.spoolDetail") }}</h3>
+            <p>{{ inventoryDialogSpoolLabel() }}</p>
+          </div>
+          <button class="icon-button" type="button" :title="t('common.close')" @click="closeInventoryDialog"><X :size="17" /></button>
+        </div>
+        <div class="metric-grid small">
+          <div class="metric-card"><div class="metric-label">{{ t("table.spool") }}</div><div class="metric-value compact-value">{{ filamentSpoolLabel(selectedFilamentSpool) }}</div></div>
+          <div class="metric-card"><div class="metric-label">{{ t("inventory.remaining") }}</div><div class="metric-value compact-value">{{ filamentWeight(filamentSpoolRemainingWeight(selectedFilamentSpool)) }}</div><div class="metric-foot">{{ filamentRemainPercent(selectedFilamentSpool) }}</div></div>
+          <div class="metric-card"><div class="metric-label">{{ t("table.location") }}</div><div class="metric-value compact-value">{{ filamentSpoolLocation(selectedFilamentSpool) }}</div></div>
+          <div class="metric-card"><div class="metric-label">{{ t("table.status") }}</div><div class="metric-value compact-value">{{ displayCell(selectedFilamentSpool.status) }}</div></div>
+        </div>
+        <div v-if="isFilamentSpoolPendingConfirm(selectedFilamentSpool)" class="modal-note">
+          <span>{{ t("inventory.confirmSkuTitle") }}</span>
+          <button class="secondary" type="button" @click="openConfirmFilamentSpoolSku(selectedFilamentSpool)">{{ t("inventory.confirmSku") }}</button>
+        </div>
+        <div class="spool-dialog-forms">
+          <form class="modal-subform" @submit.prevent="adjustSelectedFilamentQuantity">
+            <h4>{{ t("inventory.quantityAdjust") }}</h4>
+            <div class="spool-adjust-grid">
+              <label class="field-label"><span>{{ t("inventory.remainingWeight") }}</span><input v-model.number="quantityAdjustForm.current_remaining_g" type="number" min="0" :placeholder="t('inventory.remainingWeight')" /></label>
+              <label class="field-label"><span>{{ t("inventory.remainPercent") }}</span><input v-model.number="quantityAdjustForm.remain_percent" type="number" min="0" max="100" :placeholder="t('inventory.remainPercent')" /></label>
+              <label class="field-label"><span>{{ t("inventory.source") }}</span><AppSelect v-model="quantityAdjustForm.source" :options="quantityAdjustSourceOptions" /></label>
+              <label class="field-label"><span>{{ t("form.note") }}</span><input v-model="quantityAdjustForm.note" :placeholder="t('form.note')" /></label>
+            </div>
+            <div class="modal-actions"><button class="primary" type="submit"><Save :size="17" />{{ t("common.save") }}</button></div>
+          </form>
+          <form class="modal-subform" @submit.prevent="updateSelectedFilamentLocation">
+            <h4>{{ t("inventory.locationAdjust") }}</h4>
+            <div class="spool-adjust-grid">
+              <label class="field-label"><span>{{ t("table.printer") }}</span><AppSelect v-model="locationAdjustForm.printer_id" :options="locationPrinterOptions" :placeholder="t('table.printer')" /></label>
+              <label class="field-label"><span>{{ t("fields.ams_id") }}</span><input v-model="locationAdjustForm.ams_id" :placeholder="t('fields.ams_id')" /></label>
+              <label class="field-label"><span>{{ t("form.slotId") }}</span><input v-model="locationAdjustForm.tray_id" :placeholder="t('form.slotId')" /></label>
+              <label class="field-label"><span>{{ t("inventory.manualLocation") }}</span><input v-model="locationAdjustForm.manual_location" :placeholder="t('inventory.manualLocation')" /></label>
+              <label class="field-label"><span>{{ t("form.note") }}</span><input v-model="locationAdjustForm.note" :placeholder="t('form.note')" /></label>
+            </div>
+            <div class="modal-actions"><button class="primary" type="submit"><Save :size="17" />{{ t("common.save") }}</button></div>
+          </form>
+        </div>
+      </section>
+
+      <section v-else-if="inventoryDialog.key === 'skuConfirm'" class="modal-panel">
+        <div class="modal-header">
+          <div class="modal-title-stack">
+            <h3>{{ t("inventory.confirmSku") }}</h3>
+            <p>{{ inventoryDialogSpoolLabel() }}</p>
+          </div>
+          <button class="icon-button" type="button" :title="t('common.close')" @click="closeInventoryDialog"><X :size="17" /></button>
+        </div>
+        <dl class="kv compact">
+          <dt>{{ t("table.spool") }}</dt><dd>{{ inventoryDialogSpoolLabel() }}</dd>
+          <dt>{{ t("inventory.identity") }}</dt><dd class="mono">{{ formatCell(inventoryDialog.context?.official_spool_uid || inventoryDialog.context?.identity_key) }}</dd>
+          <dt>{{ t("inventory.remaining") }}</dt><dd>{{ filamentSpoolRemainingLabel(inventoryDialog.context) }}</dd>
+        </dl>
+        <div class="modal-note">{{ t("inventory.confirmSkuDescription") }}</div>
+        <div class="modal-actions">
+          <button class="secondary" type="button" @click="editSkuFromConfirmDialog">{{ t("inventory.editSku") }}</button>
+          <button class="primary" type="button" @click="inventoryDialog.context && confirmFilamentSpoolSku(inventoryDialog.context)"><CheckCircle2 :size="17" />{{ t("inventory.confirmSku") }}</button>
+        </div>
+      </section>
+    </div>
 
     <div v-if="selectedHms" class="modal-backdrop" @click.self="selectedHms = null">
       <section class="modal-panel">
@@ -3766,7 +5786,7 @@ function filamentColor(value: unknown) {
             <div>
               <span>{{ t("table.material") }}</span>
               <strong>{{ softCell(selectedSlot.material) }}</strong>
-              <small>{{ softCell(selectedSlot.color || selectedSlot.tray_color) }}</small>
+              <small>{{ slotColorLabel(selectedSlot) }}</small>
             </div>
           </div>
           <div class="slot-detail-facts">
@@ -3817,7 +5837,7 @@ function filamentColor(value: unknown) {
                 <td>{{ formatCell(sample.sampled_at) }}</td>
                 <td>{{ displayCell(sample.state_name) }}</td>
                 <td>{{ softCell(sample.material) }}</td>
-                <td><span class="swatch" :style="{ background: filamentColor(sample.color) }"></span>{{ softCell(sample.color) }}</td>
+                <td><span class="swatch" :style="{ background: filamentColor(sample.color) }"></span>{{ filamentColorDisplay(sample.color) }}</td>
                 <td>{{ softCell(sample.remain) }}</td>
                 <td>{{ softCell(sample.k) }}</td>
                 <td>{{ softCell(sample.cali_idx) }}</td>

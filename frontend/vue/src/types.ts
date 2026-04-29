@@ -355,6 +355,160 @@ export interface Spool {
   current_tray_id?: string | null;
 }
 
+export interface FilamentBrand {
+  id: number;
+  name: string;
+  aliases?: string[];
+  note?: string | null;
+  default_empty_spool_weight_g?: number | null;
+  type_series_count?: number;
+  sku_count?: number;
+  spool_count?: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FilamentTypeSeries {
+  id: number;
+  brand_id: number;
+  brand_name?: string | null;
+  material_type: string;
+  series_name: string;
+  empty_spool_weight_g?: number | null;
+  config?: Record<string, any>;
+  note?: string | null;
+  brand_ids: number[];
+  brands: Record<string, any>[];
+  sku_count: number;
+  spool_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FilamentColorMapping {
+  id: number;
+  brand_id?: number | null;
+  brand_name?: string | null;
+  type_series_id?: number | null;
+  material_type?: string | null;
+  series_name?: string | null;
+  material?: string | null;
+  series?: string | null;
+  color_name?: string | null;
+  color_hex?: string | null;
+  hex_value?: string | null;
+  official_name?: string | null;
+  note?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FilamentSku {
+  id: number;
+  type_series_id?: number | null;
+  brand_id?: number | null;
+  brand_name?: string | null;
+  material?: string | null;
+  series?: string | null;
+  color_name?: string | null;
+  color_hex?: string | null;
+  color_value?: string | null;
+  nominal_weight_g: number;
+  empty_spool_weight_g?: number | null;
+  filament_diameter_mm: number;
+  density_g_cm3?: number | null;
+  tray_info_idx?: string | null;
+  sealed_quantity: number;
+  note?: string | null;
+  type_series_ids?: number[];
+  type_series?: Record<string, any>[];
+  brands?: Record<string, any>[];
+  opened_spool_count?: number;
+  ams_spool_count?: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FilamentSpool {
+  id: number;
+  sku_id?: number | null;
+  legacy_spool_id?: number | null;
+  sku_label?: string | null;
+  brand_id?: number | null;
+  brand_name?: string | null;
+  material?: string | null;
+  series?: string | null;
+  color_name?: string | null;
+  color_hex?: string | null;
+  color_value?: string | null;
+  official_spool_uid?: string | null;
+  identity_key?: string | null;
+  tray_uuid?: string | null;
+  tag_uid?: string | null;
+  identity_source: string;
+  nominal_weight_g?: number | null;
+  actual_weight_g?: number | null;
+  status: string;
+  initial_net_weight_g?: number | null;
+  current_remaining_g?: number | null;
+  used_weight_g: number;
+  empty_spool_weight_g?: number | null;
+  opened_at?: string | null;
+  first_loaded_at?: string | null;
+  last_used_at?: string | null;
+  current_printer_id?: number | null;
+  current_ams_id?: string | null;
+  current_tray_id?: string | null;
+  manual_location?: string | null;
+  storage_location?: string | null;
+  manual_quantity_protected: boolean;
+  last_weighed_g?: number | null;
+  last_ams_remain_percent?: number | null;
+  note?: string | null;
+  config?: Record<string, any>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FilamentSpoolEvent {
+  id: number;
+  spool_id?: number | null;
+  sku_id?: number | null;
+  printer_id?: number | null;
+  ams_id?: string | null;
+  tray_id?: string | null;
+  event_type: string;
+  previous?: Record<string, any> | null;
+  current?: Record<string, any> | null;
+  quantity_delta?: number | null;
+  message: string;
+  note?: string | null;
+  data?: Record<string, any> | null;
+  created_at: string;
+}
+
+export interface FilamentSpoolEvents {
+  events: FilamentSpoolEvent[];
+}
+
+export interface FilamentColorMappingGap {
+  sku_id: number;
+  color_name?: string | null;
+  color_hex?: string | null;
+  missing: string[];
+  type_series: Record<string, any>[];
+  brands: Record<string, any>[];
+}
+
+export interface FilamentInventorySummary {
+  totals: Record<string, number>;
+  skus: Record<string, any>[];
+  sealed_stock: Record<string, any>[];
+  opened_spools: Record<string, any>[];
+  ams_spools: Record<string, any>[];
+  needs_location_spools: Record<string, any>[];
+}
+
 export interface DiscoveryCandidate {
   host: string;
   open_ports: number[];

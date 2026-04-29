@@ -43,6 +43,9 @@ backend/*.db
 *.db
 *.sqlite
 *.sqlite3
+.runtime/
+**/.runtime/
+backups/
 
 # Logs
 *.log

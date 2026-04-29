@@ -39,6 +39,7 @@ class ParsedAmsSlot:
     material: str | None
     series: str | None
     color: str | None
+    color_name: str | None
     remain: int | None
     tray_uuid: str | None
     tag_uid: str | None
@@ -146,8 +147,30 @@ def is_transitioning_tray(tray: dict[str, Any], remain: int | None) -> bool:
     )
     if state is None:
         return False
+    if state in {"4", "5", "10", "17", "21", "25", "27"} and not _tray_has_filament_payload(tray):
+        return True
     transition_markers = {"LOADING", "UNLOADING", "READING", "BUSY", "CHANGE", "TRANSITION"}
     return any(marker in state for marker in transition_markers)
+
+
+def _tray_has_filament_payload(tray: dict[str, Any]) -> bool:
+    fields = (
+        "tray_type",
+        "tray_sub_brands",
+        "tray_color",
+        "color",
+        "tray_id_name",
+        "tray_info_idx",
+        "filament_name",
+        "tray_color_name",
+        "color_name",
+        "filament_color_name",
+        "color_display_name",
+    )
+    if any(clean_text(tray.get(field)) for field in fields):
+        return True
+    cols = tray.get("cols")
+    return isinstance(cols, list) and any(clean_text(value) for value in cols)
 
 
 def _slot_state(tray: dict[str, Any]) -> str | None:
@@ -157,6 +180,44 @@ def _slot_state(tray: dict[str, Any]) -> str | None:
         or tray.get("slot_state")
         or tray.get("tray_status")
     )
+
+
+def _find_token_sequence(parts: list[str], needle: str | None) -> int | None:
+    if needle is None:
+        return None
+    needle_parts = [part.lower() for part in needle.split() if part.strip()]
+    if not needle_parts:
+        return None
+    lower_parts = [part.lower() for part in parts]
+    for index in range(0, len(lower_parts) - len(needle_parts) + 1):
+        if lower_parts[index : index + len(needle_parts)] == needle_parts:
+            return index + len(needle_parts)
+    return None
+
+
+def _tray_color_name(tray: dict[str, Any], *, material: str | None, series: str | None, color: str | None) -> str | None:
+    explicit = clean_text(
+        tray.get("tray_color_name")
+        or tray.get("color_name")
+        or tray.get("filament_color_name")
+        or tray.get("color_display_name")
+    )
+    if explicit is not None:
+        return explicit
+    name = clean_text(tray.get("tray_id_name"))
+    if name is None:
+        return None
+    compact = name.replace("-", "").replace("_", "").strip()
+    if compact and compact.isalnum() and any(char.isdigit() for char in compact) and not any(char.isspace() for char in name):
+        return None
+    parts = name.split()
+    start_index = _find_token_sequence(parts, series)
+    if start_index is None:
+        start_index = _find_token_sequence(parts, material)
+    candidate = " ".join(parts[start_index:]).strip() if start_index is not None else name
+    if color and candidate.replace("#", "").lower() == color.replace("#", "").lower():
+        return None
+    return candidate or None
 
 
 def parse_ams_units(payload: dict[str, Any]) -> list[ParsedAmsUnit]:
@@ -186,6 +247,13 @@ def parse_ams_units(payload: dict[str, Any]) -> list[ParsedAmsUnit]:
             if tray_id is None:
                 continue
             remain = as_int(tray.get("remain"))
+            material = clean_text(tray.get("tray_type") or tray.get("filament_type"))
+            series = clean_text(
+                tray.get("tray_sub_brands")
+                or tray.get("tray_info_idx")
+                or tray.get("filament_name")
+            )
+            color = clean_text(tray.get("tray_color") or tray.get("color"))
             identity = identify_tray(tray)
             warning = identity.identity_warning
             if remain == -1 and warning:
@@ -208,13 +276,10 @@ def parse_ams_units(payload: dict[str, Any]) -> list[ParsedAmsUnit]:
                     ams_id=ams_id,
                     tray_id=tray_id,
                     slot_state=_slot_state(tray),
-                    material=clean_text(tray.get("tray_type") or tray.get("filament_type")),
-                    series=clean_text(
-                        tray.get("tray_sub_brands")
-                        or tray.get("tray_info_idx")
-                        or tray.get("filament_name")
-                    ),
-                    color=clean_text(tray.get("tray_color") or tray.get("color")),
+                    material=material,
+                    series=series,
+                    color=color,
+                    color_name=_tray_color_name(tray, material=material, series=series, color=color),
                     remain=remain,
                     tray_uuid=clean_text(tray.get("tray_uuid")),
                     tag_uid=clean_text(tray.get("tag_uid")),

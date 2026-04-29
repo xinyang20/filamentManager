@@ -248,13 +248,22 @@ class AmsSlot(Base):
     identity_confidence: Mapped[float] = mapped_column(default=0.0)
     identity_warning: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_transitioning: Mapped[bool] = mapped_column(Boolean, default=False)
-    spool_id: Mapped[int | None] = mapped_column(ForeignKey("spools.id", ondelete="SET NULL"), nullable=True)
+    filament_spool_id: Mapped[int | None] = mapped_column(
+        ForeignKey("filament_spools.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    filament_spool: Mapped["FilamentSpool | None"] = relationship(foreign_keys=[filament_spool_id])
     raw: Mapped[dict[str, Any]] = mapped_column(JSON)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
     @property
     def tray_id_name(self) -> Any:
         return _raw_get(self.raw, "tray_id_name")
+
+    @property
+    def tray_color_name(self) -> Any:
+        return _raw_get(self.raw, "tray_color_name", "color_name", "filament_color_name", "color_display_name")
 
     @property
     def tray_info_idx(self) -> Any:
@@ -320,35 +329,154 @@ class AmsSlotHistorySample(Base):
     )
 
 
-class Spool(Base, TimestampMixin):
-    __tablename__ = "spools"
+class FilamentBrand(Base, TimestampMixin):
+    __tablename__ = "filament_brands"
+    __table_args__ = (UniqueConstraint("name", name="uq_filament_brand_name"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    identity_key: Mapped[str | None] = mapped_column(String(220), unique=True, nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(120), index=True)
+    aliases: Mapped[list[str]] = mapped_column(JSON, default=list)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    type_series: Mapped[list["FilamentTypeSeries"]] = relationship(
+        back_populates="brand",
+        cascade="all, delete-orphan",
+    )
+
+
+class FilamentTypeSeries(Base, TimestampMixin):
+    __tablename__ = "filament_type_series"
+    __table_args__ = (UniqueConstraint("brand_id", "material_type", "series_name", name="uq_filament_type_series_identity"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    brand_id: Mapped[int] = mapped_column(ForeignKey("filament_brands.id", ondelete="CASCADE"), index=True)
+    material_type: Mapped[str] = mapped_column(String(40), index=True)
+    series_name: Mapped[str] = mapped_column(String(120), index=True)
+    empty_spool_weight_g: Mapped[float | None] = mapped_column(Float, nullable=True)
+    config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    brand: Mapped[FilamentBrand] = relationship(back_populates="type_series")
+    skus: Mapped[list["FilamentSku"]] = relationship(back_populates="type_series")
+
+
+class FilamentSku(Base, TimestampMixin):
+    __tablename__ = "filament_skus"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    type_series_id: Mapped[int] = mapped_column(ForeignKey("filament_type_series.id", ondelete="CASCADE"), index=True)
+    color_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    color_hex: Mapped[str | None] = mapped_column(String(8), nullable=True, index=True)
+    nominal_weight_g: Mapped[float] = mapped_column(Float, default=1000.0)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    type_series: Mapped[FilamentTypeSeries] = relationship(back_populates="skus")
+    stock_balance: Mapped["FilamentStockBalance | None"] = relationship(
+        back_populates="sku",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+    spools: Mapped[list["FilamentSpool"]] = relationship(back_populates="sku")
+
+
+class FilamentStockBalance(Base, TimestampMixin):
+    __tablename__ = "filament_stock_balances"
+
+    sku_id: Mapped[int] = mapped_column(
+        ForeignKey("filament_skus.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    sealed_quantity: Mapped[int] = mapped_column(Integer, default=0)
+
+    sku: Mapped[FilamentSku] = relationship(back_populates="stock_balance")
+
+
+class FilamentSpool(Base, TimestampMixin):
+    __tablename__ = "filament_spools"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sku_id: Mapped[int | None] = mapped_column(
+        ForeignKey("filament_skus.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    official_spool_uid: Mapped[str | None] = mapped_column(String(220), unique=True, nullable=True, index=True)
     identity_source: Mapped[str] = mapped_column(String(40), default="manual")
-    display_name: Mapped[str] = mapped_column(String(160))
-    brand: Mapped[str | None] = mapped_column(String(120), nullable=True)
-    material: Mapped[str | None] = mapped_column(String(80), nullable=True)
-    series: Mapped[str | None] = mapped_column(String(120), nullable=True)
-    color: Mapped[str | None] = mapped_column(String(80), nullable=True)
-    status: Mapped[str] = mapped_column(String(40), default="sealed")
-    sealed_quantity: Mapped[int] = mapped_column(Integer, default=1)
+    nominal_weight_g: Mapped[float | None] = mapped_column(Float, nullable=True)
+    actual_weight_g: Mapped[float | None] = mapped_column(Float, nullable=True)
+    status: Mapped[str] = mapped_column(String(40), default="opened_in_storage", index=True)
     opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     current_printer_id: Mapped[int | None] = mapped_column(ForeignKey("printers.id", ondelete="SET NULL"), nullable=True)
     current_ams_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
     current_tray_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    storage_location: Mapped[str | None] = mapped_column(Text, nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+    sku: Mapped[FilamentSku | None] = relationship(back_populates="spools")
+    events: Mapped[list["FilamentSpoolEvent"]] = relationship(
+        back_populates="spool",
+        cascade="all, delete-orphan",
+    )
 
 
-class SpoolLocation(Base):
-    __tablename__ = "spool_locations"
+class FilamentSpoolEvent(Base):
+    __tablename__ = "filament_spool_events"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    spool_id: Mapped[int] = mapped_column(ForeignKey("spools.id", ondelete="CASCADE"), index=True)
+    spool_id: Mapped[int | None] = mapped_column(
+        ForeignKey("filament_spools.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    sku_id: Mapped[int | None] = mapped_column(
+        ForeignKey("filament_skus.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     printer_id: Mapped[int | None] = mapped_column(ForeignKey("printers.id", ondelete="SET NULL"), nullable=True)
     ams_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
     tray_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
-    event_type: Mapped[str] = mapped_column(String(80), default="spool.location_changed")
-    moved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    event_type: Mapped[str] = mapped_column(String(80), index=True)
+    previous: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    current: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    quantity_delta: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    message: Mapped[str] = mapped_column(Text)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    data: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+    spool: Mapped[FilamentSpool | None] = relationship(back_populates="events")
+    sku: Mapped[FilamentSku | None] = relationship()
+
+
+class FilamentColorMapping(Base, TimestampMixin):
+    __tablename__ = "filament_color_mappings"
+    __table_args__ = (
+        UniqueConstraint(
+            "brand_id",
+            "type_series_id",
+            "color_name",
+            "color_hex",
+            name="uq_filament_color_mapping_context",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    brand_id: Mapped[int] = mapped_column(
+        ForeignKey("filament_brands.id", ondelete="CASCADE"),
+        index=True,
+    )
+    type_series_id: Mapped[int] = mapped_column(
+        ForeignKey("filament_type_series.id", ondelete="CASCADE"),
+        index=True,
+    )
+    color_name: Mapped[str] = mapped_column(String(120), index=True)
+    color_hex: Mapped[str] = mapped_column(String(8), index=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    brand: Mapped[FilamentBrand] = relationship()
+    type_series: Mapped[FilamentTypeSeries] = relationship()
 
 
 class PrintJob(Base):
@@ -508,18 +636,6 @@ class TimelapseNote(Base, TimestampMixin):
     favorite: Mapped[bool] = mapped_column(Boolean, default=False)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     cached_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-
-
-class InventoryEvent(Base):
-    __tablename__ = "inventory_events"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    spool_id: Mapped[int] = mapped_column(ForeignKey("spools.id", ondelete="CASCADE"), index=True)
-    event_type: Mapped[str] = mapped_column(String(100), index=True)
-    quantity_delta: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    message: Mapped[str] = mapped_column(Text)
-    data: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
 
 
 def _raw_get(raw: dict[str, Any] | None, *keys: str) -> Any:
