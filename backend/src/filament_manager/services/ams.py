@@ -266,6 +266,11 @@ def _slot_payload(slot: AmsSlot, *, display_name: str | None = None, active: Ams
 def _active_slot_from_snapshot(snapshot: DeviceStatusSnapshot | None, slots: list[AmsSlot]) -> AmsSlot | None:
     if snapshot is None or not isinstance(snapshot.ams_status, dict):
         return None
+    active_global = _first_set_bit(snapshot.ams_status.get("tray_hall_out_bits"))
+    if active_global is not None:
+        for slot in slots:
+            if str(active_global) == _global_tray_id(slot):
+                return slot
     tray_now = snapshot.ams_status.get("tray_now")
     if tray_now is None or tray_now == "":
         return None
@@ -319,7 +324,34 @@ def _global_tray_id(slot: AmsSlot) -> str:
     tray = _int(slot.tray_id)
     if ams is None or tray is None:
         return f"{slot.ams_id}:{slot.tray_id}"
-    return str((ams * 4) + tray)
+    return str((_ams_global_index(ams) * 4) + tray)
+
+
+def _ams_global_index(ams_id: int) -> int:
+    if ams_id >= 128:
+        return ams_id - 124
+    return ams_id
+
+
+def _first_set_bit(value: object) -> int | None:
+    mask = _bitmask(value)
+    if mask is None or mask <= 0:
+        return None
+    return (mask & -mask).bit_length() - 1
+
+
+def _bitmask(value: object) -> int | None:
+    if isinstance(value, int):
+        return value
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return int(text, 16)
+    except ValueError:
+        return None
 
 
 def _location_label(slot: AmsSlot, display_name: str | None) -> str:

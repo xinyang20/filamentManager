@@ -368,6 +368,8 @@ class FilamentSku(Base, TimestampMixin):
     color_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
     color_hex: Mapped[str | None] = mapped_column(String(8), nullable=True, index=True)
     nominal_weight_g: Mapped[float] = mapped_column(Float, default=1000.0)
+    filament_diameter_mm: Mapped[float] = mapped_column(Float, default=1.75)
+    tray_info_idx: Mapped[str | None] = mapped_column(String(120), nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     type_series: Mapped[FilamentTypeSeries] = relationship(back_populates="skus")

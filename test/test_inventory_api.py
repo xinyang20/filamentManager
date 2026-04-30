@@ -109,6 +109,47 @@ def test_type_series_duplicate_returns_json_error(api_client) -> None:
     assert rejected_update.json()["detail"] == "Type series already exists for this brand"
 
 
+def test_duplicate_sku_create_and_update_return_conflict(api_client) -> None:
+    brand = _brand(api_client)
+    type_series = _type_series(api_client, brand["id"], material="PLA", series="Basic")
+    first = _sku(api_client, type_series["id"], color_name="Orange", color_hex="FF6600", sealed=2)
+
+    duplicate = api_client.post(
+        "/api/filament/skus",
+        json={
+            "type_series_id": type_series["id"],
+            "color_name": "Orange",
+            "color_hex": "FF6600",
+            "nominal_weight_g": 1000,
+            "filament_diameter_mm": 1.75,
+            "sealed_quantity": 0,
+            "note": "different note and stock must still be duplicate",
+        },
+    )
+    assert duplicate.status_code == 409
+    assert duplicate.json()["detail"]["code"] == "duplicate_filament_sku"
+    assert duplicate.json()["detail"]["existing_sku"]["id"] == first["id"]
+
+    different_weight_response = api_client.post(
+        "/api/filament/skus",
+        json={
+            "type_series_id": type_series["id"],
+            "color_name": "Orange",
+            "color_hex": "FF6600",
+            "nominal_weight_g": 750,
+        },
+    )
+    assert different_weight_response.status_code == 201, different_weight_response.text
+    different_weight = different_weight_response.json()
+
+    rejected_update = api_client.patch(
+        f"/api/filament/skus/{different_weight['id']}",
+        json={"nominal_weight_g": 1000},
+    )
+    assert rejected_update.status_code == 409
+    assert rejected_update.json()["detail"]["existing_sku"]["id"] == first["id"]
+
+
 def test_brand_delete_allowed_only_when_unreferenced(api_client) -> None:
     unused = _brand(api_client, "Unused Brand")
     assert api_client.delete(f"/api/filament/brands/{unused['id']}").status_code == 204
@@ -235,7 +276,18 @@ def test_color_mapping_crud_and_sku_gaps(api_client) -> None:
         },
     )
     assert duplicate.status_code == 400
-    later_gap = _sku(api_client, type_series["id"], color_name="Jade White", color_hex=None, sealed=0)
+    later_gap_response = api_client.post(
+        "/api/filament/skus",
+        json={
+            "type_series_id": type_series["id"],
+            "color_name": "Jade White",
+            "color_hex": None,
+            "nominal_weight_g": 750,
+            "sealed_quantity": 0,
+        },
+    )
+    assert later_gap_response.status_code == 201, later_gap_response.text
+    later_gap = later_gap_response.json()
     assert later_gap["color_hex"] == "FFFFFF"
     assert api_client.get("/api/filament/color-mapping-gaps").json() == []
 
@@ -292,6 +344,39 @@ def test_inventory_summary_and_legacy_spools_removed(api_client) -> None:
     assert api_client.post("/api/spools", json={}).status_code == 410
 
 
+def test_spool_empty_and_archived_are_history_not_current_stock(api_client) -> None:
+    _, _, sku = _inventory_tree(api_client)
+    created = api_client.post(
+        "/api/filament/spools",
+        json={"sku_id": sku["id"], "status": "opened_in_storage", "actual_weight_g": 480, "storage_location": "Dry box A"},
+    )
+    assert created.status_code == 201, created.text
+    spool = created.json()
+
+    marked_empty = api_client.post(f"/api/filament/spools/{spool['id']}/status", json={"status": "empty"})
+    assert marked_empty.status_code == 200, marked_empty.text
+    body = marked_empty.json()
+    assert body["status"] == "empty"
+    assert body["actual_weight_g"] == 0
+    assert body["empty_at"] is not None
+    assert body["last_location"]["storage_location"] == "Dry box A"
+
+    summary = api_client.get("/api/filament/inventory/summary").json()
+    assert summary["totals"]["opened_spool_count"] == 0
+    assert summary["totals"]["empty_spool_count"] == 1
+    assert summary["history_spools"][0]["id"] == spool["id"]
+
+    restored = api_client.post(f"/api/filament/spools/{spool['id']}/status", json={"status": "opened_in_storage"})
+    assert restored.status_code == 200
+    assert restored.json()["status"] == "opened_in_storage"
+
+    archived = api_client.post(f"/api/filament/spools/{spool['id']}/status", json={"status": "archived"})
+    assert archived.status_code == 200
+    summary = api_client.get("/api/filament/inventory/summary").json()
+    assert summary["totals"]["archived_spool_count"] == 1
+    assert summary["totals"]["opened_spool_count"] == 0
+
+
 def test_ams_existing_official_uid_does_not_decrement_stock(api_client, printer_payload, fixture_dir) -> None:
     printer = _printer(api_client, printer_payload)
     _, _, sku = _inventory_tree(api_client)
@@ -311,6 +396,37 @@ def test_ams_existing_official_uid_does_not_decrement_stock(api_client, printer_
     spools = api_client.get("/api/filament/spools").json()
     assert len(spools) == 1
     assert spools[0]["status"] == "loaded_in_ams"
+
+
+def test_ams_archived_official_uid_creates_pending_conflict_instead_of_reusing(api_client, printer_payload, fixture_dir) -> None:
+    printer = _printer(api_client, printer_payload)
+    _, _, sku = _inventory_tree(api_client)
+    archived_response = api_client.post(
+        "/api/filament/spools",
+        json={
+            "sku_id": sku["id"],
+            "official_spool_uid": "11111111-2222-3333-4444-555555555555",
+            "status": "archived",
+        },
+    )
+    assert archived_response.status_code == 201, archived_response.text
+    archived = archived_response.json()
+    payload = json.loads((fixture_dir / "push_status_valid_tray_uuid.json").read_text())
+
+    _ingest(api_client, printer["id"], payload)
+
+    spools = api_client.get("/api/filament/spools").json()
+    old = next(item for item in spools if item["id"] == archived["id"])
+    conflict = next(item for item in spools if item["id"] != archived["id"])
+    assert old["status"] == "archived"
+    assert old["current_ams_id"] is None
+    assert conflict["status"] == "unknown"
+    assert conflict["official_spool_uid"] is None
+    assert conflict["config"]["needs_sku_review"] is True
+    assert conflict["config"]["review_reason"] == "archived_uid_reappeared"
+    assert conflict["config"]["reappeared_official_spool_uid"] == "11111111-2222-3333-4444-555555555555"
+    slots = api_client.get(f"/api/printers/{printer['id']}/ams/slots").json()
+    assert slots[0]["filament_spool_id"] == conflict["id"]
 
 
 def test_ams_existing_unknown_uid_matching_sku_decrements_stock(api_client, printer_payload, fixture_dir) -> None:

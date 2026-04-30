@@ -3,6 +3,7 @@ name = "filament-manager-backend"
 version = "0.1.0"
 description = "Local 3D printer filament management backend for Bambu Lab LAN MQTT."
 readme = "README.md"
+license = "AGPL-3.0-only"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",
@@ -11,6 +12,7 @@ dependencies = [
     "pydantic-settings>=2.4.0",
     "paho-mqtt>=2.1.0",
     "gradio>=4.44.0",
+    "imageio-ffmpeg>=0.6.0",
 ]
 
 [project.optional-dependencies]

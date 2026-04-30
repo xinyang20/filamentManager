@@ -1,0 +1,87 @@
+# FilamentManager Frontend
+
+前端目录包含主 Vue 应用和早期 Gradio 调试界面。
+
+## 目录说明
+
+```text
+frontend/
+├── vue/                 # 当前主要前端，基于 Vue 3 + Vite
+│   ├── src/
+│   │   ├── App.vue      # 主应用页面和主要交互
+│   │   ├── api.ts       # API 地址、请求封装和基础格式化工具
+│   │   ├── types.ts     # 前端使用的数据类型
+│   │   ├── i18n.json    # 简体中文 / English 文案
+│   │   ├── styles.css   # 全局样式
+│   │   └── components/  # 复用组件，例如选择框和指标图表
+│   ├── package.json     # 前端脚本和依赖
+│   └── vite.config.ts   # Vite 配置
+└── gradio/              # 开发期调试 UI，保留用于快速验证后端接口
+```
+
+## Vue 主界面
+
+Vue 应用当前以本地打印机运维为主，主要页面包括：
+
+- 总览 / 设备大屏：展示打印任务、温度与风扇、网络、硬件、HMS 告警、维护状态和局域网实时画面。
+- AMS：展示 AMS / AMS HT 单元、槽位、当前进料位、RFID 状态、材料颜色和槽位详情。
+- 耗材：维护品牌、类型/系列、SKU、未开封库存、开封料卷、AMS 中料卷、待确认料卷和已归档/已用尽历史料卷。
+- 事件中心：查看打印、AMS、耗材、HMS、维护、通知等事件，并支持打开详情。
+- 历史趋势、打印机配置、调试：用于观察历史数据、管理连接信息和导入导出本地数据。
+
+## 耗材交互规则
+
+- SKU 创建和编辑会处理后端 `duplicate_filament_sku` 冲突，并提示用户编辑已有 SKU 或调整库存。
+- 开封料卷详情支持标记用尽、归档、恢复为开封库存，所有状态变更都需要确认。
+- `empty` 和 `archived` 料卷进入“已归档/已用尽”视图，默认不混入开封未用尽库存。
+- AMS 换料后的待确认提示会区分“换料后识别到新耗材”和普通未知料卷。
+- 已用尽/已归档官方 UID 再次被识别时，前端提供恢复旧料卷、创建新料卷、忽略本次识别三个处理入口。
+
+## 设备大屏交互规则
+
+- “设备诊断”只展示检测能力和数据覆盖率。
+- HMS / 错误列表展示在“网络、硬件与告警”卡片底部；未解决记录全部显示，已解决或无影响记录只显示最近少量记录。
+- HMS 记录仍可点击打开详情弹窗，查看原始信息和语义化建议。
+- 实时监控弹窗按 16:9 等比例放大，桌面端接近整屏展示，小屏下自动收窄，关闭和刷新按钮保持可点击。
+
+## 启动 Vue 前端
+
+后端运行后执行：
+
+```bash
+cd frontend/vue
+pnpm install
+pnpm dev
+```
+
+默认地址为 `http://127.0.0.1:5173`。
+
+如需指定后端 API：
+
+```bash
+VITE_FILAMENT_MANAGER_API_URL=http://127.0.0.1:8000/api pnpm dev
+```
+
+## 构建
+
+```bash
+cd frontend/vue
+pnpm build
+```
+
+## Gradio 调试界面
+
+Gradio 不是主要产品界面，只用于开发和排查接口问题：
+
+```bash
+FILAMENT_MANAGER_API_URL=http://127.0.0.1:8000/api \
+uv run --project backend python frontend/gradio/app.py
+```
+
+## 维护约定
+
+- 新文案写入 `frontend/vue/src/i18n.json`。
+- 前端网络请求统一通过 `api.ts` 的封装。
+- 图标按钮优先使用 `lucide-vue-next`，保持现有紧凑运维工具风格。
+- 新增耗材或设备状态字段时，需要同步更新 `types.ts`、`api.ts` 解析和中英文文案。
+- 涉及主流程的 UI 改动需要确保 `pnpm build` 通过。

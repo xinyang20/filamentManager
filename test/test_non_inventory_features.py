@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+import struct
+import ssl
+from types import SimpleNamespace
+
+from filament_manager.services import camera as camera_service
+from filament_manager.services import observability as observability_service
+
 
 def _create_printer(api_client, printer_payload) -> int:
     response = api_client.post("/api/printers", json=printer_payload)
@@ -59,6 +66,182 @@ def _push_status(state: str = "RUNNING", progress: int = 10) -> dict:
     }
 
 
+def test_bambu_local_video_auth_packet_uses_documented_layout() -> None:
+    packet = camera_service._bambu_local_video_auth_packet("secret")  # noqa: SLF001
+
+    assert len(packet) == 80
+    assert packet[:16] == struct.pack("<IIII", 0x40, 0x3000, 0, 0)
+    assert packet[16:48].rstrip(b"\x00") == b"bblp"
+    assert packet[48:80].rstrip(b"\x00") == b"secret"
+
+
+def test_camera_jpeg_parser_handles_split_frames() -> None:
+    first = b"\xff\xd8first-frame\xff\xd9"
+    second = b"\xff\xd8second-frame\xff\xd9"
+
+    frames = list(camera_service._jpeg_images_from_chunks([b"noise" + first[:5], first[5:] + b"gap", second]))  # noqa: SLF001
+
+    assert frames == [first, second]
+
+
+def test_camera_capabilities_prefers_rtsps_for_p2s_when_available(monkeypatch) -> None:
+    printer = SimpleNamespace(
+        id=7,
+        name="Workshop P2S",
+        host="printer.local",
+        access_code="secret-access-code",
+        certificate_verify=False,
+    )
+
+    def fake_port_check(_host: str, port: int, *, timeout: float) -> bool:
+        return port == 322
+
+    monkeypatch.setattr(camera_service, "_is_tcp_port_open", fake_port_check)
+
+    capabilities = camera_service.camera_capabilities(printer)
+
+    assert capabilities["available"] is True
+    assert capabilities["source"] == "rtsps"
+    assert capabilities["stream_path"] == "/printers/7/camera/mjpeg"
+    assert "secret-access-code" not in str(capabilities)
+
+
+def test_camera_capabilities_does_not_fallback_to_6000_for_p2s(monkeypatch) -> None:
+    printer = SimpleNamespace(
+        id=7,
+        name="Workshop P2S",
+        host="printer.local",
+        access_code="secret-access-code",
+        certificate_verify=False,
+    )
+
+    def fake_port_check(_host: str, port: int, *, timeout: float) -> bool:
+        return port == 6000
+
+    monkeypatch.setattr(camera_service, "_is_tcp_port_open", fake_port_check)
+
+    capabilities = camera_service.camera_capabilities(printer)
+
+    assert capabilities["available"] is False
+    assert capabilities["source"] is None
+    assert "322" in capabilities["detail"]
+
+
+def test_camera_stream_family_recognizes_p2s_internal_code() -> None:
+    config = camera_service.CameraPrinterConfig(
+        id=7,
+        name="Workshop",
+        host="printer.local",
+        access_code="secret-access-code",
+        certificate_verify=False,
+    )
+    snapshot = SimpleNamespace(camera={}, hardware={"model_code": "N7"})
+
+    assert camera_service._camera_stream_family(config, snapshot) == "rtsps"  # noqa: SLF001
+
+
+def test_camera_tls_context_respects_certificate_verify() -> None:
+    insecure = camera_service.CameraPrinterConfig(
+        id=7,
+        name="Workshop",
+        host="printer.local",
+        access_code="secret-access-code",
+        certificate_verify=False,
+    )
+    secure = camera_service.CameraPrinterConfig(
+        id=8,
+        name="Workshop",
+        host="printer.local",
+        access_code="secret-access-code",
+        certificate_verify=True,
+    )
+
+    insecure_context = camera_service._camera_tls_context(insecure)  # noqa: SLF001
+    secure_context = camera_service._camera_tls_context(secure)  # noqa: SLF001
+
+    assert insecure_context.check_hostname is False
+    assert insecure_context.verify_mode == ssl.CERT_NONE
+    assert secure_context.check_hostname is True
+    assert secure_context.verify_mode == ssl.CERT_REQUIRED
+
+
+def test_rtsp_proxy_rewrites_digest_auth_without_leaking_secret() -> None:
+    config = camera_service.CameraPrinterConfig(
+        id=7,
+        name="Workshop",
+        host="192.0.2.50",
+        access_code="secret-access-code",
+        certificate_verify=False,
+    )
+    payload = (
+        b"DESCRIBE rtsp://127.0.0.1:12345/streaming/live/1 RTSP/1.0\r\n"
+        b"CSeq: 2\r\n"
+        b"Authorization: Digest username=\"bblp\", realm=\"Bambu\", nonce=\"abc123\", "
+        b"uri=\"rtsp://127.0.0.1:12345/streaming/live/1\", response=\"local-response\", "
+        b"algorithm=MD5, qop=auth, nc=00000001, cnonce=\"client123\"\r\n"
+        b"\r\n"
+    )
+
+    rewritten = camera_service._rewrite_rtsp_client_request(  # noqa: SLF001
+        payload,
+        b"rtsp://127.0.0.1:12345",
+        camera_service._target_rtsp_proxy_base_url(config, 322).encode("ascii"),  # noqa: SLF001
+        config,
+    )
+
+    assert rewritten.startswith(b"DESCRIBE rtsps://192.0.2.50:322/streaming/live/1 RTSP/1.0\r\n")
+    assert b'uri="rtsps://192.0.2.50:322/streaming/live/1"' in rewritten
+    assert b"local-response" not in rewritten
+    assert b"secret-access-code" not in rewritten
+
+
+def test_ffmpeg_rtsp_command_does_not_expose_access_code() -> None:
+    config = camera_service.CameraPrinterConfig(
+        id=7,
+        name="Workshop",
+        host="192.0.2.50",
+        access_code="secret-access-code",
+        certificate_verify=False,
+    )
+    url = camera_service._local_rtsp_proxy_url(  # noqa: SLF001
+        config,
+        12345,
+        "rtsps://bblp:secret-access-code@192.0.2.50:322/streaming/live/1",
+    )
+    command = camera_service._ffmpeg_rtsp_mjpeg_command(  # noqa: SLF001
+        "/tmp/ffmpeg",
+        url,
+    )
+
+    assert command[0] == "/tmp/ffmpeg"
+    assert "-rtsp_flags" in command
+    assert "prefer_tcp" in command
+    assert "rtsp://bblp:filamentmanager@127.0.0.1:12345/streaming/live/1" in command
+    assert "secret-access-code" not in " ".join(command)
+
+
+def test_process_table_excludes_sampler_process(monkeypatch) -> None:
+    class FakeProcess:
+        pid = 1234
+        returncode = 0
+
+        def communicate(self, timeout: int | None = None) -> tuple[str, str]:
+            return (
+                "100 1 2048\n"
+                "1234 999 1024\n"
+                "200 100 4096\n",
+                "",
+            )
+
+    monkeypatch.setattr(observability_service.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
+
+    table = observability_service._process_table()  # noqa: SLF001
+
+    assert 100 in table
+    assert 200 in table
+    assert 1234 not in table
+
+
 def test_ams_label_and_sensor_history_are_local_read_only_features(api_client, printer_payload) -> None:
     printer_id = _create_printer(api_client, printer_payload)
     _ingest(api_client, printer_id, _push_status())
@@ -82,6 +265,70 @@ def test_ams_label_and_sensor_history_are_local_read_only_features(api_client, p
     assert deleted.status_code == 204
     overview = api_client.get(f"/api/printers/{printer_id}/ams/overview").json()
     assert overview["units"][0]["display_name"] is None
+
+
+def test_active_slot_prefers_hall_out_bits_for_ams_ht(api_client, printer_payload) -> None:
+    printer_id = _create_printer(api_client, printer_payload)
+    payload = _push_status()
+    payload["print"]["ams"] = {
+        "tray_now": "0",
+        "ams_status": 768,
+        "tray_exist_bits": "1000f",
+        "tray_hall_out_bits": "10000",
+        "ams": [
+            {
+                "id": "0",
+                "module_type": "n3f",
+                "humidity": "4",
+                "temp": "24.1",
+                "tray": [
+                    {
+                        "id": "0",
+                        "tray_uuid": "26F2D70B2E154ABCA57FCD1DBBDBE4E9",
+                        "tag_uid": "6210CAEC00000100",
+                        "tray_type": "PLA",
+                        "tray_sub_brands": "PLA Basic",
+                        "tray_color": "000000FF",
+                        "tray_id_name": "A00-K00",
+                        "remain": 88,
+                        "state": 11,
+                    }
+                ],
+            },
+            {
+                "id": "128",
+                "module_type": "n3s",
+                "humidity": "5",
+                "temp": "21.2",
+                "tray": [
+                    {
+                        "id": "0",
+                        "tray_uuid": "72D769764FEF48B3868CDFD876FFC545",
+                        "tag_uid": "9C947A6600000100",
+                        "tray_type": "PETG",
+                        "tray_sub_brands": "PETG Basic",
+                        "tray_color": "FFFFFFFF",
+                        "tray_id_name": "G00-W00",
+                        "remain": 36,
+                        "state": 27,
+                    }
+                ],
+            },
+        ],
+    }
+
+    _ingest(api_client, printer_id, payload)
+
+    overview = api_client.get(f"/api/printers/{printer_id}/ams/overview").json()
+    assert overview["summary"]["active_slot"]["ams_id"] == "128"
+    assert overview["summary"]["active_slot"]["tray_id"] == "0"
+    assert overview["summary"]["active_slot"]["global_tray_id"] == "16"
+    units = {item["ams_id"]: item for item in overview["units"]}
+    assert units["128"]["active_slot"]["tray_id"] == "0"
+
+    slots = api_client.get(f"/api/printers/{printer_id}/ams/slots").json()
+    ht_slot = next(slot for slot in slots if slot["ams_id"] == "128")
+    assert ht_slot["global_tray_id"] == "16"
 
 
 def test_ams_slot_history_accepts_changed_samples_after_reload(api_client, printer_payload) -> None:
@@ -151,7 +398,11 @@ def test_system_info_support_bundle_and_prometheus_default(api_client, printer_p
 
     info = api_client.get("/api/system/info")
     assert info.status_code == 200
-    assert info.json()["configured_printers"] == 1
+    info_body = info.json()
+    assert info_body["configured_printers"] == 1
+    assert info_body["memory"]["project_rss_bytes"] > 0
+    assert info_body["memory"]["rss_bytes"] == info_body["memory"]["project_rss_bytes"]
+    assert info_body["memory"]["process_count"] >= 1
 
     bundle = api_client.get("/api/support/bundle")
     assert bundle.status_code == 200

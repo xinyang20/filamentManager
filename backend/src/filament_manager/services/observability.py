@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import resource
+import subprocess
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -326,8 +329,85 @@ def _load_average_percent() -> float | None:
 
 
 def _memory_info() -> dict[str, Any]:
-    usage = resource.getrusage(resource.RUSAGE_SELF)
-    return {"rss_bytes": int(usage.ru_maxrss) * 1024}
+    process_table = _process_table()
+    root_pid = os.getpid()
+    process_ids = _project_process_ids(root_pid, process_table)
+    backend_rss = process_table.get(root_pid, {}).get("rss_bytes")
+    project_rss = sum(int(process_table.get(pid, {}).get("rss_bytes") or 0) for pid in process_ids)
+    peak_rss = _backend_peak_rss_bytes()
+    if project_rss <= 0:
+        project_rss = peak_rss
+    if backend_rss is None:
+        backend_rss = peak_rss
+    return {
+        "rss_bytes": project_rss,
+        "project_rss_bytes": project_rss,
+        "backend_rss_bytes": backend_rss,
+        "child_rss_bytes": max(0, project_rss - backend_rss),
+        "process_count": len(process_ids) if process_ids else 1,
+        "backend_peak_rss_bytes": peak_rss,
+    }
+
+
+def _process_table() -> dict[int, dict[str, int]]:
+    process: subprocess.Popen[str] | None = None
+    try:
+        process = subprocess.Popen(
+            ["ps", "-axo", "pid=,ppid=,rss="],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        stdout, _stderr = process.communicate(timeout=2)
+    except subprocess.TimeoutExpired:
+        if process is not None:
+            process.kill()
+            with contextlib.suppress(Exception):
+                process.communicate(timeout=1)
+        return {}
+    except OSError:
+        return {}
+    if process.returncode != 0:
+        return {}
+    rows: dict[int, dict[str, int]] = {}
+    sampler_pid = process.pid
+    for line in stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+            rss_bytes = int(parts[2]) * 1024
+        except ValueError:
+            continue
+        if pid == sampler_pid:
+            continue
+        rows[pid] = {"ppid": ppid, "rss_bytes": rss_bytes}
+    return rows
+
+
+def _project_process_ids(root_pid: int, process_table: dict[int, dict[str, int]]) -> set[int]:
+    if not process_table:
+        return {root_pid}
+    children_by_parent: dict[int, list[int]] = {}
+    for pid, info in process_table.items():
+        children_by_parent.setdefault(info["ppid"], []).append(pid)
+    collected = {root_pid}
+    stack = [root_pid]
+    while stack:
+        parent = stack.pop()
+        for child in children_by_parent.get(parent, []):
+            if child in collected:
+                continue
+            collected.add(child)
+            stack.append(child)
+    return collected
+
+
+def _backend_peak_rss_bytes() -> int:
+    peak = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    return peak if sys.platform == "darwin" else peak * 1024
 
 
 def _payload_summary(payload: Any) -> dict[str, Any]:

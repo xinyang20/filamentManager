@@ -311,6 +311,8 @@ class FilamentSkuCreate(BaseModel):
     color_name: str | None = Field(default=None, max_length=120)
     color_hex: str | None = Field(default=None, max_length=16)
     nominal_weight_g: float = Field(default=1000.0, ge=0)
+    filament_diameter_mm: float = Field(default=1.75, gt=0)
+    tray_info_idx: str | None = Field(default=None, max_length=120)
     note: str | None = None
     type_series_ids: list[int] = Field(default_factory=list)
     sealed_quantity: int = Field(default=0, ge=0)
@@ -321,6 +323,8 @@ class FilamentSkuUpdate(BaseModel):
     color_name: str | None = Field(default=None, max_length=120)
     color_hex: str | None = Field(default=None, max_length=16)
     nominal_weight_g: float | None = Field(default=None, ge=0)
+    filament_diameter_mm: float | None = Field(default=None, gt=0)
+    tray_info_idx: str | None = Field(default=None, max_length=120)
     note: str | None = None
 
 
@@ -413,6 +417,16 @@ class FilamentSpoolLocationUpdate(BaseModel):
     note: str | None = None
 
 
+class FilamentSpoolStatusUpdate(BaseModel):
+    status: str = Field(pattern="^(opened_in_storage|loaded_in_ams|needs_location|empty|archived|unknown)$")
+    note: str | None = None
+
+
+class FilamentSpoolUidConflictResolve(BaseModel):
+    action: str = Field(pattern="^(restore_old|create_new|ignore)$")
+    note: str | None = None
+
+
 class FilamentSpoolRead(BaseModel):
     id: int
     sku_id: int | None
@@ -447,6 +461,10 @@ class FilamentSpoolRead(BaseModel):
     current_tray_id: str | None
     storage_location: str | None
     manual_location: str | None = None
+    last_location: dict[str, Any] | None = None
+    status_changed_at: datetime | None = None
+    empty_at: datetime | None = None
+    archived_at: datetime | None = None
     manual_quantity_protected: bool = False
     last_weighed_g: float | None = None
     last_ams_remain_percent: int | None = None
@@ -533,6 +551,9 @@ class FilamentInventorySummaryRead(BaseModel):
     opened_spools: list[dict[str, Any]]
     ams_spools: list[dict[str, Any]]
     needs_location_spools: list[dict[str, Any]]
+    empty_spools: list[dict[str, Any]] = Field(default_factory=list)
+    archived_spools: list[dict[str, Any]] = Field(default_factory=list)
+    history_spools: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class SlotBindRequest(BaseModel):
@@ -813,6 +834,16 @@ class PrinterDashboardRead(BaseModel):
     recent_events: list[PrinterEventRead]
     recent_print_logs: list[PrintLogEntryRead] = Field(default_factory=list)
     maintenance_due_count: int = 0
+
+
+class PrinterCameraCapabilitiesRead(BaseModel):
+    available: bool
+    stream_path: str | None = None
+    source: str | None = None
+    ports: dict[str, bool] = Field(default_factory=dict)
+    liveview_enabled: bool | None = None
+    rtsp_advertised: bool = False
+    detail: str | None = None
 
 
 class DashboardSummaryItemRead(BaseModel):

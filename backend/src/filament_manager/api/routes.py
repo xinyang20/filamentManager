@@ -63,7 +63,9 @@ from filament_manager.schemas import (
     FilamentSpoolEventsRead,
     FilamentSpoolLocationUpdate,
     FilamentSpoolRead,
+    FilamentSpoolStatusUpdate,
     FilamentSpoolUpdate,
+    FilamentSpoolUidConflictResolve,
     FilamentSpoolWeightUpdate,
     FilamentTypeSeriesBrandSet,
     FilamentTypeSeriesCreate,
@@ -88,6 +90,7 @@ from filament_manager.schemas import (
     PrintLogSummaryRead,
     PrinterCreate,
     PrinterAccessCodeRead,
+    PrinterCameraCapabilitiesRead,
     PrinterDashboardRead,
     PrinterEventRead,
     PrinterRead,
@@ -106,6 +109,14 @@ from filament_manager.schemas import (
     DeviceCapabilitiesRead,
 )
 from filament_manager.services.ams import build_ams_overview, build_ams_sensor_history, delete_ams_label, set_ams_label
+from filament_manager.services.camera import (
+    CAMERA_MJPEG_MEDIA_TYPE,
+    CameraStreamError,
+    camera_capabilities,
+    camera_config_from_printer,
+    iter_camera_mjpeg_auto,
+    select_camera_sources,
+)
 from filament_manager.services.discovery import scan_lan_devices
 from filament_manager.services.device_capabilities import all_device_capabilities, printer_capabilities
 from filament_manager.services.events import list_unified_events, sse_event_generator
@@ -127,6 +138,8 @@ from filament_manager.services.inventory import (
     delete_filament_spool,
     delete_sku,
     delete_type_series,
+    DuplicateFilamentSkuError,
+    FilamentSpoolUidConflictError,
     filament_brand_to_read,
     filament_color_mapping_to_read,
     filament_sku_to_read,
@@ -144,12 +157,14 @@ from filament_manager.services.inventory import (
     list_filament_spools,
     list_skus,
     list_type_series,
+    resolve_reappeared_uid_conflict,
     set_sku_type_series,
     set_type_series_brands,
     update_brand,
     update_color_mapping,
     update_filament_location,
     update_filament_spool,
+    update_filament_status,
     update_filament_weight,
     update_sku,
     update_type_series,
@@ -354,6 +369,45 @@ def api_get_device_snapshot(
         select(DeviceStatusSnapshot).where(DeviceStatusSnapshot.printer_id == printer_id)
     ).first()
     return _device_snapshot_read(snapshot)
+
+
+@router.get("/printers/{printer_id}/camera/capabilities", response_model=PrinterCameraCapabilitiesRead)
+def api_get_printer_camera_capabilities(
+    printer_id: int,
+    db: Session = Depends(get_db),
+) -> PrinterCameraCapabilitiesRead:
+    printer = _printer_or_404(db, printer_id)
+    snapshot = db.scalars(
+        select(DeviceStatusSnapshot).where(DeviceStatusSnapshot.printer_id == printer_id)
+    ).first()
+    return PrinterCameraCapabilitiesRead.model_validate(camera_capabilities(printer, snapshot))
+
+
+@router.get("/printers/{printer_id}/camera/mjpeg")
+def api_stream_printer_camera_mjpeg(
+    printer_id: int,
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    printer = _printer_or_404(db, printer_id)
+    snapshot = db.scalars(
+        select(DeviceStatusSnapshot).where(DeviceStatusSnapshot.printer_id == printer_id)
+    ).first()
+    config = camera_config_from_printer(printer)
+    try:
+        sources = select_camera_sources(printer, snapshot)
+    except CameraStreamError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not sources:
+        raise HTTPException(status_code=503, detail="No local camera stream endpoint is reachable")
+    return StreamingResponse(
+        iter_camera_mjpeg_auto(config, sources),
+        media_type=CAMERA_MJPEG_MEDIA_TYPE,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.get("/printers/{printer_id}/dashboard", response_model=PrinterDashboardRead)
@@ -1067,10 +1121,46 @@ def api_list_filament_skus(db: Session = Depends(get_db)) -> list[dict[str, Any]
     return [filament_sku_to_read(row) for row in list_skus(db)]
 
 
+def _duplicate_sku_http_exception(exc: DuplicateFilamentSkuError) -> HTTPException:
+    existing = filament_sku_to_read(exc.existing_sku)
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "code": "duplicate_filament_sku",
+            "message": "Duplicate filament SKU",
+            "existing_sku": {
+                "id": existing["id"],
+                "label": _filament_sku_label(existing),
+                "brand_name": existing.get("brand_name"),
+                "material": existing.get("material"),
+                "series": existing.get("series"),
+                "color_name": existing.get("color_name"),
+                "color_hex": existing.get("color_hex"),
+                "nominal_weight_g": existing.get("nominal_weight_g"),
+                "filament_diameter_mm": existing.get("filament_diameter_mm"),
+                "tray_info_idx": existing.get("tray_info_idx"),
+                "sealed_quantity": existing.get("sealed_quantity"),
+            },
+        },
+    )
+
+
+def _filament_sku_label(sku: dict[str, Any]) -> str:
+    parts = [
+        sku.get("brand_name"),
+        " ".join(str(value) for value in (sku.get("material"), sku.get("series")) if value),
+        sku.get("color_name") or sku.get("color_hex"),
+        f"{sku.get('nominal_weight_g')}g" if sku.get("nominal_weight_g") is not None else None,
+    ]
+    return " / ".join(str(part) for part in parts if part) or f"SKU {sku.get('id')}"
+
+
 @router.post("/filament/skus", response_model=FilamentSkuRead, status_code=status.HTTP_201_CREATED)
 def api_create_filament_sku(data: FilamentSkuCreate, db: Session = Depends(get_db)) -> dict[str, Any]:
     try:
         sku = create_sku(db, data)
+    except DuplicateFilamentSkuError as exc:
+        raise _duplicate_sku_http_exception(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return filament_sku_to_read(sku)
@@ -1087,6 +1177,8 @@ def api_update_filament_sku(
         raise HTTPException(status_code=404, detail="Filament SKU not found")
     try:
         updated = update_sku(db, sku, data)
+    except DuplicateFilamentSkuError as exc:
+        raise _duplicate_sku_http_exception(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return filament_sku_to_read(updated)
@@ -1119,6 +1211,8 @@ def api_set_filament_sku_type_series(
         raise HTTPException(status_code=404, detail="Filament SKU not found")
     try:
         updated = set_sku_type_series(db, sku, data)
+    except DuplicateFilamentSkuError as exc:
+        raise _duplicate_sku_http_exception(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return filament_sku_to_read(updated)
@@ -1189,6 +1283,42 @@ def api_confirm_filament_spool_sku(spool_id: int, db: Session = Depends(get_db))
     if spool is None:
         raise HTTPException(status_code=404, detail="Filament spool not found")
     return filament_spool_to_read(confirm_filament_spool_sku_review(db, spool))
+
+
+@router.post("/filament/spools/{spool_id}/status", response_model=FilamentSpoolRead)
+def api_update_filament_spool_status(
+    spool_id: int,
+    data: FilamentSpoolStatusUpdate,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    spool = get_filament_spool(db, spool_id)
+    if spool is None:
+        raise HTTPException(status_code=404, detail="Filament spool not found")
+    try:
+        updated = update_filament_status(db, spool, status=data.status, note=data.note)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return filament_spool_to_read(updated)
+
+
+@router.post("/filament/spools/{spool_id}/resolve-uid-conflict", response_model=FilamentSpoolRead)
+def api_resolve_filament_spool_uid_conflict(
+    spool_id: int,
+    data: FilamentSpoolUidConflictResolve,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    spool = get_filament_spool(db, spool_id)
+    if spool is None:
+        raise HTTPException(status_code=404, detail="Filament spool not found")
+    try:
+        resolved = resolve_reappeared_uid_conflict(db, spool, action=data.action, note=data.note)
+    except FilamentSpoolUidConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if resolved is None:
+        raise HTTPException(status_code=409, detail="UID conflict was not resolved")
+    return filament_spool_to_read(resolved)
 
 
 @router.delete("/filament/spools/{spool_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -1583,9 +1713,13 @@ def _slot_user_tray_id(slot: AmsSlot) -> int | None:
 
 def _slot_global_tray_id(slot: AmsSlot) -> str:
     try:
-        return str((int(slot.ams_id) * 4) + int(slot.tray_id))
+        ams_id = int(slot.ams_id)
+        tray_id = int(slot.tray_id)
     except (TypeError, ValueError):
         return f"{slot.ams_id}:{slot.tray_id}"
+    if ams_id >= 128:
+        ams_id -= 124
+    return str((ams_id * 4) + tray_id)
 
 
 def _storage_media_type(file: PrinterStorageFile) -> str:

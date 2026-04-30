@@ -45,6 +45,17 @@ REAL_SPOOL_STATUSES = {
     "archived",
     "unknown",
 }
+HISTORICAL_SPOOL_STATUSES = {"empty", "archived"}
+
+
+class DuplicateFilamentSkuError(ValueError):
+    def __init__(self, existing_sku: FilamentSku):
+        self.existing_sku = existing_sku
+        super().__init__("Duplicate filament SKU")
+
+
+class FilamentSpoolUidConflictError(ValueError):
+    pass
 
 
 def list_brands(db: Session) -> list[FilamentBrand]:
@@ -216,6 +227,10 @@ def create_sku(db: Session, data: FilamentSkuCreate) -> FilamentSku:
     payload = _sku_payload(data.model_dump())
     if get_type_series(db, payload["type_series_id"]) is None:
         raise ValueError("Type series not found")
+    _complete_sku_payload_from_color_mapping(db, payload)
+    duplicate = _find_duplicate_sku(db, payload)
+    if duplicate is not None:
+        raise DuplicateFilamentSkuError(duplicate)
     sku = FilamentSku(**payload)
     db.add(sku)
     db.flush()
@@ -242,6 +257,14 @@ def update_sku(db: Session, sku: FilamentSku, data: FilamentSkuUpdate) -> Filame
     updates = _sku_payload(data.model_dump(exclude_unset=True), partial=True)
     if "type_series_id" in updates and get_type_series(db, updates["type_series_id"]) is None:
         raise ValueError("Type series not found")
+    next_payload = _sku_identity_payload(sku, updates)
+    _complete_sku_payload_from_color_mapping(db, next_payload)
+    duplicate = _find_duplicate_sku(db, next_payload, exclude_id=sku.id)
+    if duplicate is not None:
+        raise DuplicateFilamentSkuError(duplicate)
+    for key in ("color_name", "color_hex"):
+        if key in next_payload and key not in updates:
+            updates[key] = next_payload[key]
     for key, value in updates.items():
         setattr(sku, key, value)
     db.add(sku)
@@ -262,7 +285,14 @@ def set_sku_type_series(
         raise ValueError("Type series is required")
     if get_type_series(db, type_series_id) is None:
         raise ValueError("Type series not found")
+    next_payload = _sku_identity_payload(sku, {"type_series_id": type_series_id})
+    _complete_sku_payload_from_color_mapping(db, next_payload)
+    duplicate = _find_duplicate_sku(db, next_payload, exclude_id=sku.id)
+    if duplicate is not None:
+        raise DuplicateFilamentSkuError(duplicate)
     sku.type_series_id = type_series_id
+    for key in ("color_name", "color_hex"):
+        setattr(sku, key, next_payload[key])
     db.add(sku)
     db.commit()
     db.refresh(sku)
@@ -376,9 +406,12 @@ def update_filament_spool(db: Session, spool: FilamentSpool, data: FilamentSpool
         if existing is not None and existing.id != spool.id:
             raise ValueError("Official spool UID already exists")
         updates["official_spool_uid"] = uid
+    status_update = updates.pop("status", None)
     previous = _spool_snapshot(spool)
     for key, value in updates.items():
         setattr(spool, key, value)
+    if status_update is not None:
+        _apply_filament_status_change(db, spool, status=status_update)
     if spool.status in {"opened_in_storage", "loaded_in_ams"} and spool.opened_at is None:
         spool.opened_at = utc_now()
     db.add(spool)
@@ -386,7 +419,7 @@ def update_filament_spool(db: Session, spool: FilamentSpool, data: FilamentSpool
         db,
         spool=spool,
         sku_id=spool.sku_id,
-        event_type="weight_updated" if "actual_weight_g" in updates else "location_updated",
+        event_type=f"status_{status_update}" if status_update is not None else "weight_updated" if "actual_weight_g" in updates else "location_updated",
         message="Filament spool updated",
         previous=previous,
         current=_spool_snapshot(spool),
@@ -482,6 +515,176 @@ def update_filament_weight(
     db.commit()
     db.refresh(spool)
     return spool
+
+
+def update_filament_status(
+    db: Session,
+    spool: FilamentSpool,
+    *,
+    status: str,
+    note: str | None = None,
+) -> FilamentSpool:
+    if status not in REAL_SPOOL_STATUSES:
+        raise ValueError("Unsupported filament spool status")
+    previous = _spool_snapshot(spool)
+    _apply_filament_status_change(db, spool, status=status)
+    db.add(spool)
+    _record_event(
+        db,
+        spool=spool,
+        sku_id=spool.sku_id,
+        event_type=f"status_{status}",
+        message="Filament spool status changed",
+        previous=previous,
+        current=_spool_snapshot(spool),
+        note=note,
+    )
+    db.commit()
+    db.refresh(spool)
+    return spool
+
+
+def resolve_reappeared_uid_conflict(
+    db: Session,
+    conflict_spool: FilamentSpool,
+    *,
+    action: str,
+    note: str | None = None,
+) -> FilamentSpool | None:
+    config = dict(conflict_spool.config or {})
+    if config.get("review_reason") != "archived_uid_reappeared":
+        raise FilamentSpoolUidConflictError("Filament spool is not an archived UID conflict")
+    uid = _official_uid_or_none(config.get("reappeared_official_spool_uid"))
+    archived_spool_id = _positive_int_or_none(config.get("archived_spool_id"))
+    archived_spool = db.get(FilamentSpool, archived_spool_id) if archived_spool_id is not None else None
+    if archived_spool is None and uid is not None:
+        archived_spool = _find_spool_by_official_uid(db, uid)
+    if uid is None or archived_spool is None:
+        raise FilamentSpoolUidConflictError("Original archived spool was not found")
+
+    if action == "restore_old":
+        previous_conflict = _spool_snapshot(conflict_spool)
+        previous_archived = _spool_snapshot(archived_spool)
+        archived_spool.status = "loaded_in_ams"
+        archived_spool.current_printer_id = conflict_spool.current_printer_id
+        archived_spool.current_ams_id = conflict_spool.current_ams_id
+        archived_spool.current_tray_id = conflict_spool.current_tray_id
+        archived_spool.storage_location = None
+        archived_spool.opened_at = archived_spool.opened_at or utc_now()
+        archived_config = dict(archived_spool.config or {})
+        archived_config.pop("archived_at", None)
+        archived_config.pop("empty_at", None)
+        archived_config["status_changed_at"] = utc_now().isoformat()
+        archived_config["uid_conflict_resolved_at"] = utc_now().isoformat()
+        archived_config["uid_conflict_resolution"] = action
+        archived_spool.config = archived_config
+        _bind_location_slots_to_spool(db, conflict_spool, archived_spool.id)
+        _apply_filament_status_change(db, conflict_spool, status="archived")
+        conflict_config = dict(conflict_spool.config or {})
+        conflict_config["uid_conflict_resolution"] = action
+        conflict_config["uid_conflict_resolved_at"] = utc_now().isoformat()
+        conflict_spool.config = conflict_config
+        db.add(archived_spool)
+        db.add(conflict_spool)
+        _record_event(
+            db,
+            spool=archived_spool,
+            sku_id=archived_spool.sku_id,
+            event_type="uid_conflict_restored",
+            message="Archived UID conflict resolved by restoring historical spool",
+            previous=previous_archived,
+            current=_spool_snapshot(archived_spool),
+            note=note,
+            data={"conflict_spool_id": conflict_spool.id, "official_spool_uid": uid},
+        )
+        _record_event(
+            db,
+            spool=conflict_spool,
+            sku_id=conflict_spool.sku_id,
+            event_type="uid_conflict_resolved",
+            message="UID conflict placeholder archived after restoring historical spool",
+            previous=previous_conflict,
+            current=_spool_snapshot(conflict_spool),
+            note=note,
+            data={"restored_spool_id": archived_spool.id, "official_spool_uid": uid},
+        )
+        db.commit()
+        db.refresh(archived_spool)
+        return archived_spool
+
+    if action == "create_new":
+        previous_conflict = _spool_snapshot(conflict_spool)
+        previous_archived = _spool_snapshot(archived_spool)
+        archived_config = dict(archived_spool.config or {})
+        archived_config["archived_official_spool_uid"] = uid
+        archived_config["uid_reassigned_to_spool_id"] = conflict_spool.id
+        archived_config["uid_conflict_resolution"] = action
+        archived_config["uid_conflict_resolved_at"] = utc_now().isoformat()
+        archived_spool.official_spool_uid = None
+        archived_spool.config = archived_config
+        if conflict_spool.sku_id is None:
+            conflict_spool.sku_id = archived_spool.sku_id
+            conflict_spool.nominal_weight_g = conflict_spool.nominal_weight_g or archived_spool.nominal_weight_g
+        conflict_spool.official_spool_uid = uid
+        conflict_spool.status = "loaded_in_ams" if conflict_spool.sku_id is not None else "unknown"
+        conflict_spool.opened_at = conflict_spool.opened_at or utc_now()
+        config.pop("needs_sku_review", None)
+        config["uid_conflict_resolution"] = action
+        config["uid_conflict_resolved_at"] = utc_now().isoformat()
+        config["status_changed_at"] = utc_now().isoformat()
+        conflict_spool.config = config
+        db.add(archived_spool)
+        db.add(conflict_spool)
+        _record_event(
+            db,
+            spool=archived_spool,
+            sku_id=archived_spool.sku_id,
+            event_type="uid_conflict_reassigned",
+            message="Archived UID released for a newly created spool",
+            previous=previous_archived,
+            current=_spool_snapshot(archived_spool),
+            note=note,
+            data={"new_spool_id": conflict_spool.id, "official_spool_uid": uid},
+        )
+        _record_event(
+            db,
+            spool=conflict_spool,
+            sku_id=conflict_spool.sku_id,
+            event_type="uid_conflict_resolved",
+            message="UID conflict resolved by creating a new spool",
+            previous=previous_conflict,
+            current=_spool_snapshot(conflict_spool),
+            note=note,
+            data={"archived_spool_id": archived_spool.id, "official_spool_uid": uid},
+        )
+        db.commit()
+        db.refresh(conflict_spool)
+        return conflict_spool
+
+    if action == "ignore":
+        previous = _spool_snapshot(conflict_spool)
+        _clear_slot_bindings_for_spool(db, conflict_spool)
+        _apply_filament_status_change(db, conflict_spool, status="archived")
+        config["uid_conflict_resolution"] = action
+        config["uid_conflict_resolved_at"] = utc_now().isoformat()
+        conflict_spool.config = config
+        db.add(conflict_spool)
+        _record_event(
+            db,
+            spool=conflict_spool,
+            sku_id=conflict_spool.sku_id,
+            event_type="uid_conflict_ignored",
+            message="UID conflict observation ignored",
+            previous=previous,
+            current=_spool_snapshot(conflict_spool),
+            note=note,
+            data={"archived_spool_id": archived_spool.id, "official_spool_uid": uid},
+        )
+        db.commit()
+        db.refresh(conflict_spool)
+        return conflict_spool
+
+    raise FilamentSpoolUidConflictError("Unsupported UID conflict action")
 
 
 def list_filament_spool_events(db: Session, spool_id: int) -> dict[str, list[Any]]:
@@ -618,9 +821,12 @@ def build_inventory_summary(db: Session) -> dict[str, Any]:
     skus = [filament_sku_to_read(sku) for sku in list_skus(db)]
     spools = [filament_spool_to_read(spool) for spool in list_filament_spools(db)]
     sealed_stock = [sku for sku in skus if int(sku["sealed_quantity"]) > 0]
-    opened_spools = [spool for spool in spools if spool["status"] == "opened_in_storage"]
-    ams_spools = [spool for spool in spools if spool["current_ams_id"] or spool["status"] == "loaded_in_ams"]
-    needs_location = [spool for spool in spools if spool["status"] == "needs_location"]
+    current_spools = [spool for spool in spools if spool["status"] not in HISTORICAL_SPOOL_STATUSES]
+    opened_spools = [spool for spool in current_spools if spool["status"] == "opened_in_storage"]
+    ams_spools = [spool for spool in current_spools if spool["current_ams_id"] or spool["status"] == "loaded_in_ams"]
+    needs_location = [spool for spool in current_spools if spool["status"] == "needs_location"]
+    empty_spools = [spool for spool in spools if spool["status"] == "empty"]
+    archived_spools = [spool for spool in spools if spool["status"] == "archived"]
     return {
         "totals": {
             "sku_count": len(skus),
@@ -628,12 +834,17 @@ def build_inventory_summary(db: Session) -> dict[str, Any]:
             "opened_spool_count": len(opened_spools),
             "ams_spool_count": len(ams_spools),
             "needs_location_count": len(needs_location),
+            "empty_spool_count": len(empty_spools),
+            "archived_spool_count": len(archived_spools),
         },
         "skus": skus,
         "sealed_stock": sealed_stock,
         "opened_spools": opened_spools,
         "ams_spools": ams_spools,
         "needs_location_spools": needs_location,
+        "empty_spools": empty_spools,
+        "archived_spools": archived_spools,
+        "history_spools": empty_spools + archived_spools,
     }
 
 
@@ -744,6 +955,7 @@ def process_ams_slot_filament(
             sku=sku,
             auto_created_sku=auto_created_sku,
             identity_source="manual",
+            review_reason="ams_filament_change" if previous_spool_id is not None and auto_created_sku else None,
         )
         if sku is not None and not auto_created_sku:
             _open_one_from_stock_if_available(db, sku, spool=spool, note="AMS spool identified without official UID")
@@ -757,6 +969,15 @@ def process_ams_slot_filament(
         return spool, True
 
     spool = _find_spool_by_official_uid(db, official_uid)
+    if spool is not None and spool.status in HISTORICAL_SPOOL_STATUSES:
+        return _handle_historical_uid_reappeared(
+            db,
+            printer_id=printer_id,
+            slot_model=slot_model,
+            parsed_slot=parsed_slot,
+            historical_spool=spool,
+            previous_spool_id=previous_spool_id,
+        )
     created = spool is None
     if spool is None:
         sku, auto_created_sku = _resolve_sku_for_ams_slot(db, parsed_slot)
@@ -764,6 +985,8 @@ def process_ams_slot_filament(
         if auto_created_sku:
             config["needs_sku_review"] = True
             config["auto_created_sku_id"] = sku.id if sku else None
+            if previous_spool_id is not None:
+                config["sku_review_reason"] = "ams_filament_change"
         spool = FilamentSpool(
             sku_id=sku.id if sku else None,
             official_spool_uid=official_uid,
@@ -796,7 +1019,9 @@ def process_ams_slot_filament(
                 spool=spool,
                 sku_id=sku.id,
                 event_type="needs_location",
-                message="AMS spool created with an auto-created SKU that needs review",
+                message="Replacement AMS spool created with an auto-created SKU that needs review"
+                if previous_spool_id is not None
+                else "AMS spool created with an auto-created SKU that needs review",
                 current=_spool_snapshot(spool),
                 data=_slot_match_context(parsed_slot),
             )
@@ -827,6 +1052,8 @@ def process_ams_slot_filament(
                 config = dict(spool.config or {})
                 config["needs_sku_review"] = True
                 config["auto_created_sku_id"] = matched.id
+                if previous_spool_id is not None and previous_spool_id != spool.id:
+                    config["sku_review_reason"] = "ams_filament_change"
                 spool.config = config
 
     if not parsed_slot.is_transitioning:
@@ -925,16 +1152,20 @@ def filament_sku_to_read(sku: FilamentSku) -> dict[str, Any]:
         "color_value": sku.color_hex,
         "nominal_weight_g": sku.nominal_weight_g,
         "empty_spool_weight_g": first_series.empty_spool_weight_g if first_series else None,
-        "filament_diameter_mm": 1.75,
+        "filament_diameter_mm": sku.filament_diameter_mm or 1.75,
         "density_g_cm3": None,
-        "tray_info_idx": None,
+        "tray_info_idx": sku.tray_info_idx,
         "sealed_quantity": _sealed_quantity(sku),
         "note": sku.note,
         "type_series_ids": [sku.type_series_id] if sku.type_series_id else [],
         "type_series": type_series,
         "brands": _sku_brand_summaries(sku),
         "opened_spool_count": sum(1 for spool in sku.spools if spool.status == "opened_in_storage"),
-        "ams_spool_count": sum(1 for spool in sku.spools if spool.status == "loaded_in_ams" or spool.current_ams_id),
+        "ams_spool_count": sum(
+            1
+            for spool in sku.spools
+            if spool.status not in HISTORICAL_SPOOL_STATUSES and (spool.status == "loaded_in_ams" or spool.current_ams_id)
+        ),
         "created_at": sku.created_at,
         "updated_at": sku.updated_at,
     }
@@ -944,6 +1175,7 @@ def filament_spool_to_read(spool: FilamentSpool) -> dict[str, Any]:
     sku = spool.sku
     first_series = sku.type_series if sku else None
     first_brand = first_series.brand if first_series else None
+    config = spool.config or {}
     return {
         "id": spool.id,
         "sku_id": spool.sku_id,
@@ -978,11 +1210,15 @@ def filament_spool_to_read(spool: FilamentSpool) -> dict[str, Any]:
         "current_tray_id": spool.current_tray_id,
         "storage_location": spool.storage_location,
         "manual_location": spool.storage_location,
+        "last_location": config.get("last_location"),
+        "status_changed_at": _datetime_from_config(config.get("status_changed_at")),
+        "empty_at": _datetime_from_config(config.get("empty_at")),
+        "archived_at": _datetime_from_config(config.get("archived_at")),
         "manual_quantity_protected": False,
         "last_weighed_g": spool.actual_weight_g,
-        "last_ams_remain_percent": (spool.config or {}).get("last_ams_remain_percent"),
+        "last_ams_remain_percent": config.get("last_ams_remain_percent"),
         "note": spool.note,
-        "config": spool.config or {},
+        "config": config,
         "created_at": spool.created_at,
         "updated_at": spool.updated_at,
     }
@@ -1052,13 +1288,88 @@ def _sku_payload(values: dict[str, Any], *, partial: bool = False) -> dict[str, 
         payload["color_name"] = _clean_text(values["color_name"])
     if "color_hex" in values:
         payload["color_hex"] = normalize_color_hex(values["color_hex"]) if values["color_hex"] else None
-    if "nominal_weight_g" in values:
+    if "nominal_weight_g" in values and values["nominal_weight_g"] is not None:
         payload["nominal_weight_g"] = values["nominal_weight_g"]
     elif not partial:
         payload["nominal_weight_g"] = 1000.0
+    if "filament_diameter_mm" in values and values["filament_diameter_mm"] is not None:
+        payload["filament_diameter_mm"] = values["filament_diameter_mm"]
+    elif not partial:
+        payload["filament_diameter_mm"] = 1.75
+    if "tray_info_idx" in values:
+        payload["tray_info_idx"] = _clean_text(values["tray_info_idx"])
     if "note" in values:
         payload["note"] = values["note"]
     return payload
+
+
+def _sku_identity_payload(sku: FilamentSku, updates: dict[str, Any] | None = None) -> dict[str, Any]:
+    updates = updates or {}
+    return {
+        "type_series_id": int(updates.get("type_series_id", sku.type_series_id)),
+        "color_name": updates.get("color_name", sku.color_name),
+        "color_hex": _normalize_color_hex_or_none(updates.get("color_hex", sku.color_hex)),
+        "nominal_weight_g": float(updates.get("nominal_weight_g", sku.nominal_weight_g)),
+        "filament_diameter_mm": float(updates.get("filament_diameter_mm", sku.filament_diameter_mm or 1.75)),
+        "tray_info_idx": _clean_text(updates.get("tray_info_idx", sku.tray_info_idx)),
+    }
+
+
+def _complete_sku_payload_from_color_mapping(db: Session, payload: dict[str, Any]) -> None:
+    type_series_id = payload.get("type_series_id")
+    if type_series_id is None:
+        return
+    color_name = _clean_text(payload.get("color_name"))
+    color_hex = _normalize_color_hex_or_none(payload.get("color_hex"))
+    if color_name and not color_hex:
+        mapping = db.scalars(
+            select(FilamentColorMapping).where(
+                FilamentColorMapping.type_series_id == int(type_series_id),
+                func.lower(FilamentColorMapping.color_name) == color_name.lower(),
+            )
+        ).first()
+        if mapping is not None:
+            payload["color_hex"] = mapping.color_hex
+    elif color_hex and not color_name:
+        mapping = db.scalars(
+            select(FilamentColorMapping).where(
+                FilamentColorMapping.type_series_id == int(type_series_id),
+                FilamentColorMapping.color_hex == color_hex,
+            )
+        ).first()
+        if mapping is not None:
+            payload["color_name"] = mapping.color_name
+
+
+def _find_duplicate_sku(
+    db: Session,
+    payload: dict[str, Any],
+    *,
+    exclude_id: int | None = None,
+) -> FilamentSku | None:
+    type_series_id = int(payload["type_series_id"])
+    color_name = _clean_text(payload.get("color_name"))
+    color_hex = _normalize_color_hex_or_none(payload.get("color_hex"))
+    tray_info_idx = _clean_text(payload.get("tray_info_idx"))
+    nominal_weight_g = float(payload.get("nominal_weight_g") or 0)
+    filament_diameter_mm = float(payload.get("filament_diameter_mm") or 1.75)
+    stmt = select(FilamentSku).where(
+        FilamentSku.type_series_id == type_series_id,
+        _nullable_text_equals(FilamentSku.color_name, color_name, lower=True),
+        _nullable_text_equals(FilamentSku.color_hex, color_hex),
+        FilamentSku.nominal_weight_g == nominal_weight_g,
+        FilamentSku.filament_diameter_mm == filament_diameter_mm,
+        _nullable_text_equals(FilamentSku.tray_info_idx, tray_info_idx),
+    )
+    if exclude_id is not None:
+        stmt = stmt.where(FilamentSku.id != exclude_id)
+    return db.scalars(stmt.limit(1)).first()
+
+
+def _nullable_text_equals(column: Any, value: str | None, *, lower: bool = False) -> Any:
+    if value is None:
+        return column.is_(None)
+    return func.lower(column) == value.lower() if lower else column == value
 
 
 def _color_mapping_payload(db: Session, values: dict[str, Any]) -> dict[str, Any]:
@@ -1326,6 +1637,88 @@ def _official_uid_or_none(value: Any) -> str | None:
     return text
 
 
+def _handle_historical_uid_reappeared(
+    db: Session,
+    *,
+    printer_id: int,
+    slot_model: AmsSlot,
+    parsed_slot: ParsedAmsSlot,
+    historical_spool: FilamentSpool,
+    previous_spool_id: int | None,
+) -> tuple[FilamentSpool, bool]:
+    previous = db.get(FilamentSpool, previous_spool_id) if previous_spool_id is not None else None
+    if previous is not None and _is_uid_conflict_placeholder(previous, historical_spool.official_spool_uid):
+        _sync_uid_conflict_placeholder(previous, parsed_slot)
+        previous.current_printer_id = printer_id
+        previous.current_ams_id = parsed_slot.ams_id
+        previous.current_tray_id = parsed_slot.tray_id
+        previous.storage_location = None
+        previous.status = "unknown"
+        slot_model.filament_spool_id = previous.id
+        db.add(slot_model)
+        db.add(previous)
+        return previous, False
+
+    if previous_spool_id is not None and previous_spool_id != historical_spool.id:
+        _record_ams_slot_unload(
+            db,
+            slot=slot_model,
+            previous_spool_id=previous_spool_id,
+            note="AMS slot reports a UID that belongs to an archived or empty spool",
+        )
+
+    sku = _match_sku_for_slot(db, parsed_slot)
+    conflict_spool = FilamentSpool(
+        sku_id=(sku.id if sku else historical_spool.sku_id),
+        identity_source="ams_official_id",
+        nominal_weight_g=(sku.nominal_weight_g if sku else historical_spool.nominal_weight_g or _slot_nominal_weight_g(parsed_slot)),
+        status="unknown",
+        current_printer_id=printer_id,
+        current_ams_id=parsed_slot.ams_id,
+        current_tray_id=parsed_slot.tray_id,
+        config={
+            "needs_sku_review": True,
+            "review_reason": "archived_uid_reappeared",
+            "reappeared_official_spool_uid": historical_spool.official_spool_uid,
+            "archived_spool_id": historical_spool.id,
+            "archived_spool_status": historical_spool.status,
+            "last_ams_remain_percent": parsed_slot.remain,
+            "ams_raw": parsed_slot.raw,
+        },
+    )
+    db.add(conflict_spool)
+    db.flush()
+    slot_model.filament_spool_id = conflict_spool.id
+    db.add(slot_model)
+    _record_event(
+        db,
+        spool=conflict_spool,
+        sku_id=conflict_spool.sku_id,
+        event_type="uid_conflict_pending",
+        message="AMS reported a UID that belongs to an archived or empty spool",
+        current=_spool_snapshot(conflict_spool),
+        data={
+            **_slot_match_context(parsed_slot),
+            "reappeared_official_spool_uid": historical_spool.official_spool_uid,
+            "archived_spool_id": historical_spool.id,
+            "archived_spool_status": historical_spool.status,
+        },
+    )
+    return conflict_spool, True
+
+
+def _is_uid_conflict_placeholder(spool: FilamentSpool, uid: str | None) -> bool:
+    config = spool.config if isinstance(spool.config, dict) else {}
+    return config.get("review_reason") == "archived_uid_reappeared" and config.get("reappeared_official_spool_uid") == uid
+
+
+def _sync_uid_conflict_placeholder(spool: FilamentSpool, slot: ParsedAmsSlot) -> None:
+    config = dict(spool.config or {})
+    config["last_ams_remain_percent"] = slot.remain
+    config["ams_raw"] = slot.raw
+    spool.config = config
+
+
 def _create_unknown_ams_spool(
     db: Session,
     *,
@@ -1334,11 +1727,14 @@ def _create_unknown_ams_spool(
     sku: FilamentSku | None = None,
     auto_created_sku: bool = False,
     identity_source: str = "ams_official_id",
+    review_reason: str | None = None,
 ) -> FilamentSpool:
     config = {"last_ams_remain_percent": parsed_slot.remain, "ams_raw": parsed_slot.raw}
     if auto_created_sku:
         config["needs_sku_review"] = True
         config["auto_created_sku_id"] = sku.id if sku else None
+    if review_reason:
+        config["sku_review_reason"] = review_reason
     spool = FilamentSpool(
         sku_id=sku.id if sku else None,
         identity_source=identity_source,
@@ -1358,7 +1754,9 @@ def _create_unknown_ams_spool(
             spool=spool,
             sku_id=sku.id,
             event_type="needs_location",
-            message="AMS spool created with an auto-created SKU that needs review",
+            message="Replacement AMS spool created with an auto-created SKU that needs review"
+            if review_reason == "ams_filament_change"
+            else "AMS spool created with an auto-created SKU that needs review",
             current=_spool_snapshot(spool),
             data=_slot_match_context(parsed_slot),
         )
@@ -1419,6 +1817,71 @@ def _record_ams_slot_unload(
     )
 
 
+def _apply_filament_status_change(db: Session, spool: FilamentSpool, *, status: str) -> None:
+    now = utc_now()
+    previous_location = _location_snapshot(spool)
+    config = dict(spool.config or {})
+    if any(value is not None and value != "" for value in previous_location.values()):
+        config["last_location"] = previous_location
+    config["status_changed_at"] = now.isoformat()
+    if status == "empty":
+        config["empty_at"] = now.isoformat()
+        spool.actual_weight_g = 0
+    elif status == "archived":
+        config["archived_at"] = now.isoformat()
+    elif status in {"opened_in_storage", "loaded_in_ams", "needs_location", "unknown"}:
+        if spool.status in HISTORICAL_SPOOL_STATUSES:
+            config["restored_at"] = now.isoformat()
+        if status == "opened_in_storage":
+            config.pop("empty_at", None)
+            config.pop("archived_at", None)
+    if status in HISTORICAL_SPOOL_STATUSES or status in {"opened_in_storage", "needs_location", "unknown"}:
+        _clear_slot_bindings_for_spool(db, spool)
+        spool.current_printer_id = None
+        spool.current_ams_id = None
+        spool.current_tray_id = None
+    if status in HISTORICAL_SPOOL_STATUSES:
+        spool.storage_location = spool.storage_location or _storage_location_from_config(config)
+    if status in {"opened_in_storage", "loaded_in_ams"} and spool.opened_at is None:
+        spool.opened_at = now
+    spool.status = status
+    spool.config = config
+
+
+def _clear_slot_bindings_for_spool(db: Session, spool: FilamentSpool) -> None:
+    if spool.id is None:
+        return
+    for slot in db.scalars(select(AmsSlot).where(AmsSlot.filament_spool_id == spool.id)).all():
+        slot.filament_spool_id = None
+        db.add(slot)
+
+
+def _bind_location_slots_to_spool(db: Session, source_spool: FilamentSpool, spool_id: int) -> None:
+    if source_spool.id is not None:
+        for slot in db.scalars(select(AmsSlot).where(AmsSlot.filament_spool_id == source_spool.id)).all():
+            slot.filament_spool_id = spool_id
+            db.add(slot)
+    if source_spool.current_printer_id is None or source_spool.current_ams_id is None or source_spool.current_tray_id is None:
+        return
+    slot = db.scalars(
+        select(AmsSlot).where(
+            AmsSlot.printer_id == source_spool.current_printer_id,
+            AmsSlot.ams_id == source_spool.current_ams_id,
+            AmsSlot.tray_id == source_spool.current_tray_id,
+        )
+    ).first()
+    if slot is not None:
+        slot.filament_spool_id = spool_id
+        db.add(slot)
+
+
+def _storage_location_from_config(config: dict[str, Any]) -> str | None:
+    last_location = config.get("last_location")
+    if not isinstance(last_location, dict):
+        return None
+    return _clean_text(last_location.get("storage_location"))
+
+
 def _set_filament_loaded_location(
     db: Session,
     spool: FilamentSpool,
@@ -1437,7 +1900,7 @@ def _set_filament_loaded_location(
     spool.current_ams_id = parsed_slot.ams_id
     spool.current_tray_id = parsed_slot.tray_id
     spool.storage_location = None
-    if spool.status != "empty":
+    if spool.status not in HISTORICAL_SPOOL_STATUSES:
         spool.status = "loaded_in_ams" if spool.sku_id is not None else "unknown"
     if spool.opened_at is None and spool.sku_id is not None:
         spool.opened_at = utc_now()
@@ -1518,6 +1981,8 @@ def _find_or_create_sku_from_ams_slot(db: Session, slot: ParsedAmsSlot) -> tuple
         color_name=color_name,
         color_hex=color_hex,
         nominal_weight_g=_slot_nominal_weight_g(slot) or 1000.0,
+        filament_diameter_mm=1.75,
+        tray_info_idx=_clean_text(slot.raw.get("tray_info_idx")) if isinstance(slot.raw, dict) else None,
         note="Auto-created from AMS RFID. Please review SKU details.",
     )
     db.add(sku)
@@ -1716,6 +2181,10 @@ def _slot_match_context(slot: ParsedAmsSlot) -> dict[str, Any]:
     }
 
 
+def _datetime_from_config(value: Any) -> Any:
+    return value
+
+
 def _slot_has_filament_payload(slot: ParsedAmsSlot) -> bool:
     raw = slot.raw if isinstance(slot.raw, dict) else {}
     fields = (slot.material, slot.series, slot.color, slot.color_name)
@@ -1761,7 +2230,24 @@ def _is_phantom_ams_spool(spool: FilamentSpool) -> bool:
         or _clean_text(raw.get("tray_status"))
         or _clean_text(raw.get("state"))
     )
-    return (state or "").lower() in {"4", "5", "10", "17", "21", "25", "27", "loading", "unloading", "reading", "busy", "transitioning"}
+    return (state or "").lower() in {
+        "4",
+        "5",
+        "9",
+        "10",
+        "17",
+        "21",
+        "25",
+        "27",
+        "loading",
+        "unloading",
+        "filament_present",
+        "reading",
+        "rfid_reading",
+        "rfid_reading_or_transitioning",
+        "busy",
+        "transitioning",
+    }
 
 
 def _slot_is_empty_observation(slot: ParsedAmsSlot) -> bool:
@@ -1776,6 +2262,7 @@ def _slot_is_transition_without_payload(slot: ParsedAmsSlot) -> bool:
     return slot.is_transitioning or state in {
         "4",
         "5",
+        "9",
         "10",
         "17",
         "21",
@@ -1783,6 +2270,7 @@ def _slot_is_transition_without_payload(slot: ParsedAmsSlot) -> bool:
         "27",
         "loading",
         "unloading",
+        "filament_present",
         "reading",
         "rfid_reading",
         "rfid_reading_or_transitioning",
@@ -1907,6 +2395,16 @@ def _positive_float_or_none(value: Any) -> float | None:
         return None
     try:
         parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _positive_int_or_none(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        parsed = int(value)
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None

@@ -66,6 +66,7 @@ import type {
   NotificationRule,
   NotificationTarget,
   Printer,
+  PrinterCameraCapabilities,
   PrinterMaintenance,
   PrintLogAnalytics,
   PrintLogEntry,
@@ -93,7 +94,7 @@ const viewKeys = [
   "debug",
 ] as const;
 type ViewKey = (typeof viewKeys)[number];
-type InventoryPageKey = "stock" | "brands" | "types" | "skus" | "colors";
+type InventoryPageKey = "stock" | "history" | "brands" | "types" | "skus" | "colors";
 type Locale = keyof typeof translations;
 type NavGroupKey = "monitoring" | "assets" | "system";
 type SortDirection = "asc" | "desc";
@@ -153,6 +154,10 @@ const selectedPrinterId = ref<number | null>(null);
 const dashboardSummary = ref<DashboardSummaryItem[]>([]);
 const dashboard = ref<Dashboard | null>(null);
 const deviceCapabilities = ref<DeviceCapabilities | null>(null);
+const cameraCapabilities = ref<PrinterCameraCapabilities | null>(null);
+const cameraStreamError = ref(false);
+const cameraStreamToken = ref(Date.now());
+const cameraLightboxOpen = ref(false);
 const metrics = ref<MetricSample[]>([]);
 const metricRange = ref("6h");
 const printLogs = ref<PrintLogEntry[]>([]);
@@ -180,6 +185,7 @@ const stateSnapshot = ref<Record<string, any> | null>(null);
 const amsSlots = ref<Record<string, any>[]>([]);
 const amsOverview = ref<AmsOverview | null>(null);
 const inventoryAmsOverviews = ref<Record<string, AmsOverview>>({});
+const inventoryPrinterStates = ref<Record<string, Record<string, any> | null>>({});
 const amsLabelDrafts = reactive<Record<string, string>>({});
 const amsLabelEditing = reactive<Record<string, boolean>>({});
 const amsSensorRange = ref("24");
@@ -208,6 +214,7 @@ const inventoryTableSorts = reactive<Record<string, { key: string; direction: So
   sealedStock: { key: "id", direction: "asc" },
   amsLoaded: { key: "printer", direction: "asc" },
   openedUnused: { key: "id", direction: "asc" },
+  history: { key: "time", direction: "desc" },
   brands: { key: "id", direction: "asc" },
   typeSeries: { key: "id", direction: "asc" },
   skus: { key: "id", direction: "asc" },
@@ -226,6 +233,7 @@ const eventFilters = reactive({
 const hmsCodes = ref<HmsCodeInfo[]>([]);
 const selectedHmsStats = ref<HmsCodeStats | null>(null);
 const selectedHms = ref<Record<string, any> | null>(null);
+const selectedEvent = ref<UnifiedEvent | null>(null);
 const selectedSlot = ref<Record<string, any> | null>(null);
 const selectedSlotHistory = ref<AmsSlotHistorySample[]>([]);
 const rawMqtt = ref<Record<string, any>[]>([]);
@@ -351,6 +359,7 @@ const filamentSkuForm = reactive({
   note: "",
 });
 const editingFilamentSkuId = ref<number | null>(null);
+const skuReviewSourceSpoolId = ref<number | null>(null);
 const filamentSkuFilters = reactive({
   search: "",
   brand_id: null as number | null,
@@ -358,6 +367,7 @@ const filamentSkuFilters = reactive({
   nominal_weight_g: null as number | null,
   color_state: "all",
 });
+const inventoryHistorySearch = ref("");
 
 const filamentSpoolForm = reactive({
   brand_id: null as number | null,
@@ -515,12 +525,13 @@ const filamentSpoolStatusOptions = computed(() => [
   { label: displayCell("opened_in_storage"), value: "opened_in_storage" },
   { label: displayCell("loaded_in_ams"), value: "loaded_in_ams" },
   { label: displayCell("needs_location"), value: "needs_location" },
-  { label: displayCell("empty"), value: "empty" },
-  { label: displayCell("archived"), value: "archived" },
+  { label: t("inventory.status.empty"), value: "empty" },
+  { label: t("inventory.status.archived"), value: "archived" },
   { label: displayCell("unknown"), value: "unknown" },
 ]);
 const inventoryPageOptions = computed(() => [
   { key: "stock" as const, label: t("inventory.stockManagement") },
+  { key: "history" as const, label: t("inventory.historySpools") },
   { key: "brands" as const, label: t("inventory.brands") },
   { key: "types" as const, label: t("inventory.typeSeries") },
   { key: "skus" as const, label: t("inventory.skus") },
@@ -688,11 +699,39 @@ const filamentOpenedUnusedSpools = computed(() =>
 const sortedNeedsLocationSpools = computed(() =>
   sortInventoryRows(filamentInventorySummary.value?.needs_location_spools || [], "needsLocation"),
 );
-const pendingConfirmSpools = computed(() => filamentSpools.value.filter((spool) => isFilamentSpoolPendingConfirm(spool)));
+const pendingConfirmSpools = computed(() =>
+  filamentSpools.value.filter((spool) => isFilamentSpoolPendingConfirm(spool) && !isFilamentSpoolSkuReviewDeferred(spool)),
+);
+const deferredConfirmSpools = computed(() =>
+  filamentSpools.value.filter((spool) => isFilamentSpoolPendingConfirm(spool) && isFilamentSpoolSkuReviewDeferred(spool)),
+);
 const sortedPendingConfirmSpools = computed(() => sortInventoryRows(pendingConfirmSpools.value, "pendingConfirm"));
 const sortedFilamentStockSkus = computed(() => sortInventoryRows(filamentStockSkus.value, "sealedStock"));
 const sortedFilamentAmsRows = computed(() => sortInventoryRows(filamentAmsRows.value, "amsLoaded"));
 const sortedFilamentOpenedUnusedSpools = computed(() => sortInventoryRows(filamentOpenedUnusedSpools.value, "openedUnused"));
+const historicalFilamentSpools = computed(() =>
+  filamentSpools.value.filter((spool) => ["empty", "archived"].includes(spool.status)),
+);
+const filteredHistoricalFilamentSpools = computed(() => {
+  const query = inventoryHistorySearch.value.trim().toLowerCase();
+  if (!query) return historicalFilamentSpools.value;
+  return historicalFilamentSpools.value.filter((spool) =>
+    [
+      spool.id,
+      filamentSpoolLabel(spool),
+      filamentSpoolStatusLabel(spool.status),
+      filamentSpoolLastLocation(spool),
+      filamentSpoolRemainingLabel(spool),
+      filamentSpoolHistoryTime(spool),
+      spool.official_spool_uid,
+      spool.note,
+    ]
+      .join(" ")
+      .toLowerCase()
+      .includes(query),
+  );
+});
+const sortedHistoricalFilamentSpools = computed(() => sortInventoryRows(filteredHistoricalFilamentSpools.value, "history"));
 const sortedFilamentBrands = computed(() => sortInventoryRows(filamentBrands.value, "brands"));
 const sortedFilamentTypeSeries = computed(() => sortInventoryRows(filamentTypeSeries.value, "typeSeries"));
 const sortedFilteredFilamentSkus = computed(() => sortInventoryRows(filteredFilamentSkus.value, "skus"));
@@ -810,8 +849,19 @@ const readableNetworkHardware = computed(() => networkHardwareRows(network.value
 const camera = computed(() => record(snapshot.value.camera));
 const cameraOptions = computed(() => record(snapshot.value.camera_options));
 const capabilityVisibleFields = computed(() => new Set(deviceCapabilities.value?.visible_fields || []));
-const shouldShowDashboardAms = computed(() => dashboardAmsSummaryRows.value.some(([, value]) => value !== "--" && value !== 0) || capabilityVisibleFields.value.has("ams"));
 const shouldShowDashboardCamera = computed(() => cameraStatusRows.value.length > 0 || capabilityVisibleFields.value.has("camera"));
+const shouldShowDashboardLiveCamera = computed(() => Boolean(selectedPrinterId.value && (cameraCapabilities.value?.available || shouldShowDashboardCamera.value)));
+const cameraStreamSrc = computed(() => {
+  if (!selectedPrinterId.value || !cameraCapabilities.value?.available) return "";
+  return `${API_BASE}/printers/${selectedPrinterId.value}/camera/mjpeg?t=${cameraStreamToken.value}`;
+});
+const cameraLivePlaceholder = computed(() => {
+  if (cameraStreamError.value) return t("dashboard.cameraStreamError");
+  if (cameraCapabilities.value?.available) return t("dashboard.cameraStreamConnecting");
+  const detail = String(cameraCapabilities.value?.detail || "");
+  if (detail.includes("322")) return t("dashboard.cameraStreamLanLiveviewRequired");
+  return t("dashboard.cameraStreamUnavailable");
+});
 const shouldShowChamberTemperature = computed(() => capabilityVisibleFields.value.has("chamber_temperature") || temperatures.value.chamber !== undefined);
 const readableCamera = computed(() => cameraRows(camera.value, cameraOptions.value));
 const detectionRows = computed(() => {
@@ -839,6 +889,11 @@ const coverageStatusRows = computed(() => entries(coverage.value).map(([key, ite
   received: record(item).received === true,
 })));
 const hmsErrors = computed(() => arrayOfRecord(snapshot.value.hms_errors));
+const dashboardHmsRows = computed(() => {
+  const unresolved = hmsErrors.value.filter((item) => item.active !== false && item.actionable !== false);
+  const resolvedOrMuted = hmsErrors.value.filter((item) => item.active === false || item.actionable === false).slice(0, 3);
+  return [...unresolved, ...resolvedOrMuted];
+});
 const recentEvents = computed(() => dashboard.value?.recent_events || events.value);
 const activeDerivedStatuses = computed(() => {
   const rows = entries(derived.value).filter(([key, value]) => {
@@ -961,7 +1016,6 @@ const amsStats = computed(() => {
 const dashboardAmsSummaryRows = computed(() => {
   const units = dashboard.value?.ams_units || [];
   const slots = dashboard.value?.ams_slots || [];
-  const activeSlot = dashboardActiveAmsSlot(slots, amsStatus.value);
   const statusLabel = dashboardAmsStatusLabel(amsStatus.value);
   return [
     [t("ams.amsCount"), units.length],
@@ -969,19 +1023,18 @@ const dashboardAmsSummaryRows = computed(() => {
     [t("ams.loadedCount"), slots.filter((slot) => isDashboardAmsLoaded(slot)).length],
     [t("ams.emptyCount"), slots.filter((slot) => dashboardAmsSlotState(slot) === "empty").length],
     [t("ams.transitioningCount"), slots.filter((slot) => isDashboardAmsTransitioning(slot)).length],
-    [t("ams.activeSlot"), dashboardAmsActiveSlotLabel(activeSlot, amsStatus.value)],
-    [t("dashboard.activeMaterial"), dashboardActiveMaterialLabel(activeSlot)],
     [t("dashboard.amsStatus"), statusLabel],
   ] as [string, unknown][];
 });
 const dashboardAmsUnitRows = computed(() => {
   const units = dashboard.value?.ams_units || [];
   const slots = dashboard.value?.ams_slots || [];
+  const activeSlot = dashboardActiveAmsSlot(slots, amsStatus.value);
   const knownUnitIds = new Set(units.map((unit) => String(unit.ams_id)));
-  const rows = units.map((unit, index) => dashboardAmsUnitVisual(unit, slots, index));
+  const rows = units.map((unit, index) => dashboardAmsUnitVisual(unit, slots, index, activeSlot));
   const orphanIds = Array.from(new Set(slots.map((slot) => String(slot.ams_id)).filter((amsId) => !knownUnitIds.has(amsId))));
   orphanIds.forEach((amsId) => {
-    rows.push(dashboardAmsUnitVisual({ ams_id: amsId, ams_type_name: "AMS" }, slots, rows.length));
+    rows.push(dashboardAmsUnitVisual({ ams_id: amsId, ams_type_name: "AMS" }, slots, rows.length, activeSlot));
   });
   return rows;
 });
@@ -1036,6 +1089,9 @@ const canRequestFullRefresh = computed(() => selectedPrinter.value?.connection_s
 
 watch(selectedPrinter, (printer) => {
   if (printer) populatePrinterForm(printer);
+  cameraCapabilities.value = null;
+  cameraLightboxOpen.value = false;
+  restartCameraStream();
 });
 
 watch([storageSearch, storageSort, () => storageFiles.value.length], () => {
@@ -1356,12 +1412,41 @@ async function fetchDashboard() {
 
 async function loadDashboard() {
   if (!selectedPrinterId.value) return;
-  const [result, capabilities] = await Promise.all([
+  const [result, capabilities, cameraCapabilityResult, colorMappingResult] = await Promise.all([
     fetchDashboard(),
     apiRequest<DeviceCapabilities>(`/printers/${selectedPrinterId.value}/capabilities`),
+    apiRequest<PrinterCameraCapabilities>(`/printers/${selectedPrinterId.value}/camera/capabilities`).catch((error) => ({
+      available: false,
+      detail: error instanceof Error ? error.message : String(error),
+    })),
+    apiRequest<FilamentColorMapping[]>("/filament/color-mappings"),
   ]);
   if (result) dashboard.value = result;
   deviceCapabilities.value = capabilities;
+  cameraCapabilities.value = cameraCapabilityResult;
+  cameraStreamError.value = false;
+  filamentColorMappings.value = colorMappingResult;
+}
+
+function restartCameraStream() {
+  cameraStreamError.value = false;
+  cameraStreamToken.value = Date.now();
+}
+
+function openCameraLightbox() {
+  cameraLightboxOpen.value = true;
+}
+
+function closeCameraLightbox() {
+  cameraLightboxOpen.value = false;
+}
+
+function handleCameraStreamError() {
+  cameraStreamError.value = true;
+}
+
+function handleCameraStreamLoaded() {
+  cameraStreamError.value = false;
 }
 
 async function loadOverview() {
@@ -1447,16 +1532,18 @@ async function scanStorage() {
 
 async function loadAms() {
   if (!selectedPrinterId.value) return;
-  const [stateResult, overviewResult, slotResult, eventResult] = await Promise.all([
+  const [stateResult, overviewResult, slotResult, eventResult, colorMappingResult] = await Promise.all([
     apiRequest<Record<string, any> | null>(`/printers/${selectedPrinterId.value}/state`),
     apiRequest<AmsOverview>(`/printers/${selectedPrinterId.value}/ams/overview`),
     apiRequest<Record<string, any>[]>(`/printers/${selectedPrinterId.value}/ams/slots`),
     apiRequest<UnifiedEvent[]>(`/events?printer_id=${selectedPrinterId.value}&limit=50`),
+    apiRequest<FilamentColorMapping[]>("/filament/color-mappings"),
   ]);
   stateSnapshot.value = stateResult;
   amsOverview.value = overviewResult;
   amsSlots.value = slotResult;
   events.value = eventResult;
+  filamentColorMappings.value = colorMappingResult;
   for (const unit of overviewResult.units) {
     amsLabelDrafts[unit.ams_id] = unit.display_name || "";
     if (!unit.display_name) amsLabelEditing[unit.ams_id] = false;
@@ -1560,6 +1647,7 @@ async function loadInventory() {
   filamentInventorySummary.value = summaryResult;
   amsSlots.value = inventoryAmsResult.slots;
   inventoryAmsOverviews.value = inventoryAmsResult.overviews;
+  inventoryPrinterStates.value = inventoryAmsResult.states;
   spools.value = spoolResult.map((spool) => ({
     id: spool.legacy_spool_id || spool.id,
     display_name: spool.sku_label || `${t("table.spool")} ${spool.id}`,
@@ -1580,13 +1668,18 @@ async function loadInventory() {
   }
 }
 
-async function loadInventoryAmsGlobal(): Promise<{ slots: Record<string, any>[]; overviews: Record<string, AmsOverview> }> {
-  if (!printers.value.length) return { slots: [], overviews: {} };
+async function loadInventoryAmsGlobal(): Promise<{
+  slots: Record<string, any>[];
+  overviews: Record<string, AmsOverview>;
+  states: Record<string, Record<string, any> | null>;
+}> {
+  if (!printers.value.length) return { slots: [], overviews: {}, states: {} };
   const rows = await Promise.all(
     printers.value.map(async (printer) => {
-      const [slotResult, overviewResult] = await Promise.all([
+      const [slotResult, overviewResult, stateResult] = await Promise.all([
         apiRequest<Record<string, any>[]>(`/printers/${printer.id}/ams/slots`),
         apiRequest<AmsOverview>(`/printers/${printer.id}/ams/overview`),
+        apiRequest<Record<string, any> | null>(`/printers/${printer.id}/state`),
       ]);
       return {
         printer,
@@ -1597,12 +1690,14 @@ async function loadInventoryAmsGlobal(): Promise<{ slots: Record<string, any>[];
           printer_host: printer.host,
         })),
         overview: overviewResult,
+        state: stateResult,
       };
     }),
   );
   return {
     slots: rows.flatMap((row) => row.slots),
     overviews: Object.fromEntries(rows.map((row) => [String(row.printer.id), row.overview])),
+    states: Object.fromEntries(rows.map((row) => [String(row.printer.id), row.state])),
   };
 }
 
@@ -1616,8 +1711,10 @@ function openInventoryDialog(key: InventoryDialogKey, context: Record<string, an
 }
 
 function closeInventoryDialog() {
+  const previousKey = inventoryDialog.key;
   inventoryDialog.key = null;
   inventoryDialog.context = null;
+  if (previousKey === "sku") skuReviewSourceSpoolId.value = null;
 }
 
 function openFilamentBrandCreate() {
@@ -1816,12 +1913,15 @@ function filamentSkuPayload() {
     color_name: filamentSkuForm.color_name || null,
     color_hex: filamentSkuForm.color_value || null,
     nominal_weight_g: nominalWeight ?? 1000,
+    filament_diameter_mm: optionalNumber(filamentSkuForm.filament_diameter_mm) ?? 1.75,
+    tray_info_idx: filamentSkuForm.tray_info_idx || null,
     sealed_quantity: editingFilamentSkuId.value ? undefined : optionalNumber(filamentSkuForm.sealed_quantity) ?? 0,
     note: filamentSkuForm.note || null,
   };
 }
 
 function openFilamentSkuCreate() {
+  skuReviewSourceSpoolId.value = null;
   resetFilamentSkuForm();
   openInventoryDialog("sku");
 }
@@ -1844,8 +1944,9 @@ function resetFilamentSkuForm() {
   });
 }
 
-function editFilamentSku(sku: FilamentSku) {
+function editFilamentSku(sku: FilamentSku, options: { reviewSpoolId?: number | null } = {}) {
   editingFilamentSkuId.value = sku.id;
+  skuReviewSourceSpoolId.value = options.reviewSpoolId ?? null;
   Object.assign(filamentSkuForm, {
     brand_id: sku.brand_id ?? null,
     type_series_id: sku.type_series_id ?? sku.type_series_ids?.[0] ?? null,
@@ -1864,6 +1965,7 @@ function editFilamentSku(sku: FilamentSku) {
 }
 
 function cancelFilamentSkuEdit() {
+  skuReviewSourceSpoolId.value = null;
   resetFilamentSkuForm();
   closeInventoryDialog();
 }
@@ -1882,9 +1984,10 @@ async function saveFilamentSku() {
   if (!filamentSkuForm.type_series_id) return;
   await withLoading(async () => {
     const editingId = editingFilamentSkuId.value;
+    const reviewSpoolId = skuReviewSourceSpoolId.value;
     const previousSku = editingId ? filamentSkus.value.find((sku) => sku.id === editingId) : null;
     const targetSealedQuantity = Math.max(0, Math.round(optionalNumber(filamentSkuForm.sealed_quantity) ?? 0));
-    await apiRequest<FilamentSku>(editingId ? `/filament/skus/${editingId}` : "/filament/skus", {
+    const savedSku = await apiRequest<FilamentSku>(editingId ? `/filament/skus/${editingId}` : "/filament/skus", {
       method: editingId ? "PATCH" : "POST",
       body: JSON.stringify(filamentSkuPayload()),
     });
@@ -1897,10 +2000,18 @@ async function saveFilamentSku() {
         });
       }
     }
+    if (reviewSpoolId && savedSku?.id) {
+      await apiRequest<FilamentSpool>(`/filament/spools/${reviewSpoolId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ sku_id: savedSku.id }),
+      });
+      await apiRequest<FilamentSpool>(`/filament/spools/${reviewSpoolId}/confirm-sku`, { method: "POST" });
+    }
+    skuReviewSourceSpoolId.value = null;
     resetFilamentSkuForm();
     closeInventoryDialog();
     await loadInventory();
-    message.value = t(editingId ? "inventory.skuUpdated" : "inventory.skuCreated");
+    message.value = t(reviewSpoolId ? "inventory.skuConfirmed" : editingId ? "inventory.skuUpdated" : "inventory.skuCreated");
   });
 }
 
@@ -1966,10 +2077,72 @@ function openConfirmFilamentSpoolSku(spool: FilamentSpool | Record<string, any>)
 
 function editSkuFromConfirmDialog() {
   const spool = inventoryDialog.context;
+  const spoolId = numeric(spool?.id);
+  const reviewSpoolId = spoolId !== null ? Math.round(spoolId) : null;
   const sku = filamentSkus.value.find((item) => item.id === Number(spool?.sku_id));
-  if (!sku) return;
   inventoryPage.value = "skus";
-  editFilamentSku(sku);
+  if (sku) {
+    editFilamentSku(sku, { reviewSpoolId });
+    return;
+  }
+  prepareFilamentSkuCreateFromSpool(spool, reviewSpoolId);
+  openInventoryDialog("sku", spool ?? null);
+}
+
+function prepareFilamentSkuCreateFromSpool(spool: Record<string, any> | null | undefined, reviewSpoolId: number | null) {
+  resetFilamentSkuForm();
+  skuReviewSourceSpoolId.value = reviewSpoolId;
+  const raw = record(record(spool?.config).ams_raw);
+  const firstTypeSeries = arrayOfRecord(spool?.type_series)[0] || null;
+  const firstBrand = arrayOfRecord(spool?.brands)[0] || null;
+  const material = firstText(spool?.material, raw.tray_type, raw.filament_type, firstTypeSeries?.material_type, "PLA");
+  const series = firstText(spool?.series, raw.tray_sub_brands, raw.tray_info_idx, raw.filament_name, firstTypeSeries?.series_name);
+  const brandId = numeric(spool?.brand_id ?? firstBrand?.id ?? firstTypeSeries?.brand_id);
+  const typeSeriesId =
+    numeric(spool?.type_series_id ?? firstTypeSeries?.id) ??
+    (material && series ? findTypeSeriesId(material, series, brandId) : null);
+  const nominalWeight = numeric(
+    spool?.nominal_weight_g ??
+      spool?.initial_net_weight_g ??
+      raw.tray_weight_g ??
+      raw.tray_weight ??
+      raw.filament_weight_g ??
+      raw.filament_weight ??
+      raw.nominal_weight_g ??
+      raw.net_weight_g ??
+      raw.net_weight ??
+      raw.weight_g ??
+      raw.weight,
+  );
+  Object.assign(filamentSkuForm, {
+    brand_id: brandId,
+    type_series_id: typeSeriesId,
+    material: material || "PLA",
+    series,
+    color_name: firstText(
+      spool?.color_name,
+      raw.tray_color_name,
+      raw.color_name,
+      raw.filament_color_name,
+      raw.color_display_name,
+    ),
+    color_value: normalizeFilamentHex(firstText(spool?.color_hex, spool?.color_value, raw.tray_color, raw.color)) || "",
+    nominal_weight_g: nominalWeight ?? 1000,
+    empty_spool_weight_g: numeric(spool?.empty_spool_weight_g ?? firstTypeSeries?.empty_spool_weight_g),
+    filament_diameter_mm: 1.75,
+    tray_info_idx: firstText(raw.tray_info_idx),
+    sealed_quantity: 0,
+    note: firstText(spool?.note),
+  });
+}
+
+function firstText(...values: unknown[]): string {
+  for (const value of values) {
+    if (value === null || value === undefined) continue;
+    const text = String(value).trim();
+    if (text) return text;
+  }
+  return "";
 }
 
 function inventoryDialogSkuLabel(): string {
@@ -2098,6 +2271,40 @@ async function updateSelectedFilamentLocation() {
     closeInventoryDialog();
     await loadInventory();
     message.value = t("inventory.locationSaved");
+  });
+}
+
+async function updateFilamentSpoolStatus(spool: FilamentSpool | Record<string, any>, status: string) {
+  const spoolId = Number(spool.id);
+  if (!Number.isFinite(spoolId)) return;
+  const confirmed = window.confirm(t(`inventory.confirmStatus.${status}`, { id: spoolId }));
+  if (!confirmed) return;
+  await withLoading(async () => {
+    const updated = await apiRequest<FilamentSpool>(`/filament/spools/${spoolId}/status`, {
+      method: "POST",
+      body: JSON.stringify({ status }),
+    });
+    selectedFilamentSpoolId.value = updated.id;
+    closeInventoryDialog();
+    await loadInventory();
+    message.value = t(`inventory.statusUpdated.${status}`);
+  });
+}
+
+async function resolveFilamentUidConflict(spool: FilamentSpool | Record<string, any>, action: string) {
+  const spoolId = Number(spool.id);
+  if (!Number.isFinite(spoolId)) return;
+  const confirmed = window.confirm(t(`inventory.uidConflictConfirm.${action}`, { id: spoolId }));
+  if (!confirmed) return;
+  await withLoading(async () => {
+    const updated = await apiRequest<FilamentSpool>(`/filament/spools/${spoolId}/resolve-uid-conflict`, {
+      method: "POST",
+      body: JSON.stringify({ action }),
+    });
+    selectedFilamentSpoolId.value = updated.id;
+    closeInventoryDialog();
+    await loadInventory();
+    message.value = t(`inventory.uidConflictResolved.${action}`);
   });
 }
 
@@ -2972,6 +3179,42 @@ function filamentSpoolLocation(spool: FilamentSpool | Record<string, any> | null
   return spool.storage_location || spool.manual_location || "—";
 }
 
+function filamentSpoolLastLocation(spool: FilamentSpool | Record<string, any> | null | undefined): string {
+  if (!spool) return "—";
+  const current = filamentSpoolLocation(spool);
+  if (current !== "—") return current;
+  const last = record(spool.last_location || spool.config?.last_location);
+  if (last.ams_id || last.tray_id) {
+    return `AMS ${formatCell(last.ams_id)} / ${t("form.slotId")} ${formatCell(last.tray_id)}`;
+  }
+  return firstText(last.storage_location, spool.storage_location, spool.manual_location) || "—";
+}
+
+function filamentSpoolHistoryTime(spool: FilamentSpool | Record<string, any> | null | undefined): string {
+  if (!spool) return "—";
+  const value =
+    spool.status === "empty"
+      ? spool.empty_at || spool.config?.empty_at || spool.status_changed_at || spool.updated_at
+      : spool.archived_at || spool.config?.archived_at || spool.status_changed_at || spool.updated_at;
+  return formatCell(value);
+}
+
+function filamentSpoolStatusLabel(status: unknown): string {
+  if (status === "empty") return t("inventory.status.empty");
+  if (status === "archived") return t("inventory.status.archived");
+  return displayCell(status);
+}
+
+function filamentSpoolNeedsUidConflictResolution(spool: FilamentSpool | Record<string, any> | null | undefined): boolean {
+  return Boolean(spool?.config?.review_reason === "archived_uid_reappeared");
+}
+
+function filamentSkuReviewDescription(spool: FilamentSpool | Record<string, any> | null | undefined): string {
+  if (filamentSpoolNeedsUidConflictResolution(spool)) return t("inventory.uidConflictDescription");
+  if (spool?.config?.sku_review_reason === "ams_filament_change") return t("inventory.confirmSkuReplacementDescription");
+  return t("inventory.confirmSkuDescription");
+}
+
 function filamentWeight(value: unknown): string {
   const parsed = numeric(value);
   return parsed === null ? "—" : `${Math.round(parsed)} g`;
@@ -2981,6 +3224,12 @@ function filamentKg(value: unknown): string {
   const parsed = numeric(value);
   if (parsed === null) return "—";
   return `${(parsed / 1000).toFixed(parsed >= 10000 ? 1 : 2)} kg`;
+}
+
+function filamentInventoryKg(value: unknown): string {
+  const parsed = numeric(value);
+  if (parsed === null) return "—";
+  return `${(parsed / 1000).toFixed(2)} kg`;
 }
 
 function skuSealedWeight(sku: FilamentSku | Record<string, any>): number {
@@ -3042,7 +3291,7 @@ function inventorySortValue(table: string, row: unknown, key: string): unknown {
     if (key === "spool") return filamentSpoolLabel(item);
     if (key === "remaining") return filamentSpoolRemainingWeight(item) ?? numeric(item.last_ams_remain_percent);
     if (key === "location") return filamentSpoolCurrentPlace(item);
-    if (key === "status") return displayCell(item.status);
+    if (key === "status") return filamentSpoolStatusLabel(item.status);
   }
   if (table === "sealedStock" || table === "skus") {
     if (key === "id") return item.id;
@@ -3065,10 +3314,19 @@ function inventorySortValue(table: string, row: unknown, key: string): unknown {
   if (table === "openedUnused") {
     if (key === "id") return item.id;
     if (key === "spool") return filamentSpoolLabel(item);
-    if (key === "status") return displayCell(item.status);
+    if (key === "status") return filamentSpoolStatusLabel(item.status);
     if (key === "remaining") return filamentSpoolRemainingWeight(item) ?? numeric(item.last_ams_remain_percent);
     if (key === "location") return filamentSpoolLocation(item);
     if (key === "identity") return item.identity_key || item.official_spool_uid;
+  }
+  if (table === "history") {
+    if (key === "id") return item.id;
+    if (key === "spool") return filamentSpoolLabel(item);
+    if (key === "status") return filamentSpoolStatusLabel(item.status);
+    if (key === "location") return filamentSpoolLastLocation(item);
+    if (key === "remaining") return filamentSpoolRemainingWeight(item) ?? numeric(item.last_ams_remain_percent);
+    if (key === "time") return filamentSpoolHistoryTime(item);
+    if (key === "note") return item.note;
   }
   if (table === "brands") {
     if (key === "id") return item.id;
@@ -3183,6 +3441,7 @@ function filamentAmsRemainingLabel(slot: Record<string, any>, spool: FilamentSpo
 function filamentAmsState(slot: Record<string, any>, spool: FilamentSpool | null): string {
   if (slot.is_transitioning) return t("inventory.transitioning");
   if (!slot.filament_spool_id && slot.identity_source === "manual_required") return t("inventory.manualRequired");
+  if (isFilamentSpoolSkuReviewDeferred(spool)) return t("inventory.waitingRfidReview");
   if (isFilamentSpoolPendingConfirm(spool)) return t("inventory.pendingConfirm");
   if (spool) return t("inventory.bound");
   return t("inventory.unbound");
@@ -3190,6 +3449,78 @@ function filamentAmsState(slot: Record<string, any>, spool: FilamentSpool | null
 
 function isFilamentSpoolPendingConfirm(spool: FilamentSpool | Record<string, any> | null | undefined): boolean {
   return Boolean(spool && (spool.status === "unknown" || spool.config?.needs_sku_review));
+}
+
+function isFilamentSpoolSkuReviewDeferred(spool: FilamentSpool | Record<string, any> | null | undefined): boolean {
+  if (!isFilamentSpoolPendingConfirm(spool)) return false;
+  const slot = filamentSpoolCurrentAmsSlot(spool);
+  if (!slot) return false;
+  const noPayload = !amsSlotHasStableFilamentPayload(slot) && !spool?.sku_id;
+  if (!noPayload) return false;
+  return isAmsSlotRfidOrTransitioning(slot) || isPrinterPrintingOrPaused(slot.printer_id ?? spool?.current_printer_id);
+}
+
+function filamentSpoolCurrentAmsSlot(spool: FilamentSpool | Record<string, any> | null | undefined): Record<string, any> | null {
+  if (!spool) return null;
+  return (
+    amsSlots.value.find((slot) => Number(slot.filament_spool_id) === Number(spool.id)) ||
+    amsSlots.value.find(
+      (slot) =>
+        Number(slot.printer_id) === Number(spool.current_printer_id) &&
+        String(slot.ams_id) === String(spool.current_ams_id) &&
+        String(slot.tray_id) === String(spool.current_tray_id),
+    ) ||
+    null
+  );
+}
+
+function amsSlotHasStableFilamentPayload(slot: Record<string, any> | null | undefined): boolean {
+  if (!slot) return false;
+  const raw = record(slot.raw);
+  const directFields = [
+    slot.material,
+    slot.series,
+    slot.color,
+    slot.tray_color,
+    slot.color_name,
+    slot.tray_color_name,
+    raw.tray_type,
+    raw.filament_type,
+    raw.tray_sub_brands,
+    raw.tray_info_idx,
+    raw.tray_color,
+    raw.color,
+    raw.tray_color_name,
+    raw.color_name,
+    raw.filament_color_name,
+    raw.color_display_name,
+  ];
+  if (directFields.some((value) => String(value ?? "").trim())) return true;
+  const cols = Array.isArray(raw.cols) ? raw.cols : [];
+  return cols.some((value) => String(value ?? "").trim());
+}
+
+function isAmsSlotRfidOrTransitioning(slot: Record<string, any> | null | undefined): boolean {
+  if (!slot) return false;
+  if (slot.is_transitioning) return true;
+  const raw = record(slot.raw);
+  const state = String(slot.state_name || slot.tray_state_name || slot.slot_state || slot.state || raw.state || raw.tray_state || "")
+    .trim()
+    .toLowerCase();
+  return ["4", "5", "10", "17", "21", "25", "27", "rfid_reading", "reading", "filament_present"].includes(state) ||
+    state.includes("rfid") ||
+    state.includes("reading") ||
+    state.includes("transition");
+}
+
+function isPrinterPrintingOrPaused(printerId: unknown): boolean {
+  const id = numeric(printerId);
+  if (id === null) return false;
+  const state = inventoryPrinterStates.value[String(Math.round(id))] || {};
+  const gcodeState = String(state.gcode_state || record(state.payload).gcode_state || record(record(state.payload).print).gcode_state || "")
+    .trim()
+    .toUpperCase();
+  return ["RUNNING", "PAUSE", "PAUSED", "PREPARE", "SLICING", "M400_PAUSE"].includes(gcodeState);
 }
 
 function fanDisplayPercent(item: unknown): number | null {
@@ -3685,6 +4016,11 @@ function activeSlotDisplayLabel(slot: Record<string, any> | null | undefined) {
 function dashboardActiveAmsSlot(slots: Record<string, any>[], status: Record<string, any>) {
   const marked = slots.find((slot) => slot.is_active);
   if (marked) return marked;
+  const activeGlobalTray = firstSetBit(status.tray_hall_out_bits);
+  if (activeGlobalTray !== null) {
+    const activeByBit = slots.find((slot) => numeric(slot.global_tray_id) === activeGlobalTray);
+    if (activeByBit) return activeByBit;
+  }
   const trayNow = numeric(status.tray_now);
   if (trayNow === null || trayNow < 0 || trayNow >= 255) return undefined;
   return slots.find((slot) => {
@@ -3692,6 +4028,25 @@ function dashboardActiveAmsSlot(slots: Record<string, any>[], status: Record<str
     const tray = numeric(slot.tray_id);
     return globalTray === trayNow || tray === trayNow;
   });
+}
+
+function firstSetBit(value: unknown): number | null {
+  const mask = bitmaskNumber(value);
+  if (mask === null || mask <= 0) return null;
+  let bit = 0;
+  let cursor = mask;
+  while ((cursor & 1) === 0) {
+    bit += 1;
+    cursor = Math.floor(cursor / 2);
+  }
+  return bit;
+}
+
+function bitmaskNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  const parsed = Number.parseInt(String(value).trim(), 16);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function dashboardAmsActiveSlotLabel(slot: Record<string, any> | null | undefined, status: Record<string, any>) {
@@ -3741,7 +4096,12 @@ function amsHumidityLabel(unit: Record<string, any>) {
   return text === "--" ? "--" : `${text}%`;
 }
 
-function dashboardAmsUnitVisual(unit: Record<string, any>, slots: Record<string, any>[], index: number) {
+function dashboardAmsUnitVisual(
+  unit: Record<string, any>,
+  slots: Record<string, any>[],
+  index: number,
+  activeSlot?: Record<string, any> | null,
+) {
   const unitSlots = slots
     .filter((slot) => String(slot.ams_id) === String(unit.ams_id))
     .sort((left, right) => dashboardAmsSlotSortValue(left) - dashboardAmsSlotSortValue(right));
@@ -3755,7 +4115,7 @@ function dashboardAmsUnitVisual(unit: Record<string, any>, slots: Record<string,
       label: dashboardAmsSlotShortLabel(slot, unit, index, slotIndex),
       material: dashboardAmsSlotMaterial(slot),
       remain: dashboardAmsSlotRemain(slot),
-      active: slot.is_active === true,
+      active: slot.is_active === true || isSameDashboardAmsSlot(slot, activeSlot),
       loaded: isDashboardAmsLoaded(slot),
       style: { "--filament-color": filamentColor(slot.color || slot.tray_color) },
     })),
@@ -3763,7 +4123,17 @@ function dashboardAmsUnitVisual(unit: Record<string, any>, slots: Record<string,
 }
 
 function amsPageUnitVisual(unit: Record<string, any>, index: number) {
-  return dashboardAmsUnitVisual(unit, arrayOfRecord(unit.slots), index);
+  return dashboardAmsUnitVisual(unit, arrayOfRecord(unit.slots), index, record(unit.active_slot));
+}
+
+function isSameDashboardAmsSlot(slot: Record<string, any>, activeSlot?: Record<string, any> | null) {
+  if (!activeSlot || !Object.keys(activeSlot).length) return false;
+  if (slot.id !== undefined && activeSlot.id !== undefined && String(slot.id) === String(activeSlot.id)) return true;
+  if (String(slot.ams_id) !== String(activeSlot.ams_id)) return false;
+  const slotGlobalTray = numeric(slot.global_tray_id);
+  const activeGlobalTray = numeric(activeSlot.global_tray_id);
+  if (slotGlobalTray !== null && activeGlobalTray !== null) return slotGlobalTray === activeGlobalTray;
+  return String(slot.tray_id) === String(activeSlot.tray_id);
 }
 
 function dashboardAmsSlotSortValue(slot: Record<string, any>) {
@@ -3952,13 +4322,93 @@ function eventTypeLabel(item: UnifiedEvent | Record<string, any>) {
 
 function eventMessage(item: UnifiedEvent | Record<string, any>) {
   const data = record(item.data);
-  if (data.command) {
-    return t("events.commandReceived", { command: displayCell(data.command) });
+  const type = String(item.type || item.event_type || "");
+  if (type.startsWith("hms.")) return hmsEventMessage(item, data);
+  if (data.command || type.startsWith("printer.command.")) {
+    return t("events.commandReceived", { command: displayCell(data.command || type.replace("printer.command.", "")) });
   }
-  if (String(item.type || item.event_type || "") === "spool.location_changed") {
-    return t("events.spoolLocationUpdated");
+  if (type === "print.started") return t("events.printStarted", { file: eventPrintName(data) });
+  if (type === "print.paused") return t("events.printPaused", { file: eventPrintName(data) });
+  if (type === "print.resumed") return t("events.printResumed", { file: eventPrintName(data) });
+  if (type === "print.finished") return t("events.printFinished", { file: eventPrintName(data) });
+  if (type === "print.failed") return t("events.printFailed", { file: eventPrintName(data) });
+  if (type === "print.cancelled") return t("events.printCancelled", { file: eventPrintName(data) });
+  if (type === "printer.connection.restored") return t("events.connectionRestored");
+  if (type === "printer.connection.disconnected") return t("events.connectionDisconnected", { reason: displayCell(data.error) });
+  if (type === "ams.unit.updated") return t("events.amsUnitUpdated", { ams: displayCell(data.ams_id), type: displayCell(data.ams_type_name || data.module_type) });
+  if (type === "ams.slot.updated") {
+    return t("events.amsSlotUpdated", {
+      slot: eventAmsSlotLabel(data),
+      state: eventAmsSlotStateLabel(data.state),
+      material: displayCell(data.material),
+      remain: data.remain === null || data.remain === undefined ? "—" : `${data.remain}%`,
+    });
   }
+  if (type === "filament.spool.pending_confirmation") return t("events.filamentSkuReviewPending", { spool: displayCell(data.filament_spool_id), slot: eventAmsSlotLabel(data) });
+  if (type === "spool.discovered") return t("events.spoolDiscovered", { spool: displayCell(data.filament_spool_id), slot: eventAmsSlotLabel(data) });
+  if (type === "spool.unidentified") return t("events.spoolUnidentified", { slot: eventAmsSlotLabel(data) });
+  if (type === "slot.identity_fallback") return t("events.slotIdentityFallback", { slot: eventAmsSlotLabel(data) });
+  if (type === "spool.location_changed") return t("events.spoolLocationUpdated");
+  if (type === "loaded_to_ams") return t("events.inventoryLoadedToAms", { spool: displayCell(item.spool_id), slot: eventAmsSlotLabel(data) });
+  if (type === "unloaded_from_ams") return t("events.inventoryUnloadedFromAms", { spool: displayCell(item.spool_id), slot: eventAmsSlotLabel(data) });
+  if (type === "opened_from_stock") return t("events.inventoryOpenedFromStock", { spool: displayCell(item.spool_id) });
+  if (type === "sealed_stock_adjusted") return t("events.inventorySealedAdjusted");
+  if (type === "location_updated") return t("events.inventoryLocationUpdated", { spool: displayCell(item.spool_id) });
+  if (type === "weight_updated") return t("events.inventoryWeightUpdated", { spool: displayCell(item.spool_id) });
+  if (type === "needs_location") return t("events.inventoryNeedsLocation", { spool: displayCell(item.spool_id) });
+  if (type === "sku_confirmed") return t("events.inventorySkuConfirmed", { spool: displayCell(item.spool_id) });
+  if (type === "storage.scan" || type === "storage.scan.finished") return t("events.storageScanFinished");
+  if (type === "storage.scan_failed" || type === "storage.scan.failed") return t("events.storageScanFailed", { reason: displayCell(data.error || item.message) });
   return String(item.message || "");
+}
+
+function hmsEventMessage(item: UnifiedEvent | Record<string, any>, data: Record<string, any>) {
+  const shortCode = displayCell(data.short_code || data.code);
+  const detail = locale.value === "zh-CN" ? data.message_zh || data.message : data.message_en || data.message;
+  const active = item.active === false || String(item.type || item.event_type || "") === "hms.recovered" ? t("common.resolved") : t("common.unresolved");
+  return t("events.hmsSemantic", { code: shortCode, state: active, detail: displayCell(detail) });
+}
+
+function eventPrintName(data: Record<string, any>): string {
+  return displayCell(data.gcode_file || data.task_id || data.subtask_name);
+}
+
+function eventAmsSlotLabel(data: Record<string, any>): string {
+  const ams = displayCell(data.ams_id);
+  const tray = numeric(data.tray_id);
+  const slot = tray === null ? displayCell(data.tray_id) : `${Math.round(tray) + 1}`;
+  return `AMS ${ams} / ${t("table.tray")} ${slot}`;
+}
+
+function eventAmsSlotStateLabel(value: unknown): string {
+  const key = String(value ?? "").trim().toLowerCase();
+  if (!key) return "—";
+  const mapped = t(`amsSlotStates.${key}`);
+  if (mapped !== `amsSlotStates.${key}`) return mapped;
+  return displayCell(value);
+}
+
+function eventCurrentLabel(item: UnifiedEvent | Record<string, any>): string {
+  if (item.active === null || item.active === undefined) return "--";
+  return item.active ? t("common.unresolved") : t("common.resolved");
+}
+
+function openEventDetails(item: UnifiedEvent) {
+  selectedEvent.value = item;
+}
+
+function eventRawMessage(item: UnifiedEvent | Record<string, any> | null | undefined): string {
+  if (!item) return "—";
+  return String(item.message || "—");
+}
+
+function prettyJson(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "—";
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
 }
 
 function toggleAmsLabelEditor(unit: Record<string, any>) {
@@ -4242,7 +4692,7 @@ function filamentColor(value: unknown) {
         </div>
 
         <div class="dashboard-card-flow">
-          <section v-if="shouldShowDashboardCamera" class="panel">
+          <section class="panel">
             <div class="panel-header">
               <h3>{{ t("dashboard.thermalFans") }}</h3>
               <div class="widget-tools">
@@ -4268,83 +4718,6 @@ function filamentColor(value: unknown) {
                 <span>{{ fieldLabel(key) }}</span>
                 <div class="bar"><i :style="{ width: `${fanDisplayPercent(item)}%` }"></i></div>
                 <strong>{{ formatCell(fanDisplayPercent(item)) }}%</strong>
-              </div>
-            </div>
-          </section>
-
-          <section v-if="shouldShowDashboardAms" class="panel">
-            <div class="panel-header">
-              <h3>{{ t("dashboard.networkHardware") }}</h3>
-              <div class="widget-tools">
-                <Network :size="18" />
-                <button class="icon-button compact" type="button" :title="t('layout.collapse')" @click="toggleSectionCollapsed('dashboard.network')">
-                  <ChevronDown v-if="isSectionCollapsed('dashboard.network')" :size="15" />
-                  <ChevronUp v-else :size="15" />
-                </button>
-              </div>
-            </div>
-            <div v-show="!isSectionCollapsed('dashboard.network')" class="network-info-grid">
-              <div v-for="[key, value] in readableNetworkHardware" :key="key" class="network-info-item">
-                <span>{{ fieldLabel(key) }}</span>
-                <strong>{{ displayCell(value) }}</strong>
-              </div>
-              <div v-if="!readableNetworkHardware.length" class="empty">{{ t("common.empty") }}</div>
-            </div>
-          </section>
-
-          <section class="panel">
-            <div class="panel-header">
-              <h3>{{ t("dashboard.cameraStatus") }}</h3>
-              <div class="widget-tools">
-                <Camera :size="18" />
-                <button class="icon-button compact" type="button" :title="t('layout.collapse')" @click="toggleSectionCollapsed('dashboard.camera')">
-                  <ChevronDown v-if="isSectionCollapsed('dashboard.camera')" :size="15" />
-                  <ChevronUp v-else :size="15" />
-                </button>
-              </div>
-            </div>
-            <div v-show="!isSectionCollapsed('dashboard.camera')" class="camera-info-grid">
-              <div v-for="[key, value] in cameraStatusRows" :key="key" class="camera-info-item">
-                <span>{{ fieldLabel(key) }}</span>
-                <strong :class="statusTone(value)">{{ displayCell(value) }}</strong>
-              </div>
-              <div v-if="!cameraStatusRows.length" class="empty">{{ t("common.empty") }}</div>
-            </div>
-          </section>
-
-          <section class="panel">
-            <div class="panel-header">
-              <h3>{{ t("dashboard.detectionAndCoverage") }}</h3>
-              <div class="widget-tools">
-                <Eye :size="18" />
-                <button class="icon-button compact" type="button" :title="t('layout.collapse')" @click="toggleSectionCollapsed('dashboard.detectionCoverage')">
-                  <ChevronDown v-if="isSectionCollapsed('dashboard.detectionCoverage')" :size="15" />
-                  <ChevronUp v-else :size="15" />
-                </button>
-              </div>
-            </div>
-            <div v-show="!isSectionCollapsed('dashboard.detectionCoverage')" class="combined-status-sections">
-              <div>
-                <div class="section-label">{{ t("dashboard.detectionCapabilities") }}</div>
-                <div class="capability-grid">
-                  <div v-for="[key, value] in detectionRows" :key="key" class="capability-row">
-                    <span>{{ fieldLabel(key) }}</span>
-                    <strong :class="statusTone(value)">{{ boolLabel(value) }}</strong>
-                  </div>
-                  <div v-if="!detectionRows.length" class="empty">{{ t("common.empty") }}</div>
-                </div>
-              </div>
-              <div>
-                <div class="section-label">{{ t("dashboard.dataCoverage") }}</div>
-                <div class="coverage-list">
-                  <div v-for="item in coverageStatusRows" :key="item.key" class="coverage-row">
-                    <span>{{ fieldLabel(item.key) }}</span>
-                    <strong :class="{ on: item.received, off: !item.received }">
-                      {{ item.received ? t("common.received") : t("common.missing") }}
-                    </strong>
-                  </div>
-                  <div v-if="!coverageStatusRows.length" class="empty">{{ t("common.empty") }}</div>
-                </div>
               </div>
             </div>
           </section>
@@ -4394,33 +4767,141 @@ function filamentColor(value: unknown) {
             </div>
           </section>
 
-          <section class="panel">
+          <section class="panel dashboard-live-panel">
             <div class="panel-header">
-              <h3>{{ t("dashboard.hmsErrors") }}</h3>
+              <h3>{{ t("dashboard.liveCamera") }}</h3>
               <div class="widget-tools">
-                <ShieldAlert :size="18" />
-                <button class="icon-button compact" type="button" :title="t('layout.collapse')" @click="toggleSectionCollapsed('dashboard.hms')">
-                  <ChevronDown v-if="isSectionCollapsed('dashboard.hms')" :size="15" />
+                <Camera :size="18" />
+                <button class="icon-button compact" type="button" :title="t('layout.collapse')" @click="toggleSectionCollapsed('dashboard.liveCamera')">
+                  <ChevronDown v-if="isSectionCollapsed('dashboard.liveCamera')" :size="15" />
                   <ChevronUp v-else :size="15" />
                 </button>
               </div>
             </div>
-            <div v-show="!isSectionCollapsed('dashboard.hms')" class="table-wrap">
-              <table>
-                <thead>
-                  <tr><th>{{ t("table.code") }}</th><th>{{ t("table.severity") }}</th><th>{{ t("table.module") }}</th><th>{{ t("table.current") }}</th><th>{{ t("table.description") }}</th></tr>
-                </thead>
-                <tbody>
-                  <tr v-if="!hmsErrors.length"><td colspan="5" class="empty">{{ t("dashboard.noHmsErrors") }}</td></tr>
-                  <tr v-for="item in hmsErrors" :key="`${item.short_code}-${item.active}`" @click="openHmsDetails(item)">
-                    <td class="mono">{{ formatCell(item.short_code || item.code) }}</td>
-                    <td>{{ displayCell(item.severity_name) }}</td>
-                    <td>{{ formatCell(item.module_name) }}</td>
-                    <td>{{ item.active ? t("common.unresolved") : t("common.resolved") }}</td>
-                    <td>{{ hmsMessage(item) }}</td>
-                  </tr>
-                </tbody>
-              </table>
+            <div v-show="!isSectionCollapsed('dashboard.liveCamera')" class="camera-live-card">
+              <button class="camera-live-frame camera-live-trigger" type="button" :title="t('dashboard.openLiveCamera')" @click="openCameraLightbox">
+                <img
+                  v-if="cameraStreamSrc && !cameraStreamError && !cameraLightboxOpen"
+                  :src="cameraStreamSrc"
+                  :alt="t('dashboard.liveCamera')"
+                  @error="handleCameraStreamError"
+                  @load="handleCameraStreamLoaded"
+                />
+                <div v-else class="camera-live-placeholder">
+                  <Camera :size="28" />
+                  <strong>{{ cameraLivePlaceholder }}</strong>
+                  <span>{{ t("dashboard.cameraStreamForwarding") }}</span>
+                </div>
+              </button>
+              <div class="camera-live-footer">
+                <span>{{ t("dashboard.cameraStreamForwarding") }}</span>
+                <div class="camera-live-actions">
+                  <button class="icon-button compact" type="button" :title="t('dashboard.openLiveCamera')" @click="openCameraLightbox">
+                    <Eye :size="15" />
+                  </button>
+                  <button class="icon-button compact" type="button" :title="t('dashboard.restartCameraStream')" @click="restartCameraStream">
+                    <RefreshCw :size="15" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <h3>{{ t("dashboard.deviceDiagnostics") }}</h3>
+              <div class="widget-tools">
+                <Eye :size="18" />
+                <button class="icon-button compact" type="button" :title="t('layout.collapse')" @click="toggleSectionCollapsed('dashboard.detectionCoverage')">
+                  <ChevronDown v-if="isSectionCollapsed('dashboard.detectionCoverage')" :size="15" />
+                  <ChevronUp v-else :size="15" />
+                </button>
+              </div>
+            </div>
+            <div v-show="!isSectionCollapsed('dashboard.detectionCoverage')" class="combined-status-sections">
+              <div>
+                <div class="section-label">{{ t("dashboard.detectionCapabilities") }}</div>
+                <div class="capability-grid">
+                  <div v-for="[key, value] in detectionRows" :key="key" class="capability-row">
+                    <span>{{ fieldLabel(key) }}</span>
+                    <strong :class="statusTone(value)">{{ boolLabel(value) }}</strong>
+                  </div>
+                  <div v-if="!detectionRows.length" class="empty">{{ t("common.empty") }}</div>
+                </div>
+              </div>
+              <div>
+                <div class="section-label">{{ t("dashboard.dataCoverage") }}</div>
+                <div class="coverage-list">
+                  <div v-for="item in coverageStatusRows" :key="item.key" class="coverage-row">
+                    <span>{{ fieldLabel(item.key) }}</span>
+                    <strong :class="{ on: item.received, off: !item.received }">
+                      {{ item.received ? t("common.received") : t("common.missing") }}
+                    </strong>
+                  </div>
+                  <div v-if="!coverageStatusRows.length" class="empty">{{ t("common.empty") }}</div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <h3>{{ t("dashboard.networkHardware") }}</h3>
+              <div class="widget-tools">
+                <Network :size="18" />
+                <button class="icon-button compact" type="button" :title="t('layout.collapse')" @click="toggleSectionCollapsed('dashboard.network')">
+                  <ChevronDown v-if="isSectionCollapsed('dashboard.network')" :size="15" />
+                  <ChevronUp v-else :size="15" />
+                </button>
+              </div>
+            </div>
+            <div v-show="!isSectionCollapsed('dashboard.network')" class="combined-status-sections">
+              <div class="network-info-grid">
+                <div v-for="[key, value] in readableNetworkHardware" :key="key" class="network-info-item">
+                  <span>{{ fieldLabel(key) }}</span>
+                  <strong>{{ displayCell(value) }}</strong>
+                </div>
+                <div v-if="!readableNetworkHardware.length" class="empty">{{ t("common.empty") }}</div>
+              </div>
+              <div>
+                <div class="section-label">{{ t("dashboard.hmsErrors") }}</div>
+                <div class="dashboard-hms-list" :class="{ scrollable: dashboardHmsRows.length > 5 }">
+                  <button v-if="!dashboardHmsRows.length" class="dashboard-hms-empty" type="button" disabled>
+                    {{ t("dashboard.noHmsErrors") }}
+                  </button>
+                  <button
+                    v-for="(item, index) in dashboardHmsRows"
+                    :key="`${item.short_code || item.code}-${item.active}-${index}`"
+                    class="dashboard-hms-row"
+                    type="button"
+                    @click="openHmsDetails(item)"
+                  >
+                    <span class="mono">{{ formatCell(item.short_code || item.code) }}</span>
+                    <strong>{{ displayCell(item.severity_name) }}</strong>
+                    <em>{{ item.active !== false && item.actionable !== false ? t("common.unresolved") : t("common.resolved") }}</em>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <h3>{{ t("dashboard.cameraStatus") }}</h3>
+              <div class="widget-tools">
+                <Camera :size="18" />
+                <button class="icon-button compact" type="button" :title="t('layout.collapse')" @click="toggleSectionCollapsed('dashboard.camera')">
+                  <ChevronDown v-if="isSectionCollapsed('dashboard.camera')" :size="15" />
+                  <ChevronUp v-else :size="15" />
+                </button>
+              </div>
+            </div>
+            <div v-show="!isSectionCollapsed('dashboard.camera')" class="camera-info-grid camera-status-grid">
+              <div v-for="[key, value] in cameraStatusRows" :key="key" class="camera-info-item">
+                <span>{{ fieldLabel(key) }}</span>
+                <strong :class="statusTone(value)">{{ displayCell(value) }}</strong>
+              </div>
+              <div v-if="!cameraStatusRows.length" class="empty">{{ t("common.empty") }}</div>
             </div>
           </section>
         </div>
@@ -4436,15 +4917,16 @@ function filamentColor(value: unknown) {
           <div class="panel-header"><h3>{{ t("events.title") }}</h3><Bell :size="18" /></div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>{{ t("table.time") }}</th><th>{{ t("table.type") }}</th><th>{{ t("table.severity") }}</th><th>{{ t("table.current") }}</th><th>{{ t("table.message") }}</th></tr></thead>
+              <thead><tr><th>{{ t("table.time") }}</th><th>{{ t("table.type") }}</th><th>{{ t("table.severity") }}</th><th>{{ t("table.current") }}</th><th>{{ t("table.message") }}</th><th>{{ t("table.actions") }}</th></tr></thead>
               <tbody>
-                <tr v-if="!filteredEvents.length"><td colspan="5" class="empty">{{ t("common.empty") }}</td></tr>
+                <tr v-if="!filteredEvents.length"><td colspan="6" class="empty">{{ t("common.empty") }}</td></tr>
                 <tr v-for="item in filteredEvents" :key="`${item.source}-${item.id}`">
                   <td>{{ formatCell(item.created_at) }}</td>
                   <td>{{ eventTypeLabel(item) }}</td>
                   <td><span class="status-pill" :class="eventTone(item)"><span class="dot"></span>{{ displayCell(item.severity) }}</span></td>
-                  <td>{{ item.active === null || item.active === undefined ? "--" : item.active ? t("common.unresolved") : t("common.resolved") }}</td>
+                  <td>{{ eventCurrentLabel(item) }}</td>
                   <td>{{ eventMessage(item) }}</td>
+                  <td><button class="text-action compact" type="button" @click="openEventDetails(item)">{{ t("table.details") }}</button></td>
                 </tr>
               </tbody>
             </table>
@@ -4809,10 +5291,10 @@ function filamentColor(value: unknown) {
 
         <template v-if="inventoryPage === 'stock'">
         <div class="metric-grid small">
-          <div class="metric-card"><div class="metric-label">{{ t("inventory.totalStock") }}</div><div class="metric-value">{{ filamentKg(inventoryTotalWeightG) }}</div><div class="metric-foot">{{ inventoryTotalRolls }} {{ t("inventory.rolls") }}</div></div>
+          <div class="metric-card"><div class="metric-label">{{ t("inventory.totalStock") }}</div><div class="metric-value">{{ filamentInventoryKg(inventoryTotalWeightG) }}</div><div class="metric-foot">{{ inventoryTotalRolls }} {{ t("inventory.rolls") }}</div></div>
           <div class="metric-card"><div class="metric-label">{{ t("inventory.skus") }}</div><div class="metric-value">{{ filamentInventorySummary?.totals.sku_count || 0 }}</div></div>
-          <div class="metric-card"><div class="metric-label">{{ t("inventory.sealedStock") }}</div><div class="metric-value">{{ filamentKg(inventorySealedWeightG) }}</div><div class="metric-foot">{{ filamentInventorySummary?.totals.sealed_quantity || 0 }} {{ t("inventory.rolls") }}</div></div>
-          <div class="metric-card"><div class="metric-label">{{ t("inventory.openedStock") }}</div><div class="metric-value">{{ filamentKg(inventoryRealSpoolWeightG) }}</div><div class="metric-foot">{{ inventoryRealSpools.length }} {{ t("inventory.rolls") }}</div></div>
+          <div class="metric-card"><div class="metric-label">{{ t("inventory.sealedStock") }}</div><div class="metric-value">{{ filamentInventoryKg(inventorySealedWeightG) }}</div><div class="metric-foot">{{ filamentInventorySummary?.totals.sealed_quantity || 0 }} {{ t("inventory.rolls") }}</div></div>
+          <div class="metric-card"><div class="metric-label">{{ t("inventory.openedStock") }}</div><div class="metric-value">{{ filamentInventoryKg(inventoryRealSpoolWeightG) }}</div><div class="metric-foot">{{ inventoryRealSpools.length }} {{ t("inventory.rolls") }}</div></div>
           <div class="metric-card"><div class="metric-label">{{ t("inventory.amsLoaded") }}</div><div class="metric-value">{{ filamentInventorySummary?.totals.ams_spool_count || 0 }}</div></div>
           <button class="metric-card metric-button" type="button" @click="jumpToInventorySection('inventory-pending-confirm')"><div class="metric-label">{{ t("inventory.pendingConfirm") }}</div><div class="metric-value">{{ inventoryPendingConfirmCount }}</div><div class="metric-foot">{{ t("inventory.jumpToPending") }}</div></button>
         </div>
@@ -4823,15 +5305,15 @@ function filamentColor(value: unknown) {
             <button class="icon-button compact" type="button" :title="t('inventory.addSpool')" @click="openCreateFilamentSpoolDialog"><Plus :size="16" /></button>
           </div>
           <div class="inventory-visual-grid">
-            <div class="inventory-pie" :style="inventoryTypePieStyle"><span>{{ filamentKg(inventoryTotalWeightG) }}</span></div>
+            <div class="inventory-pie" :style="inventoryTypePieStyle"><span>{{ filamentInventoryKg(inventoryTotalWeightG) }}</span></div>
             <div class="inventory-breakdown">
               <div class="slot-section-title">
                 <h4>{{ t("inventory.typeBreakdown") }}</h4>
-                <span>{{ filamentKg(inventoryTotalWeightG) }}</span>
+                <span>{{ filamentInventoryKg(inventoryTotalWeightG) }}</span>
               </div>
               <div v-if="!inventoryTypeBreakdown.length" class="slot-empty-state">{{ t("inventory.noStockData") }}</div>
               <div v-for="(row, index) in inventoryTypeBreakdown" :key="row.key" class="inventory-breakdown-row">
-                <div class="inventory-breakdown-label"><strong>{{ row.label }}</strong><span>{{ filamentKg(row.grams) }} / {{ row.rolls }} {{ t("inventory.rolls") }}</span></div>
+                <div class="inventory-breakdown-label"><strong>{{ row.label }}</strong><span>{{ filamentInventoryKg(row.grams) }} / {{ row.rolls }} {{ t("inventory.rolls") }}</span></div>
                 <div class="inventory-bar"><span :style="{ width: `${Math.max(4, Math.round((row.grams / inventoryMaxTypeWeightG) * 100))}%`, background: inventoryChartColors[index % inventoryChartColors.length] }"></span></div>
               </div>
             </div>
@@ -4840,7 +5322,7 @@ function filamentColor(value: unknown) {
         <section id="inventory-ams-loaded" class="panel">
           <div class="panel-header"><h3>{{ t("inventory.amsLoaded") }}</h3><Boxes :size="18" /></div>
           <div class="table-wrap">
-            <table>
+            <table class="inventory-ams-table">
               <thead><tr>
                 <th><button class="sort-header" type="button" @click="toggleInventorySort('amsLoaded', 'printer')">{{ t("table.printer") }} <span>{{ inventorySortIndicator("amsLoaded", "printer") }}</span></button></th>
                 <th><button class="sort-header" type="button" @click="toggleInventorySort('amsLoaded', 'slot')">{{ t("ams.slots") }} <span>{{ inventorySortIndicator("amsLoaded", "slot") }}</span></button></th>
@@ -4851,15 +5333,16 @@ function filamentColor(value: unknown) {
               </tr></thead>
               <tbody>
                 <tr v-if="!sortedFilamentAmsRows.length"><td colspan="6" class="empty">{{ t("ams.noSlots") }}</td></tr>
-                <tr v-for="row in sortedFilamentAmsRows" :key="row.slot.id" :class="{ 'pending-row': row.spool && isFilamentSpoolPendingConfirm(row.spool) }">
+                <tr v-for="row in sortedFilamentAmsRows" :key="row.slot.id" :class="{ 'pending-row': row.spool && isFilamentSpoolPendingConfirm(row.spool) && !isFilamentSpoolSkuReviewDeferred(row.spool) }">
                   <td>{{ row.slot.printer_name || printerDisplayName(row.slot.printer_id) }}</td>
                   <td>{{ filamentAmsSlotLocationLabel(row.slot) }}</td>
                   <td><span class="swatch" :style="{ background: filamentColor(row.spool?.color_hex || row.spool?.color_value || row.slot.color || row.slot.tray_color) }"></span>{{ filamentAmsFilamentLabel(row.slot, row.spool) }}</td>
                   <td>{{ filamentAmsRemainingLabel(row.slot, row.spool) }}</td>
                   <td class="inventory-inline-action">
                     <span>{{ filamentAmsState(row.slot, row.spool) }}</span>
+                    <span v-if="row.spool && isFilamentSpoolSkuReviewDeferred(row.spool)" class="muted small-text">{{ t("inventory.waitingRfidReviewShort") }}</span>
                     <button
-                      v-if="row.spool && isFilamentSpoolPendingConfirm(row.spool)"
+                      v-else-if="row.spool && isFilamentSpoolPendingConfirm(row.spool)"
                       class="text-action compact"
                       type="button"
                       :title="t('inventory.confirmSkuTitle')"
@@ -4923,7 +5406,7 @@ function filamentColor(value: unknown) {
                 <tr v-for="spool in sortedFilamentOpenedUnusedSpools" :key="spool.id" :class="{ selected: selectedFilamentSpoolId === spool.id }">
                   <td>{{ spool.id }}</td>
                   <td><span class="swatch" :style="{ background: filamentColor(spool.color_hex || spool.color_value) }"></span>{{ filamentSpoolLabel(spool) }}</td>
-                  <td>{{ displayCell(spool.status) }}</td>
+                  <td>{{ filamentSpoolStatusLabel(spool.status) }}</td>
                   <td>{{ filamentSpoolRemainingLabel(spool) }}</td>
                   <td>{{ filamentSpoolLocation(spool) }}</td>
                   <td class="inventory-inline-action">
@@ -4954,7 +5437,7 @@ function filamentColor(value: unknown) {
                   <td><span class="swatch" :style="{ background: filamentColor(spool.color_hex || spool.color_value) }"></span>{{ filamentSpoolLabel(spool) }}</td>
                   <td>{{ filamentSpoolRemainingLabel(spool) }}</td>
                   <td>{{ filamentSpoolCurrentPlace(spool) }}</td>
-                  <td>{{ displayCell(spool.status) }}</td>
+                  <td>{{ filamentSpoolStatusLabel(spool.status) }}</td>
                   <td class="inventory-inline-action">
                     <button class="text-action compact" type="button" :title="t('inventory.confirmSkuTitle')" @click="openConfirmFilamentSpoolSku(spool)">{{ t("inventory.confirmSku") }}</button>
                     <button class="icon-button compact" type="button" :title="t('common.edit')" @click="openFilamentSpoolDialog(spool)"><PencilLine :size="15" /></button>
@@ -4983,6 +5466,54 @@ function filamentColor(value: unknown) {
                   <td class="mono">{{ formatCell(spool.official_spool_uid || spool.identity_key) }}</td>
                   <td class="inventory-inline-action">
                     <button class="icon-button compact" type="button" :title="t('common.edit')" @click="openFilamentSpoolDialog(spool)"><PencilLine :size="15" /></button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+        </template>
+
+        <template v-else-if="inventoryPage === 'history'">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h3>{{ t("inventory.historySpools") }}</h3>
+              <p class="panel-subtitle">{{ t("inventory.historySpoolsSubtitle") }}</p>
+            </div>
+            <Archive :size="18" />
+          </div>
+          <div class="toolbar filters sku-filter-toolbar">
+            <label class="search-field">
+              <Search :size="16" />
+              <input v-model="inventoryHistorySearch" :placeholder="t('inventory.searchHistorySpools')" />
+            </label>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('history', 'id')">{{ t("table.id") }} <span>{{ inventorySortIndicator("history", "id") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('history', 'spool')">{{ t("table.filament") }} <span>{{ inventorySortIndicator("history", "spool") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('history', 'status')">{{ t("table.status") }} <span>{{ inventorySortIndicator("history", "status") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('history', 'location')">{{ t("inventory.lastLocation") }} <span>{{ inventorySortIndicator("history", "location") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('history', 'remaining')">{{ t("inventory.remaining") }} <span>{{ inventorySortIndicator("history", "remaining") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('history', 'time')">{{ t("inventory.historyTime") }} <span>{{ inventorySortIndicator("history", "time") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('history', 'note')">{{ t("form.note") }} <span>{{ inventorySortIndicator("history", "note") }}</span></button></th>
+                <th>{{ t("table.actions") }}</th>
+              </tr></thead>
+              <tbody>
+                <tr v-if="!sortedHistoricalFilamentSpools.length"><td colspan="8" class="empty">{{ t("inventory.noHistorySpools") }}</td></tr>
+                <tr v-for="spool in sortedHistoricalFilamentSpools" :key="spool.id">
+                  <td>{{ spool.id }}</td>
+                  <td><span class="swatch" :style="{ background: filamentColor(spool.color_hex || spool.color_value) }"></span>{{ filamentSpoolLabel(spool) }}</td>
+                  <td>{{ filamentSpoolStatusLabel(spool.status) }}</td>
+                  <td>{{ filamentSpoolLastLocation(spool) }}</td>
+                  <td>{{ filamentSpoolRemainingLabel(spool) }}</td>
+                  <td>{{ filamentSpoolHistoryTime(spool) }}</td>
+                  <td>{{ formatCell(spool.note) }}</td>
+                  <td class="inventory-inline-action">
+                    <button class="icon-button compact" type="button" :title="t('common.edit')" @click="openFilamentSpoolDialog(spool)"><PencilLine :size="15" /></button>
+                    <button class="text-action compact" type="button" @click="updateFilamentSpoolStatus(spool, 'opened_in_storage')">{{ t("inventory.restoreOpened") }}</button>
                   </td>
                 </tr>
               </tbody>
@@ -5498,7 +6029,7 @@ function filamentColor(value: unknown) {
             <div class="network-info-item"><span>{{ t("debug.databaseSize") }}</span><strong>{{ formatBytes(systemInfo?.database_size_bytes || 0) }}</strong></div>
             <div class="network-info-item"><span>{{ t("debug.storageSize") }}</span><strong>{{ formatBytes(systemInfo?.storage_size_bytes || 0) }}</strong></div>
             <div class="network-info-item"><span>CPU</span><strong>{{ formatCell(systemInfo?.cpu_percent) }}%</strong></div>
-            <div class="network-info-item"><span>{{ t("debug.memory") }}</span><strong>{{ formatBytes(Number(systemInfo?.memory?.rss_bytes || 0)) }}</strong></div>
+            <div class="network-info-item"><span>{{ t("debug.memory") }}</span><strong>{{ formatBytes(Number(systemInfo?.memory?.project_rss_bytes || systemInfo?.memory?.rss_bytes || 0)) }}</strong></div>
             <div class="network-info-item"><span>{{ t("debug.configuredPrinters") }}</span><strong>{{ systemInfo?.configured_printers || 0 }}</strong></div>
             <div class="network-info-item"><span>{{ t("debug.onlinePrinters") }}</span><strong>{{ systemInfo?.online_printers || 0 }}</strong></div>
           </div>
@@ -5571,6 +6102,39 @@ function filamentColor(value: unknown) {
       </section>
     </main>
 
+    <div v-if="cameraLightboxOpen" class="modal-backdrop camera-lightbox-backdrop" @click.self="closeCameraLightbox">
+      <section class="modal-panel camera-lightbox-modal">
+        <div class="modal-header">
+          <div class="modal-title-stack">
+            <h3>{{ t("dashboard.liveCamera") }}</h3>
+            <p>{{ selectedPrinter?.name || t("dashboard.cameraStreamForwarding") }}</p>
+          </div>
+          <button class="icon-button" type="button" :title="t('common.close')" @click="closeCameraLightbox"><X :size="17" /></button>
+        </div>
+        <div class="camera-lightbox-frame">
+          <img
+            v-if="cameraStreamSrc && !cameraStreamError"
+            :src="cameraStreamSrc"
+            :alt="t('dashboard.liveCamera')"
+            @error="handleCameraStreamError"
+            @load="handleCameraStreamLoaded"
+          />
+          <div v-else class="camera-live-placeholder">
+            <Camera :size="34" />
+            <strong>{{ cameraLivePlaceholder }}</strong>
+            <span>{{ t("dashboard.cameraStreamForwarding") }}</span>
+          </div>
+        </div>
+        <div class="camera-lightbox-footer">
+          <span>{{ t("dashboard.cameraStreamForwarding") }}</span>
+          <div class="camera-live-actions">
+            <button class="secondary" type="button" @click="restartCameraStream"><RefreshCw :size="16" />{{ t("dashboard.restartCameraStream") }}</button>
+            <button class="primary" type="button" @click="closeCameraLightbox">{{ t("common.close") }}</button>
+          </div>
+        </div>
+      </section>
+    </div>
+
     <div v-if="inventoryDialog.key" class="modal-backdrop" @click.self="closeInventoryDialog">
       <section v-if="inventoryDialog.key === 'brand'" class="modal-panel">
         <div class="modal-header">
@@ -5616,6 +6180,8 @@ function filamentColor(value: unknown) {
           <label class="field-label"><span>{{ t("inventory.officialColorName") }}</span><input v-model="filamentSkuForm.color_name" :placeholder="t('inventory.officialColorName')" /></label>
           <label class="field-label"><span>{{ t("inventory.hexValue") }}</span><input v-model="filamentSkuForm.color_value" :placeholder="t('inventory.hexValue')" /></label>
           <label class="field-label"><span>{{ t("inventory.nominalWeight") }}</span><input v-model.number="filamentSkuForm.nominal_weight_g" type="number" min="0" :placeholder="t('inventory.nominalWeight')" /></label>
+          <label class="field-label"><span>{{ t("inventory.diameter") }}</span><input v-model.number="filamentSkuForm.filament_diameter_mm" type="number" min="0.1" step="0.01" :placeholder="t('inventory.diameter')" /></label>
+          <label class="field-label"><span>{{ t("inventory.trayInfoIdx") }}</span><input v-model="filamentSkuForm.tray_info_idx" :placeholder="t('inventory.trayInfoIdx')" /></label>
           <label class="field-label"><span>{{ t("form.sealedQty") }}</span><input v-model.number="filamentSkuForm.sealed_quantity" type="number" min="0" :placeholder="t('form.sealedQty')" /></label>
           <label class="field-label"><span>{{ t("form.note") }}</span><input v-model="filamentSkuForm.note" :placeholder="t('form.note')" /></label>
           <div class="modal-actions">
@@ -5696,11 +6262,37 @@ function filamentColor(value: unknown) {
           <div class="metric-card"><div class="metric-label">{{ t("table.spool") }}</div><div class="metric-value compact-value">{{ filamentSpoolLabel(selectedFilamentSpool) }}</div></div>
           <div class="metric-card"><div class="metric-label">{{ t("inventory.remaining") }}</div><div class="metric-value compact-value">{{ filamentWeight(filamentSpoolRemainingWeight(selectedFilamentSpool)) }}</div><div class="metric-foot">{{ filamentRemainPercent(selectedFilamentSpool) }}</div></div>
           <div class="metric-card"><div class="metric-label">{{ t("table.location") }}</div><div class="metric-value compact-value">{{ filamentSpoolLocation(selectedFilamentSpool) }}</div></div>
-          <div class="metric-card"><div class="metric-label">{{ t("table.status") }}</div><div class="metric-value compact-value">{{ displayCell(selectedFilamentSpool.status) }}</div></div>
+          <div class="metric-card"><div class="metric-label">{{ t("table.status") }}</div><div class="metric-value compact-value">{{ filamentSpoolStatusLabel(selectedFilamentSpool.status) }}</div></div>
         </div>
         <div v-if="isFilamentSpoolPendingConfirm(selectedFilamentSpool)" class="modal-note">
           <span>{{ t("inventory.confirmSkuTitle") }}</span>
           <button class="secondary" type="button" @click="openConfirmFilamentSpoolSku(selectedFilamentSpool)">{{ t("inventory.confirmSku") }}</button>
+        </div>
+        <div class="spool-status-actions">
+          <button
+            v-if="selectedFilamentSpool.status !== 'empty' && selectedFilamentSpool.status !== 'archived'"
+            class="secondary"
+            type="button"
+            @click="updateFilamentSpoolStatus(selectedFilamentSpool, 'empty')"
+          >
+            {{ t("inventory.markEmpty") }}
+          </button>
+          <button
+            v-if="selectedFilamentSpool.status !== 'archived'"
+            class="secondary"
+            type="button"
+            @click="updateFilamentSpoolStatus(selectedFilamentSpool, 'archived')"
+          >
+            {{ t("inventory.archiveSpool") }}
+          </button>
+          <button
+            v-if="selectedFilamentSpool.status === 'empty' || selectedFilamentSpool.status === 'archived'"
+            class="primary"
+            type="button"
+            @click="updateFilamentSpoolStatus(selectedFilamentSpool, 'opened_in_storage')"
+          >
+            <CheckCircle2 :size="17" />{{ t("inventory.restoreOpened") }}
+          </button>
         </div>
         <div class="spool-dialog-forms">
           <form class="modal-subform" @submit.prevent="adjustSelectedFilamentQuantity">
@@ -5740,10 +6332,41 @@ function filamentColor(value: unknown) {
           <dt>{{ t("inventory.identity") }}</dt><dd class="mono">{{ formatCell(inventoryDialog.context?.official_spool_uid || inventoryDialog.context?.identity_key) }}</dd>
           <dt>{{ t("inventory.remaining") }}</dt><dd>{{ filamentSpoolRemainingLabel(inventoryDialog.context) }}</dd>
         </dl>
-        <div class="modal-note">{{ t("inventory.confirmSkuDescription") }}</div>
-        <div class="modal-actions">
+        <div class="modal-note">{{ filamentSkuReviewDescription(inventoryDialog.context) }}</div>
+        <div v-if="inventoryDialog.context && filamentSpoolNeedsUidConflictResolution(inventoryDialog.context)" class="modal-actions">
+          <button class="secondary" type="button" @click="resolveFilamentUidConflict(inventoryDialog.context, 'restore_old')">{{ t("inventory.restoreHistoricalSpool") }}</button>
+          <button class="secondary" type="button" @click="resolveFilamentUidConflict(inventoryDialog.context, 'create_new')">{{ t("inventory.createNewSpool") }}</button>
+          <button class="secondary" type="button" @click="resolveFilamentUidConflict(inventoryDialog.context, 'ignore')">{{ t("inventory.ignoreRecognition") }}</button>
+        </div>
+        <div v-else class="modal-actions">
           <button class="secondary" type="button" @click="editSkuFromConfirmDialog">{{ t("inventory.editSku") }}</button>
           <button class="primary" type="button" @click="inventoryDialog.context && confirmFilamentSpoolSku(inventoryDialog.context)"><CheckCircle2 :size="17" />{{ t("inventory.confirmSku") }}</button>
+        </div>
+      </section>
+    </div>
+
+    <div v-if="selectedEvent" class="modal-backdrop" @click.self="selectedEvent = null">
+      <section class="modal-panel event-detail-modal">
+        <div class="modal-header">
+          <div class="modal-title-stack">
+            <h3>{{ t("events.details") }} · {{ eventTypeLabel(selectedEvent) }}</h3>
+            <p>{{ formatCell(selectedEvent.created_at) }}</p>
+          </div>
+          <button class="icon-button" type="button" :title="t('common.close')" @click="selectedEvent = null"><X :size="17" /></button>
+        </div>
+        <dl class="kv compact">
+          <dt>{{ t("table.type") }}</dt><dd>{{ eventTypeLabel(selectedEvent) }}</dd>
+          <dt>{{ t("table.severity") }}</dt><dd>{{ displayCell(selectedEvent.severity) }}</dd>
+          <dt>{{ t("table.current") }}</dt><dd>{{ eventCurrentLabel(selectedEvent) }}</dd>
+          <dt>{{ t("table.message") }}</dt><dd>{{ eventMessage(selectedEvent) }}</dd>
+          <dt>{{ t("events.rawMessage") }}</dt><dd>{{ eventRawMessage(selectedEvent) }}</dd>
+          <dt>{{ t("table.printer") }}</dt><dd>{{ printerDisplayName(selectedEvent.printer_id) }}</dd>
+          <dt>{{ t("table.spool") }}</dt><dd>{{ formatCell(selectedEvent.spool_id) }}</dd>
+          <dt>{{ t("events.source") }}</dt><dd>{{ displayCell(selectedEvent.source) }}</dd>
+        </dl>
+        <div class="event-raw-block">
+          <h4>{{ t("events.rawData") }}</h4>
+          <pre>{{ prettyJson(selectedEvent.data) }}</pre>
         </div>
       </section>
     </div>

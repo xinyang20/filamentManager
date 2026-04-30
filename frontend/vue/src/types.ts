@@ -40,6 +40,16 @@ export interface DeviceCapabilities {
   evidence: Record<string, any>;
 }
 
+export interface PrinterCameraCapabilities {
+  available: boolean;
+  stream_path?: string | null;
+  source?: string | null;
+  ports?: Record<string, boolean>;
+  liveview_enabled?: boolean | null;
+  rtsp_advertised?: boolean;
+  detail?: string | null;
+}
+
 export interface AmsOverviewSummary {
   ams_count: number;
   slot_count: number;
@@ -461,6 +471,10 @@ export interface FilamentSpool {
   current_tray_id?: string | null;
   manual_location?: string | null;
   storage_location?: string | null;
+  last_location?: Record<string, any> | null;
+  status_changed_at?: string | null;
+  empty_at?: string | null;
+  archived_at?: string | null;
   manual_quantity_protected: boolean;
   last_weighed_g?: number | null;
   last_ams_remain_percent?: number | null;
@@ -507,6 +521,9 @@ export interface FilamentInventorySummary {
   opened_spools: Record<string, any>[];
   ams_spools: Record<string, any>[];
   needs_location_spools: Record<string, any>[];
+  empty_spools?: Record<string, any>[];
+  archived_spools?: Record<string, any>[];
+  history_spools?: Record<string, any>[];
 }
 
 export interface DiscoveryCandidate {

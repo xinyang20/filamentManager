@@ -1,41 +1,56 @@
 # FilamentManager
 
-FilamentManager 是一个面向个人 3D 打印耗材管理的本地系统。第一阶段聚焦于 Bambu Lab 打印机的局域网 MQTT 状态读取、AMS 槽位快照、耗材身份识别、库存建档、槽位绑定和事件记录。
+FilamentManager 是一个面向个人 3D 打印工作流的本地打印机运维与耗材管理系统。项目以 Bambu Lab 局域网模式为主要场景，读取本地 MQTT 与设备状态，将打印监控、AMS 状态、耗材库存、打印记录、维护提醒和调试导入导出整合在一个本地应用中。
 
-当前版本包含：
+系统默认不依赖外部云库存服务，运行数据存储在本地 SQLite 数据库中。打印机 IP、序列号、access code 等敏感配置由用户在本地填写和维护。
 
-- FastAPI 后端服务
-- SQLite 本地数据库
-- Bambu Lab 本地 MQTT 客户端封装
-- 基于 `8883/tcp` 和 `990/tcp` 的局域网候选设备扫描
-- AMS 槽位与耗材身份解析
-- 打印状态机与事件去重
-- Gradio 开发期前端
-- Vue3 release 前端
-- 合成 MQTT payload 测试
+## 主要功能
 
-Vue3 前端已提供只读数据大屏、历史趋势、只读存储、AMS/库存和调试工作台。不集成外部库存系统。
+- 打印机监控：查看打印状态、进度、温度、风扇、网络、HMS 告警、设备能力和局域网实时画面。
+- AMS 管理：展示多 AMS / AMS HT 槽位、当前进料槽位、湿度温度、RFID 识别结果和槽位历史。
+- 耗材管理：维护品牌、类型/系列、SKU、未开封库存、开封料卷、历史料卷、颜色映射和料卷位置。
+- 自动识别：根据 AMS 上报的官方 UID、材料、系列、颜色和余量，自动关联或创建耗材记录，并处理换料过渡与历史 UID 冲突。
+- 库存分析：统计总库存、未开封库存、开封库存、AMS 中料卷和各材料重量占比。
+- 打印日志：根据设备状态推导打印开始、完成、取消、失败等记录。
+- 延迟摄影与存储：读取打印机媒体目录，展示和下载本地可访问的延迟摄影文件。
+- 维护与通知：提供本地维护提醒、事件记录、Webhook / ntfy 等通知配置。
+- 调试与迁移：提供原始 MQTT、事件、系统信息、支持包、数据导出和 JSON 备份导入。
 
 ## 目录结构
 
 ```text
 .
-├── backend/           # FastAPI 后端，使用 uv 管理 Python 项目
+├── backend/             # FastAPI 后端，负责 API、数据库、MQTT、业务服务
 ├── frontend/
-│   ├── gradio/        # 开发期 Gradio UI
-│   └── vue/           # Vue3 release 前端
-├── test/              # 单元测试、解析测试、集成测试和合成 payload fixture
-└── .docs/             # 项目开发文档和本地人工参考文档
+│   ├── vue/             # Vue 3 主前端
+│   └── gradio/          # 早期开发/调试用 Gradio 前端
+├── test/                # 后端测试、解析测试和合成设备 payload
+├── .docs/               # 设计计划、本地说明和开发参考文档
+└── filament_manager.db  # 本地 SQLite 数据库，已被 .gitignore 忽略
 ```
+
+更细的代码目录说明见：
+
+- [backend/README.md](backend/README.md)
+- [frontend/README.md](frontend/README.md)
 
 ## 环境要求
 
 - Python 3.11+
 - `uv`
+- Node.js 20+（推荐）
+- `pnpm`
+- 一台已启用局域网访问的 Bambu Lab 打印机
 
-本项目的 Python 工作流统一使用 `uv`。不要直接使用系统 Python 或 `pip` 管理项目环境。
+本项目约定：
 
-## 启动后端
+- Python 相关命令统一使用 `uv`。
+- Node 相关命令统一使用 `pnpm`。
+- 不要将真实 access code、序列号、本地数据库或私有路径提交到仓库。
+
+## 启动教程
+
+### 1. 启动后端
 
 在仓库根目录运行：
 
@@ -48,43 +63,16 @@ uv run --project backend uvicorn filament_manager.main:app --reload --host 127.0
 - API 文档：`http://127.0.0.1:8000/docs`
 - 健康检查：`http://127.0.0.1:8000/api/health`
 
-默认数据库为当前工作目录下的 `filament_manager.db`。如果从仓库根目录启动，数据库会生成在根目录；如果从 `backend/` 目录启动，数据库会生成在 `backend/` 目录。
-
-如需指定数据库路径：
+默认数据库路径为启动目录下的 `filament_manager.db`。如果希望固定数据库位置，可使用环境变量：
 
 ```bash
-FILAMENT_MANAGER_DATABASE_URL=sqlite:///./backend/filament_manager.db \
+FILAMENT_MANAGER_DATABASE_URL=sqlite:///./filament_manager.db \
 uv run --project backend uvicorn filament_manager.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-## 启动 Gradio 开发前端
+### 2. 启动 Vue 前端
 
-先保持后端服务运行，然后在仓库根目录运行：
-
-```bash
-FILAMENT_MANAGER_API_URL=http://127.0.0.1:8000/api \
-uv run --project backend python frontend/gradio/app.py
-```
-
-默认访问地址：
-
-```text
-http://127.0.0.1:7860
-```
-
-Gradio 页面包含：
-
-- 打印机配置
-- 局域网候选设备扫描，并预填候选设备的主机、名称和序列号
-- 连接、断开、手动 `pushall`
-- 打印状态与最近事件
-- AMS 槽位状态
-- 库存料卷创建与槽位绑定
-- 原始 MQTT payload 与调试事件查看
-
-## 启动 Vue3 前端
-
-先保持后端服务运行，然后在仓库根目录运行：
+保持后端运行，然后在另一个终端执行：
 
 ```bash
 cd frontend/vue
@@ -98,65 +86,98 @@ pnpm dev
 http://127.0.0.1:5173
 ```
 
-Vue 前端默认通过 Vite proxy 访问 `http://127.0.0.1:8000/api`。如需指定 API 根地址：
+Vue 前端默认通过 Vite proxy 访问 `http://127.0.0.1:8000/api`。如需显式指定 API 地址：
 
 ```bash
 VITE_FILAMENT_MANAGER_API_URL=http://127.0.0.1:8000/api pnpm dev
 ```
 
-## 配置打印机
+### 3. 配置打印机
 
-系统不会内置任何打印机地址、序列号或 access code。需要在 Gradio UI 或 REST API 中手动填写：
+进入前端后，在“打印机配置”中添加打印机：
 
-- `host`
-- `port`
-- `serial`
-- `access_code`
+- 名称
+- IP / Host
+- MQTT 端口，Bambu Lab 局域网模式常见为 `8883`
+- 序列号
+- access code
 - TLS 相关选项
 
-保存配置后才能连接打印机 MQTT。Bambu Lab 局域网 MQTT 常用端口为 `8883`，但真实连接信息必须由用户显式输入。
+保存后可连接 MQTT，系统会开始接收状态、AMS、打印日志和事件数据。局域网扫描只用于发现候选设备，仍需要用户确认并填写 access code。
 
-也可以在 Gradio 的打印机配置页点击“扫描局域网设备”。系统会扫描当前局域网内的 `8883/tcp` 和 `990/tcp`，只保留两个特征端口同时开放、且 SSDP 返回了预期 Bambu 设备类型和基础信息的设备。可获取的信息包括设备名、型号、序列号、连接模式、绑定状态和固件版本。扫描阶段不需要 access code；扫描结果只作为候选配置，仍需用户确认并填写 access code 后保存。
+## 耗材与 AMS 规则
 
-## 运行测试
+- SKU 去重以 `brand_id + type_series_id + color_name + color_hex + nominal_weight_g + filament_diameter_mm + tray_info_idx` 为准；未开封数量和备注不参与去重。
+- 创建或修改 SKU 命中重复时，后端返回 `409 duplicate_filament_sku`，前端会提示编辑已有 SKU 或调整库存数量。
+- 料卷状态包括 `opened_in_storage`、`loaded_in_ams`、`needs_location`、`empty`、`archived` 和 `unknown`。
+- `empty` 与 `archived` 料卷保留历史记录，但不计入当前库存重量；可在“已归档/已用尽”视图中检索、查看和恢复。
+- AMS 在打印中换料时会等待材料、颜色、UID 等信息稳定后再更新库存，避免过渡帧创建错误料卷。
+- 如果 AMS 再次读到已用尽或已归档料卷的官方 UID，系统会进入待确认流程，由用户选择恢复旧料卷、创建新料卷或忽略本次识别。
+
+## 设备大屏说明
+
+- “设备大屏”将任务、温度、网络、硬件、HMS 告警和维护信息集中展示。
+- HMS / 错误列表归入“网络、硬件与告警”模块：未解决记录全部显示，已解决或无影响记录只展示最近少量记录。
+- 实时监控弹窗只转发局域网实时画面，不存储视频；弹窗按 16:9 等比例放大，并在小屏下自动限制尺寸。
+
+### 4. 可选：启动 Gradio 调试前端
+
+Gradio 页面主要用于早期开发和接口调试。后端运行后执行：
+
+```bash
+FILAMENT_MANAGER_API_URL=http://127.0.0.1:8000/api \
+uv run --project backend python frontend/gradio/app.py
+```
+
+默认地址：
+
+```text
+http://127.0.0.1:7860
+```
+
+## 测试与构建
+
+运行后端测试：
 
 ```bash
 uv run --project backend --extra dev pytest
 ```
 
-测试覆盖：
+构建前端：
 
-- `tray_uuid` 优先识别
-- `tag_uid` 兜底识别
-- 无法识别耗材时要求手动绑定
-- `remain=-1` 过渡状态处理
-- 打印状态机事件去重
-- `stop SUCCESS` 后 `FAILED` 识别为用户取消
-- `access_code` API 响应脱敏
-- 手动库存料卷绑定 AMS 槽位
+```bash
+cd frontend/vue
+pnpm build
+```
 
-## 常用 API
+## 贡献方法
 
-- `GET /api/health`
-- `GET /api/discovery/scan`
-- `GET /api/printers`
-- `POST /api/printers`
-- `POST /api/printers/{printer_id}/connect`
-- `POST /api/printers/{printer_id}/disconnect`
-- `POST /api/printers/{printer_id}/refresh`
-- `GET /api/printers/{printer_id}/state`
-- `GET /api/printers/{printer_id}/ams/slots`
-- `GET /api/spools`
-- `POST /api/spools`
-- `POST /api/ams/slots/{slot_id}/bind`
-- `GET /api/debug/raw-mqtt`
-- `GET /api/debug/events`
+欢迎围绕本地打印机运维、耗材管理、AMS 识别和 Bambu Lab 局域网工作流改进项目。建议按以下方式贡献：
 
-完整接口可查看 FastAPI 自动文档：`http://127.0.0.1:8000/docs`。
+1. 先阅读根目录 README、`backend/README.md` 和 `frontend/README.md`。
+2. 新功能尽量先写清楚使用场景，避免直接引入复杂抽象。
+3. 后端改动需要补充或更新 pytest 测试。
+4. 前端改动需要确保 `pnpm build` 通过。
+5. 不提交本地数据库、备份、日志、真实打印机凭据或私有路径。
+6. 提交信息建议使用项目已有风格，例如 `feat(filament): ...`、`fix(ams): ...`。
 
-## 安全说明
+推荐在提交前执行：
+
+```bash
+uv run --project backend --extra dev pytest
+cd frontend/vue
+pnpm build
+```
+
+## 安全与隐私
 
 - `access_code` 在 API 响应中默认脱敏。
-- 代码中不应写入真实打印机 IP、序列号、access code 或本地私有路径。
-- `.docs/local_bambu_test_environment.md` 仅供人工参考，不应被运行时代码、测试代码或工具脚本读取。
-- SQLite 数据库和本地虚拟环境已通过 `.gitignore` 忽略。
+- 支持包导出会尽量脱敏，但仍建议在公开分享前人工检查。
+- SQLite 数据库、运行时备份和本地虚拟环境已通过 `.gitignore` 忽略。
+- 本项目只应在可信本地网络中运行，不建议直接暴露到公网。
+
+## 开源协议
+
+本项目采用 GNU Affero General Public License v3.0 only（`AGPL-3.0-only`）开源，完整协议见 [LICENSE](LICENSE)。
+
+简单来说，你可以使用、学习、修改和分发本项目；如果你分发修改版，或将修改版作为网络服务提供给用户，也需要按 AGPL-3.0-only 的要求提供相应源码并保留版权与许可证声明。

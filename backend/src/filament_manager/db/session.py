@@ -69,6 +69,18 @@ def _apply_sqlite_additive_migrations(db_engine: Engine) -> None:
             with db_engine.begin() as connection:
                 connection.execute(text("ALTER TABLE ams_slots ADD COLUMN filament_spool_id INTEGER"))
 
+    if "filament_skus" in table_names:
+        existing_sku_columns = {column["name"] for column in inspector.get_columns("filament_skus")}
+        sku_additions = {
+            "filament_diameter_mm": "FLOAT NOT NULL DEFAULT 1.75",
+            "tray_info_idx": "VARCHAR(120)",
+        }
+        missing_sku_columns = [(name, ddl) for name, ddl in sku_additions.items() if name not in existing_sku_columns]
+        if missing_sku_columns:
+            with db_engine.begin() as connection:
+                for name, ddl in missing_sku_columns:
+                    connection.execute(text(f"ALTER TABLE filament_skus ADD COLUMN {name} {ddl}"))
+
     if "device_status_snapshots" not in table_names:
         return
     existing = {column["name"] for column in inspector.get_columns("device_status_snapshots")}
