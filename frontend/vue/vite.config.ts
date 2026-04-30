@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 import vue from "@vitejs/plugin-vue";
 
 export default defineConfig({
@@ -11,5 +11,12 @@ export default defineConfig({
         changeOrigin: true,
       },
     },
+  },
+  test: {
+    environment: "jsdom",
+    setupFiles: ["src/test/setup.ts"],
+    include: ["src/**/*.spec.ts"],
+    exclude: ["e2e/**", "node_modules/**", "dist/**"],
+    css: true,
   },
 });

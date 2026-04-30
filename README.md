@@ -22,8 +22,7 @@ FilamentManager 是一个面向个人 3D 打印工作流的本地打印机运维
 .
 ├── backend/             # FastAPI 后端，负责 API、数据库、MQTT、业务服务
 ├── frontend/
-│   ├── vue/             # Vue 3 主前端
-│   └── gradio/          # 早期开发/调试用 Gradio 前端
+│   └── vue/             # Vue 3 主前端
 ├── test/                # 后端测试、解析测试和合成设备 payload
 ├── .docs/               # 设计计划、本地说明和开发参考文档
 └── filament_manager.db  # 本地 SQLite 数据库，已被 .gitignore 忽略
@@ -119,21 +118,6 @@ VITE_FILAMENT_MANAGER_API_URL=http://127.0.0.1:8000/api pnpm dev
 - “设备大屏”将任务、温度、网络、硬件、HMS 告警和维护信息集中展示。
 - HMS / 错误列表归入“网络、硬件与告警”模块：未解决记录全部显示，已解决或无影响记录只展示最近少量记录。
 - 实时监控弹窗只转发局域网实时画面，不存储视频；弹窗按 16:9 等比例放大，并在小屏下自动限制尺寸。
-
-### 4. 可选：启动 Gradio 调试前端
-
-Gradio 页面主要用于早期开发和接口调试。后端运行后执行：
-
-```bash
-FILAMENT_MANAGER_API_URL=http://127.0.0.1:8000/api \
-uv run --project backend python frontend/gradio/app.py
-```
-
-默认地址：
-
-```text
-http://127.0.0.1:7860
-```
 
 ## 测试与构建
 

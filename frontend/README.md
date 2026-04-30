@@ -1,22 +1,21 @@
 # FilamentManager Frontend
 
-前端目录包含主 Vue 应用和早期 Gradio 调试界面。
+前端目录包含主 Vue 应用。
 
 ## 目录说明
 
 ```text
 frontend/
-├── vue/                 # 当前主要前端，基于 Vue 3 + Vite
-│   ├── src/
-│   │   ├── App.vue      # 主应用页面和主要交互
-│   │   ├── api.ts       # API 地址、请求封装和基础格式化工具
-│   │   ├── types.ts     # 前端使用的数据类型
-│   │   ├── i18n.json    # 简体中文 / English 文案
-│   │   ├── styles.css   # 全局样式
-│   │   └── components/  # 复用组件，例如选择框和指标图表
-│   ├── package.json     # 前端脚本和依赖
-│   └── vite.config.ts   # Vite 配置
-└── gradio/              # 开发期调试 UI，保留用于快速验证后端接口
+└── vue/                 # 当前主要前端，基于 Vue 3 + Vite
+    ├── src/
+    │   ├── App.vue      # 主应用页面和主要交互
+    │   ├── api.ts       # API 地址、请求封装和基础格式化工具
+    │   ├── types.ts     # 前端使用的数据类型
+    │   ├── i18n.json    # 简体中文 / English 文案
+    │   ├── styles.css   # 全局样式
+    │   └── components/  # 复用组件，例如选择框和指标图表
+    ├── package.json     # 前端脚本和依赖
+    └── vite.config.ts   # Vite 配置
 ```
 
 ## Vue 主界面
@@ -67,15 +66,6 @@ VITE_FILAMENT_MANAGER_API_URL=http://127.0.0.1:8000/api pnpm dev
 ```bash
 cd frontend/vue
 pnpm build
-```
-
-## Gradio 调试界面
-
-Gradio 不是主要产品界面，只用于开发和排查接口问题：
-
-```bash
-FILAMENT_MANAGER_API_URL=http://127.0.0.1:8000/api \
-uv run --project backend python frontend/gradio/app.py
 ```
 
 ## 维护约定

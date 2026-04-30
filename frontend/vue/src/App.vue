@@ -1,46 +1,59 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
-import {
-  Activity,
-  AlertCircle,
-  Archive,
-  Bell,
-  Boxes,
-  Camera,
-  ChevronDown,
-  ChevronUp,
-  CheckCircle2,
-  ClipboardList,
-  Database,
-  Download,
-  Eye,
-  EyeOff,
-  FileDown,
-  Gauge,
-  HardDrive,
-  LineChart,
-  Loader2,
-  Network,
-  PencilLine,
-  Plus,
-  PlugZap,
-  RefreshCw,
-  Save,
-  Search,
-  Send,
-  Settings,
-  ShieldAlert,
-  Star,
-  Thermometer,
-  Trash2,
-  Unplug,
-  Upload,
-  Wrench,
-  X,
-} from "lucide-vue-next";
+import { RefreshCw } from "lucide-vue-next";
 import { API_BASE, apiRequest, formatCell, formatUnit, numeric } from "./api";
+import {
+  slotChangeKinds,
+  type ExperimentalFeatureKey,
+  type InventoryDialogKey,
+  type InventoryPageKey,
+  type SortDirection,
+  type ViewKey,
+} from "./app/navigation";
+import {
+  filamentAmsRemainingLabel,
+  filamentAmsRemainingWeight,
+  filamentColor,
+  filamentInventoryKg,
+  filamentKg,
+  filamentRemainPercent,
+  filamentSpoolRemainingLabel,
+  filamentSpoolRemainingWeight,
+  filamentWeight,
+  normalizeFilamentHex,
+  remainLabel,
+  remainPercent,
+} from "./app/filamentMetrics";
+import {
+  isFilamentManagementView,
+  isTransientCollapsedSection as isTransientCollapsedSectionForView,
+  isViewEnabled as isFeatureViewEnabled,
+  loadExperimentalFeatureSettings,
+  loadOverviewControls,
+  loadSectionLayouts,
+  defaultSectionCollapsed as defaultSectionCollapsedForView,
+  resolveInitialInventoryPage,
+  resolveInitialView as resolveStoredInitialView,
+  saveExperimentalFeatureSettings as persistExperimentalFeatureSettings,
+  saveSectionLayouts as persistSectionLayouts,
+  type SectionLayouts,
+} from "./app/preferences";
+import AppSidebar from "./components/AppSidebar.vue";
 import AppSelect from "./components/AppSelect.vue";
-import MetricChart from "./components/MetricChart.vue";
+import OverviewPage from "./views/OverviewPage.vue";
+import DashboardPage from "./views/DashboardPage.vue";
+import EventsPage from "./views/EventsPage.vue";
+import PrintLogPage from "./views/PrintLogPage.vue";
+import MetricsPage from "./views/MetricsPage.vue";
+import StoragePage from "./views/StoragePage.vue";
+import AmsPage from "./views/AmsPage.vue";
+import InventoryPage from "./views/InventoryPage.vue";
+import MaintenancePage from "./views/MaintenancePage.vue";
+import NotificationsPage from "./views/NotificationsPage.vue";
+import PrintersPage from "./views/PrintersPage.vue";
+import DebugPage from "./views/DebugPage.vue";
+import AppModals from "./views/AppModals.vue";
+import type { AppViewContext } from "./app/viewContext";
 import translations from "./i18n.json";
 import type {
   AmsOverview,
@@ -79,75 +92,13 @@ import type {
   UnifiedEvent,
 } from "./types";
 
-const viewKeys = [
-  "overview",
-  "dashboard",
-  "events",
-  "metrics",
-  "printLog",
-  "storage",
-  "ams",
-  "inventory",
-  "maintenance",
-  "notifications",
-  "printers",
-  "debug",
-] as const;
-type ViewKey = (typeof viewKeys)[number];
-type InventoryPageKey = "stock" | "history" | "brands" | "types" | "skus" | "colors";
 type Locale = keyof typeof translations;
-type NavGroupKey = "monitoring" | "assets" | "system";
-type SortDirection = "asc" | "desc";
-type InventoryDialogKey =
-  | "brand"
-  | "typeSeries"
-  | "sku"
-  | "colorMapping"
-  | "spoolCreate"
-  | "spoolDetail"
-  | "stockAdjust"
-  | "skuConfirm";
 
 const storedView = window.localStorage.getItem("filamentManager.activeView");
 
-const navItems = [
-  { key: "overview", labelKey: "nav.overview", icon: Activity, group: "monitoring" },
-  { key: "dashboard", labelKey: "nav.dashboard", icon: Gauge, group: "monitoring" },
-  { key: "events", labelKey: "nav.events", icon: Bell, group: "monitoring" },
-  { key: "metrics", labelKey: "nav.metrics", icon: LineChart, group: "monitoring" },
-  { key: "printLog", labelKey: "nav.printLog", icon: ClipboardList, group: "monitoring" },
-  { key: "maintenance", labelKey: "nav.maintenance", icon: Wrench, group: "monitoring" },
-  { key: "ams", labelKey: "nav.ams", icon: Boxes, group: "assets" },
-  { key: "inventory", labelKey: "nav.inventory", icon: Archive, group: "assets" },
-  { key: "storage", labelKey: "nav.storage", icon: HardDrive, group: "assets" },
-  { key: "notifications", labelKey: "nav.notifications", icon: Bell, group: "system" },
-  { key: "printers", labelKey: "nav.printers", icon: Settings, group: "system" },
-  { key: "debug", labelKey: "nav.debug", icon: Database, group: "system" },
-] as const;
-
-const navGroups: { key: NavGroupKey; labelKey: string }[] = [
-  { key: "monitoring", labelKey: "navGroup.monitoring" },
-  { key: "assets", labelKey: "navGroup.assets" },
-  { key: "system", labelKey: "navGroup.system" },
-];
-const slotChangeKinds = ["material", "remain", "rfid", "calibration"] as const;
-const experimentalFeatureDefaults = {
-  timelapse: false,
-  maintenance: false,
-  printLog: false,
-  notifications: false,
-};
-type ExperimentalFeatureKey = keyof typeof experimentalFeatureDefaults;
-const experimentalFeatureViews: Partial<Record<ViewKey, ExperimentalFeatureKey>> = {
-  storage: "timelapse",
-  maintenance: "maintenance",
-  printLog: "printLog",
-  notifications: "notifications",
-};
-
 const locale = ref<Locale>("zh-CN");
 const experimentalFeatures = reactive<Record<ExperimentalFeatureKey, boolean>>(loadExperimentalFeatureSettings());
-const activeView = ref<ViewKey>(resolveInitialView(storedView));
+const activeView = ref<ViewKey>(resolveStoredInitialView(storedView, isViewEnabled));
 const inventoryPage = ref<InventoryPageKey>(resolveInitialInventoryPage(storedView));
 const printers = ref<Printer[]>([]);
 const selectedPrinterId = ref<number | null>(null);
@@ -248,7 +199,7 @@ const storageResult = ref<Record<string, any> | null>(null);
 const realtimeDisconnected = ref(false);
 const activeLoadingCount = ref(0);
 const loading = computed(() => activeLoadingCount.value > 0);
-const sectionLayouts = ref<Record<string, Record<string, { hidden?: boolean; collapsed?: boolean; order?: number }>>>(loadSectionLayouts());
+const sectionLayouts = ref<SectionLayouts>(loadSectionLayouts());
 const transientCollapsedSections = ref<Record<string, boolean>>({});
 let eventSource: EventSource | null = null;
 let pollingTimer: number | null = null;
@@ -2648,79 +2599,16 @@ function apiBaseForSse() {
   return (import.meta.env.VITE_FILAMENT_MANAGER_API_URL as string | undefined)?.replace(/\/$/, "") || "/api";
 }
 
-function loadExperimentalFeatureSettings(): Record<ExperimentalFeatureKey, boolean> {
-  try {
-    const stored = JSON.parse(window.localStorage.getItem("filamentManager.experimentalFeatures") || "{}");
-    return {
-      timelapse: stored.timelapse === true,
-      maintenance: stored.maintenance === true,
-      printLog: stored.printLog === true,
-      notifications: stored.notifications === true,
-    };
-  } catch {
-    return { ...experimentalFeatureDefaults };
-  }
-}
-
-function loadOverviewControls() {
-  try {
-    const stored = JSON.parse(window.localStorage.getItem("filamentManager.overviewControls") || "{}");
-    return {
-      search: String(stored.search || ""),
-      filter: String(stored.filter || "all"),
-      sort: String(stored.sort || "attention"),
-      density: String(stored.density || "standard"),
-    };
-  } catch {
-    return { search: "", filter: "all", sort: "attention", density: "standard" };
-  }
-}
-
 function saveExperimentalFeatureSettings() {
-  window.localStorage.setItem("filamentManager.experimentalFeatures", JSON.stringify(experimentalFeatures));
-}
-
-function resolveInitialView(view: string | null) {
-  if (view === "filamentBrands" || view === "filamentSkus" || view === "filamentSpools") return "inventory";
-  if (!viewKeys.includes(view as ViewKey)) return "overview";
-  const next = view as ViewKey;
-  return isViewEnabled(next) ? next : "overview";
-}
-
-function resolveInitialInventoryPage(view: string | null): InventoryPageKey {
-  if (view === "filamentBrands") return "brands";
-  if (view === "filamentSkus") return "skus";
-  if (view === "filamentSpools") return "stock";
-  const stored = window.localStorage.getItem("filamentManager.inventoryPage");
-  if (stored === "stock" || stored === "brands" || stored === "types" || stored === "skus" || stored === "colors") return stored;
-  return "stock";
-}
-
-function isFilamentManagementView(view: ViewKey) {
-  return view === "inventory";
+  persistExperimentalFeatureSettings(experimentalFeatures);
 }
 
 function isViewEnabled(view: ViewKey) {
-  const feature = experimentalFeatureViews[view];
-  return !feature || experimentalFeatures[feature] === true;
-}
-
-function loadSectionLayouts() {
-  try {
-    const layouts = JSON.parse(window.localStorage.getItem("filamentManager.sectionLayouts") || "{}");
-    if (layouts?.ams) {
-      layouts.ams = Object.fromEntries(
-        Object.entries(layouts.ams).filter(([key]) => !key.startsWith("ams.unit.")),
-      );
-    }
-    return layouts;
-  } catch {
-    return {};
-  }
+  return isFeatureViewEnabled(view, experimentalFeatures);
 }
 
 function saveSectionLayouts() {
-  window.localStorage.setItem("filamentManager.sectionLayouts", JSON.stringify(sectionLayouts.value));
+  persistSectionLayouts(sectionLayouts.value);
 }
 
 function sectionConfig(id: string) {
@@ -2761,11 +2649,11 @@ function toggleSectionCollapsed(id: string) {
 }
 
 function defaultSectionCollapsed(id: string) {
-  return activeView.value === "ams" && id.startsWith("ams.unit.");
+  return defaultSectionCollapsedForView(activeView.value, id);
 }
 
 function isTransientCollapsedSection(id: string) {
-  return activeView.value === "ams" && id.startsWith("ams.unit.");
+  return isTransientCollapsedSectionForView(activeView.value, id);
 }
 
 function resetTransientCollapsedSections(view: ViewKey = activeView.value) {
@@ -2802,10 +2690,6 @@ function t(key: string, vars: Record<string, string | number> = {}) {
 
 function navLabel(key: string) {
   return t(`nav.${key}`);
-}
-
-function navItemsByGroup(group: NavGroupKey) {
-  return navItems.filter((item) => item.group === group && isViewEnabled(item.key));
 }
 
 function summarySnapshot(item: DashboardSummaryItem): Record<string, any> {
@@ -2940,16 +2824,6 @@ function displayCell(value: unknown): string {
   if (typeof value === "boolean") return boolLabel(value);
   if (typeof value === "string") return valueLabel(value);
   return formatCell(value);
-}
-
-function normalizeFilamentHex(value: unknown): string | null {
-  const text = String(value || "")
-    .trim()
-    .replace(/^#/, "")
-    .replace(/[\s_-]/g, "")
-    .toUpperCase();
-  const compact = text.length === 8 ? text.slice(0, 6) : text;
-  return /^[0-9A-F]{6}$/.test(compact) ? compact : null;
 }
 
 function normalizeFilamentColorContext(context: Record<string, any> | null | undefined) {
@@ -3215,23 +3089,6 @@ function filamentSkuReviewDescription(spool: FilamentSpool | Record<string, any>
   return t("inventory.confirmSkuDescription");
 }
 
-function filamentWeight(value: unknown): string {
-  const parsed = numeric(value);
-  return parsed === null ? "—" : `${Math.round(parsed)} g`;
-}
-
-function filamentKg(value: unknown): string {
-  const parsed = numeric(value);
-  if (parsed === null) return "—";
-  return `${(parsed / 1000).toFixed(parsed >= 10000 ? 1 : 2)} kg`;
-}
-
-function filamentInventoryKg(value: unknown): string {
-  const parsed = numeric(value);
-  if (parsed === null) return "—";
-  return `${(parsed / 1000).toFixed(2)} kg`;
-}
-
 function skuSealedWeight(sku: FilamentSku | Record<string, any>): number {
   return Number(sku.sealed_quantity || 0) * (numeric(sku.nominal_weight_g) || 0);
 }
@@ -3379,63 +3236,6 @@ function compareInventoryValues(left: unknown, right: unknown): number {
   const rightNumber = typeof right === "number" ? right : null;
   if (leftNumber !== null && rightNumber !== null) return leftNumber - rightNumber;
   return pinyinCollator.compare(String(left), String(right));
-}
-
-function filamentRemainPercent(spool: FilamentSpool | Record<string, any> | null | undefined): string {
-  if (!spool) return "—";
-  if (spool.last_ams_remain_percent !== null && spool.last_ams_remain_percent !== undefined) {
-    return `${spool.last_ams_remain_percent}%`;
-  }
-  const remaining = numeric(spool.actual_weight_g ?? spool.current_remaining_g);
-  const initial = numeric(spool.nominal_weight_g ?? spool.initial_net_weight_g);
-  if (remaining === null || initial === null || initial <= 0) return "—";
-  return `${Math.round((remaining / initial) * 100)}%`;
-}
-
-function filamentSpoolRemainingWeight(spool: FilamentSpool | Record<string, any> | null | undefined): number | null {
-  if (!spool) return null;
-  const measured = numeric(spool.actual_weight_g ?? spool.current_remaining_g);
-  if (measured !== null && measured >= 0) return measured;
-  const remain = numeric(spool.last_ams_remain_percent);
-  const nominal = numeric(spool.nominal_weight_g ?? spool.initial_net_weight_g);
-  if (remain === null || remain < 0 || nominal === null || nominal <= 0) return null;
-  return (nominal * remain) / 100;
-}
-
-function filamentSpoolRemainingLabel(spool: FilamentSpool | Record<string, any> | null | undefined): string {
-  const percent = filamentRemainPercent(spool);
-  const weight = filamentSpoolRemainingWeight(spool);
-  if (weight === null) return percent;
-  return `${percent} / ${Math.round(weight)} g`;
-}
-
-function filamentAmsRemainingWeight(slot: Record<string, any>, spool: FilamentSpool | Record<string, any> | null | undefined): number | null {
-  const reported = [
-    slot.remaining_weight_g,
-    slot.remain_weight_g,
-    slot.remain_g,
-    slot.tray_remaining_weight_g,
-    slot.raw?.remaining_weight_g,
-    slot.raw?.remain_weight_g,
-    slot.raw?.remain_g,
-    slot.raw?.tray_remaining_weight_g,
-    slot.raw?.remaining_weight,
-    slot.raw?.remain_weight,
-    slot.raw?.tray_remaining_weight,
-  ].map((value) => numeric(value)).find((value) => value !== null && value >= 0);
-  if (reported !== undefined) return reported;
-  const remain = numeric(slot.remain);
-  const nominal = numeric(spool?.nominal_weight_g ?? spool?.initial_net_weight_g);
-  if (remain === null || remain < 0 || nominal === null || nominal <= 0) return null;
-  return (nominal * remain) / 100;
-}
-
-function filamentAmsRemainingLabel(slot: Record<string, any>, spool: FilamentSpool | Record<string, any> | null | undefined): string {
-  const remain = numeric(slot.remain);
-  const percent = remain !== null && remain >= 0 ? `${Math.round(remain)}%` : "—";
-  const weight = filamentAmsRemainingWeight(slot, spool);
-  if (weight === null) return percent;
-  return `${percent} / ${Math.round(weight)} g`;
 }
 
 function filamentAmsState(slot: Record<string, any>, spool: FilamentSpool | null): string {
@@ -3715,7 +3515,7 @@ function cameraRows(value: Record<string, any>, optionValue: Record<string, any>
       const item = value[key];
       return item !== null && item !== undefined && item !== "" && typeof item !== "object";
     })
-    .map((key) => [key, value[key]] as [string, unknown]);
+    .map((key) => [key, key === "rtsp_url" ? Boolean(value[key]) : value[key]] as [string, unknown]);
 }
 
 function networkHardwareRows(networkValue: Record<string, any>, hardwareValue: Record<string, any>) {
@@ -4180,18 +3980,6 @@ function dashboardAmsEnvironmentLabel(unit: Record<string, any>) {
   return parts.join(" / ");
 }
 
-function remainPercent(value: unknown) {
-  const parsed = numeric(value);
-  if (parsed === null || parsed < 0) return 0;
-  return percent(parsed);
-}
-
-function remainLabel(value: unknown) {
-  const parsed = numeric(value);
-  if (parsed === null || parsed < 0) return "--";
-  return `${Math.round(parsed)}%`;
-}
-
 function unitLabel(value: unknown) {
   if (value === null || value === undefined || value === "") return "";
   return formatUnit(value);
@@ -4463,43 +4251,357 @@ function slotHistoryValue(sample: AmsSlotHistorySample, kind: string) {
   return `K ${softCell(sample.k)} / ${softCell(sample.cali_idx)}`;
 }
 
-function filamentColor(value: unknown) {
-  const hex = normalizeFilamentHex(value);
-  return hex ? `#${hex}` : "#d7dce2";
-}
+const viewContext = reactive<AppViewContext>({
+  accessCodeRevealLoading,
+  accessCodeVisible,
+  activeDerivedStatuses,
+  activeSlotDisplayLabel,
+  activeView,
+  adjustSelectedFilamentQuantity,
+  amsHumidityLabel,
+  amsLabelDrafts,
+  amsLabelEditing,
+  amsOverview,
+  amsPageUnitVisual,
+  amsSectionKey,
+  amsSensorChartItems,
+  amsSensorRange,
+  amsSensorRangeOptions,
+  amsStats,
+  amsTitle,
+  amsTone,
+  applyPrintLogFilters,
+  boolLabel,
+  camera,
+  cameraLightboxOpen,
+  cameraLivePlaceholder,
+  cameraStatusRows,
+  cameraStreamError,
+  cameraStreamSrc,
+  canRequestFullRefresh,
+  cancelFilamentSkuEdit,
+  changePrintLogPage,
+  changeStoragePage,
+  checkboxChecked,
+  clearAmsLabel,
+  closeCameraLightbox,
+  closeInventoryDialog,
+  colorNeedsMapping,
+  confirmFilamentSpoolSku,
+  connectPrinter,
+  coverage,
+  coverageStatusRows,
+  createFilamentSpool,
+  dashboard,
+  dashboardAmsSummaryRows,
+  dashboardAmsUnitRows,
+  dashboardHmsRows,
+  dashboardPrintStageLabel,
+  dashboardPrintStateLabel,
+  dashboardProgress,
+  dashboardRemainingTimeMetric,
+  dashboardTaskTitle,
+  deleteFilamentBrand,
+  deleteFilamentColorMapping,
+  deleteFilamentSku,
+  deleteFilamentTypeSeries,
+  deleteNotificationRule,
+  deleteNotificationTarget,
+  deletePrinterConfig,
+  derivedStatusTone,
+  detectionRows,
+  disconnectPrinter,
+  discovery,
+  displayCell,
+  downloadExport,
+  downloadSupportBundle,
+  editFilamentBrand,
+  editFilamentColorMapping,
+  editFilamentSku,
+  editFilamentTypeSeries,
+  editNotificationRule,
+  editNotificationTarget,
+  editSkuFromConfirmDialog,
+  editingFilamentBrandId,
+  editingFilamentColorMappingId,
+  editingFilamentSkuId,
+  editingFilamentTypeSeriesId,
+  error,
+  eventActiveOptions,
+  eventCurrentLabel,
+  eventFilters,
+  eventMessage,
+  eventRawMessage,
+  eventSeverityOptions,
+  eventTone,
+  eventTypeLabel,
+  events,
+  experimentalFeatureItems,
+  experimentalFeatures,
+  exportOptions,
+  exportSectionItems,
+  fanDisplayPercent,
+  fanRows,
+  fans,
+  fieldLabel,
+  filamentAmsFilamentLabel,
+  filamentAmsRemainingLabel,
+  filamentAmsSlotLocationLabel,
+  filamentAmsState,
+  filamentBrandDisplay,
+  filamentBrandForm,
+  filamentColor,
+  filamentColorDisplay,
+  filamentColorMappingForm,
+  filamentColorMappingTypeSeriesOptions,
+  filamentInventoryKg,
+  filamentInventorySummary,
+  filamentRemainPercent,
+  filamentRequiredBrandOptions,
+  filamentSkuColorStateOptions,
+  filamentSkuFilterBrandOptions,
+  filamentSkuFilterTypeSeriesOptions,
+  filamentSkuFilters,
+  filamentSkuForm,
+  filamentSkuLabel,
+  filamentSkuReviewDescription,
+  filamentSkuWeightOptions,
+  filamentSpoolBrandOptions,
+  filamentSpoolCurrentPlace,
+  filamentSpoolForm,
+  filamentSpoolHistoryTime,
+  filamentSpoolLabel,
+  filamentSpoolLastLocation,
+  filamentSpoolLocation,
+  filamentSpoolNeedsUidConflictResolution,
+  filamentSpoolRemainingLabel,
+  filamentSpoolRemainingWeight,
+  filamentSpoolSkuOptions,
+  filamentSpoolStatusLabel,
+  filamentSpoolStatusOptions,
+  filamentSpoolTypeSeriesOptions,
+  filamentTypeSeriesDisplay,
+  filamentTypeSeriesForm,
+  filamentTypeSeriesLabel,
+  filamentTypeSeriesOptions,
+  filamentWeight,
+  filteredEvents,
+  filteredTimelapseFiles,
+  formatBytes,
+  formatCell,
+  formatDurationSeconds,
+  groupedTimelapseFiles,
+  handleCameraStreamError,
+  handleCameraStreamLoaded,
+  hmsErrors,
+  hmsMessage,
+  hmsSuggestion,
+  importBackupFile,
+  importFileInput,
+  importModeOptions,
+  importOptions,
+  importResult,
+  inputValue,
+  inventoryChartColors,
+  inventoryDialog,
+  inventoryDialogSkuLabel,
+  inventoryDialogSpoolLabel,
+  inventoryHistorySearch,
+  inventoryMaxTypeWeightG,
+  inventoryPage,
+  inventoryPageOptions,
+  inventoryPendingConfirmCount,
+  inventoryRealSpoolWeightG,
+  inventoryRealSpools,
+  inventorySealedWeightG,
+  inventorySortIndicator,
+  inventoryTotalRolls,
+  inventoryTotalWeightG,
+  inventoryTypeBreakdown,
+  inventoryTypePieStyle,
+  isFilamentSpoolPendingConfirm,
+  isFilamentSpoolSkuReviewDeferred,
+  isSectionCollapsed,
+  jumpToInventorySection,
+  layerFraction,
+  loadAmsSensorHistories,
+  loadMaintenance,
+  loadMetrics,
+  loading,
+  locationAdjustForm,
+  locationPrinterOptions,
+  maintenanceHealthPercent,
+  maintenanceItems,
+  maintenanceNotes,
+  maintenanceOverview,
+  maintenanceProgress,
+  maintenanceRemainingLabel,
+  maintenanceStats,
+  maintenanceStatusGroups,
+  maintenanceTone,
+  message,
+  metricGroups,
+  metricLabel,
+  metricRange,
+  metricRangeOptions,
+  metricTooltipLabels,
+  metrics,
+  network,
+  notificationChannelOptions,
+  notificationDeliveries,
+  notificationRuleForm,
+  notificationRules,
+  notificationTargetForm,
+  notificationTargets,
+  openCameraLightbox,
+  openConfirmFilamentSpoolSku,
+  openCreateFilamentSpoolDialog,
+  openEventDetails,
+  openFilamentBrandCreate,
+  openFilamentColorMappingCreate,
+  openFilamentSkuCreate,
+  openFilamentSpoolDialog,
+  openFilamentTypeSeriesCreate,
+  openHmsDetails,
+  openPrinterDashboard,
+  openSealedStockAdjust,
+  openSlotDetails,
+  overviewControls,
+  overviewDensityOptions,
+  overviewFilterOptions,
+  overviewItems,
+  overviewSortOptions,
+  overviewStats,
+  percent,
+  percentageLabel,
+  performMaintenance,
+  prettyJson,
+  printLogAnalytics,
+  printLogFilters,
+  printLogPage,
+  printLogPrinterOptions,
+  printLogStatusOptions,
+  printLogSummary,
+  printLogTone,
+  printLogTotal,
+  printLogTotalPages,
+  printLogs,
+  printerDisplayName,
+  printerForm,
+  printers,
+  quantityAdjustForm,
+  quantityAdjustSourceOptions,
+  rawMqtt,
+  readableNetworkHardware,
+  recentEvents,
+  remainLabel,
+  remainPercent,
+  remainingTimeLabel,
+  resetFilamentSkuFilters,
+  resetVideoPlayback,
+  resolveFilamentUidConflict,
+  restartCameraStream,
+  saveAmsLabel,
+  saveFilamentBrand,
+  saveFilamentColorMapping,
+  saveFilamentSku,
+  saveFilamentTypeSeries,
+  saveNotificationRule,
+  saveNotificationTarget,
+  savePrinter,
+  saveSealedStockAdjust,
+  saveTimelapseNote,
+  scanDevices,
+  scanPhase,
+  scanProgressLabel,
+  scanProgressWidth,
+  scanning,
+  sealedStockAdjustForm,
+  seekVideoPreviewToEnd,
+  selectedEvent,
+  selectedFilamentSpool,
+  selectedFilamentSpoolId,
+  selectedHms,
+  selectedHmsStats,
+  selectedPrinter,
+  selectedPrinterId,
+  selectedPrinterPrintHours,
+  selectedSlot,
+  selectedSlotHistory,
+  setTimelapseDraft,
+  shouldShowChamberTemperature,
+  skuOpenedWeight,
+  skuSealedWeight,
+  slotChangeKinds,
+  slotColorLabel,
+  slotDisplayLabel,
+  slotHistoryChanges,
+  slotKey,
+  slotMaterialColorLabel,
+  softCell,
+  sortedFilamentAmsRows,
+  sortedFilamentBrands,
+  sortedFilamentColorMappingGaps,
+  sortedFilamentColorMappings,
+  sortedFilamentOpenedUnusedSpools,
+  sortedFilamentStockSkus,
+  sortedFilamentTypeSeries,
+  sortedFilteredFilamentSkus,
+  sortedHistoricalFilamentSpools,
+  sortedNeedsLocationSpools,
+  sortedPendingConfirmSpools,
+  spools,
+  startFilamentColorMapping,
+  state,
+  statusTone,
+  storageFileUrl,
+  storagePage,
+  storagePreviewFiles,
+  storageResult,
+  storageSearch,
+  storageSort,
+  storageSortOptions,
+  storageStats,
+  storageTotalPages,
+  summaryActiveHmsCount,
+  summaryCoveragePercent,
+  summaryLayerFraction,
+  summaryProgress,
+  summaryStage,
+  summaryStatusLabel,
+  summaryTaskName,
+  summaryTemperature,
+  summaryTone,
+  summaryWifi,
+  switchView,
+  systemInfo,
+  t,
+  temperaturePercent,
+  temperatures,
+  testNotificationTarget,
+  timelapseNote,
+  timelapseNoteText,
+  toggleAccessCodeVisibility,
+  toggleAmsLabelEditor,
+  toggleExportSection,
+  toggleInventorySort,
+  toggleSectionCollapsed,
+  toggleTimelapseFavorite,
+  updateFilamentSpoolStatus,
+  updateSelectedFilamentLocation,
+  withLoading,
+});
+
 </script>
 
 <template>
   <div class="app-shell">
-    <aside class="sidebar">
-      <div class="brand">
-        <div class="brand-mark">FM</div>
-        <div>
-          <div class="brand-name">{{ t("app.name") }}</div>
-          <div class="brand-sub">{{ t("app.subtitle") }}</div>
-        </div>
-      </div>
-      <nav class="nav-list">
-        <div v-for="group in navGroups" :key="group.key" class="nav-group">
-          <div class="nav-group-label">{{ t(group.labelKey) }}</div>
-          <button
-            v-for="item in navItemsByGroup(group.key)"
-            :key="item.key"
-            class="nav-item"
-            :class="{ active: activeView === item.key }"
-            type="button"
-            @click="switchView(item.key)"
-          >
-            <component :is="item.icon" :size="18" />
-            <span>{{ t(item.labelKey) }}</span>
-          </button>
-        </div>
-      </nav>
-      <div class="sidebar-footer">
-        <div class="mini-label">{{ t("app.api") }}</div>
-        <div class="mono">/api</div>
-      </div>
-    </aside>
+    <AppSidebar
+      :active-view="activeView"
+      :is-view-enabled="isViewEnabled"
+      :translate="t"
+      @switch-view="switchView"
+    />
 
     <main class="workspace">
       <header class="topbar">
@@ -4523,1958 +4625,20 @@ function filamentColor(value: unknown) {
       <div v-if="error" class="toast bad">{{ error }}</div>
       <div v-if="realtimeDisconnected" class="toast warn">{{ t("events.realtimeDisconnected") }}</div>
 
-      <section v-if="activeView === 'overview'" class="view">
-        <div class="toolbar filters overview-toolbar">
-          <label class="search-field">
-            <Search :size="16" />
-            <input v-model="overviewControls.search" :placeholder="t('overview.search')" />
-          </label>
-          <AppSelect v-model="overviewControls.filter" :options="overviewFilterOptions" />
-          <AppSelect v-model="overviewControls.sort" :options="overviewSortOptions" />
-          <AppSelect v-model="overviewControls.density" :options="overviewDensityOptions" />
-        </div>
-        <div class="metric-grid overview-metrics">
-          <div v-for="item in overviewStats" :key="item.label" class="metric-card">
-            <div class="metric-label">{{ item.label }}</div>
-            <div class="metric-value">{{ item.value }}</div>
-            <div class="metric-foot">{{ item.foot }}</div>
-          </div>
-        </div>
-
-        <section v-if="!overviewItems.length" class="panel empty-overview">
-          <h3>{{ t("overview.noPrinters") }}</h3>
-          <p>{{ t("overview.noPrintersHint") }}</p>
-          <button class="primary" type="button" @click="switchView('printers')">
-            <Settings :size="17" />
-            {{ t("overview.configurePrinter") }}
-          </button>
-        </section>
-
-        <div v-else class="fleet-grid" :class="`density-${overviewControls.density}`">
-          <article
-            v-for="item in overviewItems"
-            :key="item.printer.id"
-            class="fleet-card"
-            :class="summaryTone(item)"
-          >
-            <div class="fleet-card-header">
-              <div>
-                <div class="fleet-name">{{ item.printer.name }}</div>
-                <div class="fleet-host">{{ item.printer.host }}</div>
-              </div>
-              <span class="status-pill" :class="summaryTone(item)">
-                <span class="dot"></span>
-                {{ summaryStatusLabel(item) }}
-              </span>
-            </div>
-
-            <div class="fleet-task">
-              <div class="mini-label">{{ t("overview.currentTask") }}</div>
-              <strong>{{ summaryTaskName(item) }}</strong>
-              <span>{{ summaryStage(item) }}</span>
-            </div>
-
-            <div class="fleet-progress">
-              <div>
-                <span>{{ t("overview.progress") }}</span>
-                <strong>{{ summaryProgress(item) }}%</strong>
-              </div>
-              <div class="progress-track">
-                <span :style="{ width: `${summaryProgress(item)}%` }"></span>
-              </div>
-            </div>
-
-            <div v-if="overviewControls.density !== 'compact'" class="fleet-metrics">
-              <div>
-                <span>{{ t("dashboard.nozzle") }}</span>
-                <strong>{{ summaryTemperature(item, "nozzle") }}℃</strong>
-              </div>
-              <div>
-                <span>{{ t("dashboard.bed") }}</span>
-                <strong>{{ summaryTemperature(item, "bed") }}℃</strong>
-              </div>
-              <div>
-                <span>WiFi</span>
-                <strong>{{ summaryWifi(item) }}</strong>
-              </div>
-              <div>
-                <span>{{ t("dashboard.dataCoverage") }}</span>
-                <strong>{{ summaryCoveragePercent(item) }}%</strong>
-              </div>
-            </div>
-
-            <div v-if="overviewControls.density === 'detailed'" class="fleet-detail-row">
-              <span>{{ t("dashboard.layers") }} {{ summaryLayerFraction(item) }}</span>
-              <span>HMS {{ summaryActiveHmsCount(item) }}</span>
-              <span>{{ t("maintenance.due") }} {{ item.maintenance_due_count || 0 }}</span>
-            </div>
-
-            <div class="fleet-card-footer">
-              <span>{{ t("overview.lastSync") }} {{ formatCell(item.printer.last_sync_at) }}</span>
-              <div class="row-actions">
-                <button class="secondary" type="button" @click="openPrinterDashboard(item.printer.id)">
-                  <Gauge :size="17" />
-                  {{ t("overview.openDashboard") }}
-                </button>
-              </div>
-            </div>
-          </article>
-        </div>
-      </section>
-
-      <section v-else-if="activeView === 'dashboard'" class="view">
-        <div class="hero-strip">
-          <div>
-            <div class="mini-label">{{ t("dashboard.currentTask") }}</div>
-            <h2>{{ dashboardTaskTitle() }}</h2>
-            <div v-if="activeDerivedStatuses.length" class="task-status-chips">
-              <span
-                v-for="[key] in activeDerivedStatuses"
-                :key="key"
-                class="status-chip"
-                :class="derivedStatusTone(key)"
-              >
-                {{ fieldLabel(key) }}
-              </span>
-            </div>
-          </div>
-          <div class="progress-block">
-            <div class="progress-value">
-              <span>{{ dashboardProgress() }}%</span>
-              <div class="progress-meta">
-                <small v-if="remainingTimeLabel">{{ t("dashboard.remainingTime") }} {{ remainingTimeLabel }}</small>
-                <small v-if="layerFraction">{{ t("dashboard.layers") }} {{ layerFraction }}</small>
-              </div>
-            </div>
-            <div class="progress-track">
-              <span :style="{ width: `${dashboardProgress()}%` }"></span>
-            </div>
-          </div>
-          <div v-if="!canRequestFullRefresh" class="strip-actions">
-            <button class="secondary" type="button" @click="connectPrinter">
-              <PlugZap :size="17" />
-              {{ t("common.connectPrinter") }}
-            </button>
-          </div>
-        </div>
-
-        <div class="metric-grid">
-          <div class="metric-card">
-            <div class="metric-label">{{ t("dashboard.printState") }}</div>
-            <div class="metric-value">{{ dashboardPrintStateLabel() }}</div>
-            <div class="metric-foot">{{ dashboardPrintStageLabel() }}</div>
-          </div>
-          <div class="metric-card">
-            <div class="metric-label">{{ t("dashboard.remainingTime") }}</div>
-            <div class="metric-value compact-value">{{ dashboardRemainingTimeMetric() }}</div>
-            <div class="metric-foot">{{ t("dashboard.minutes") }}</div>
-          </div>
-          <div class="metric-card">
-            <div class="metric-label">{{ t("dashboard.nozzle") }}</div>
-            <div class="metric-value">{{ formatCell(temperatures.nozzle) }}℃</div>
-            <div class="metric-foot">{{ t("dashboard.target") }} {{ formatCell(temperatures.nozzle_target) }}℃</div>
-          </div>
-          <div class="metric-card">
-            <div class="metric-label">{{ t("dashboard.bed") }}</div>
-            <div class="metric-value">{{ formatCell(temperatures.bed) }}℃</div>
-            <div class="metric-foot">{{ t("dashboard.target") }} {{ formatCell(temperatures.bed_target) }}℃</div>
-          </div>
-          <div v-if="shouldShowChamberTemperature" class="metric-card">
-            <div class="metric-label">{{ fieldLabel("chamber") }}</div>
-            <div class="metric-value">{{ formatCell(temperatures.chamber) }}℃</div>
-            <div class="metric-foot">{{ t("dashboard.target") }} {{ formatCell(temperatures.chamber_target) }}℃</div>
-          </div>
-          <div class="metric-card">
-            <div class="metric-label">WiFi</div>
-            <div class="metric-value">{{ formatCell(network.wifi_signal) }}</div>
-            <div class="metric-foot">dBm</div>
-          </div>
-        </div>
-
-        <div class="dashboard-card-flow">
-          <section class="panel">
-            <div class="panel-header">
-              <h3>{{ t("dashboard.thermalFans") }}</h3>
-              <div class="widget-tools">
-                <Thermometer :size="18" />
-                <button class="icon-button compact" type="button" :title="t('layout.collapse')" @click="toggleSectionCollapsed('dashboard.thermal')">
-                  <ChevronDown v-if="isSectionCollapsed('dashboard.thermal')" :size="15" />
-                  <ChevronUp v-else :size="15" />
-                </button>
-              </div>
-            </div>
-            <div v-show="!isSectionCollapsed('dashboard.thermal')" class="bar-list">
-              <div class="bar-row">
-                <span>{{ fieldLabel("nozzle") }}</span>
-                <div class="bar"><i :style="{ width: `${temperaturePercent(temperatures.nozzle, temperatures.nozzle_target)}%` }"></i></div>
-                <strong>{{ formatCell(temperatures.nozzle) }}℃</strong>
-              </div>
-              <div class="bar-row">
-                <span>{{ fieldLabel("bed") }}</span>
-                <div class="bar"><i :style="{ width: `${temperaturePercent(temperatures.bed, temperatures.bed_target)}%` }"></i></div>
-                <strong>{{ formatCell(temperatures.bed) }}℃</strong>
-              </div>
-              <div v-for="[key, item] in fanRows" :key="key" class="bar-row">
-                <span>{{ fieldLabel(key) }}</span>
-                <div class="bar"><i :style="{ width: `${fanDisplayPercent(item)}%` }"></i></div>
-                <strong>{{ formatCell(fanDisplayPercent(item)) }}%</strong>
-              </div>
-            </div>
-          </section>
-
-          <section class="panel">
-            <div class="panel-header">
-              <h3>{{ t("dashboard.amsSummary") }}</h3>
-              <div class="widget-tools">
-                <Boxes :size="18" />
-                <button class="icon-button compact" type="button" :title="t('layout.collapse')" @click="toggleSectionCollapsed('dashboard.ams')">
-                  <ChevronDown v-if="isSectionCollapsed('dashboard.ams')" :size="15" />
-                  <ChevronUp v-else :size="15" />
-                </button>
-              </div>
-            </div>
-            <div v-show="!isSectionCollapsed('dashboard.ams')" class="ams-status-grid">
-              <div v-for="[label, value] in dashboardAmsSummaryRows" :key="label" class="ams-status-item">
-                <span>{{ label }}</span>
-                <strong>{{ displayCell(value) }}</strong>
-              </div>
-              <div v-if="!dashboardAmsSummaryRows.length" class="empty">{{ t("common.empty") }}</div>
-            </div>
-            <div v-show="!isSectionCollapsed('dashboard.ams')" class="ams-visual-list">
-              <article v-for="unit in dashboardAmsUnitRows" :key="unit.key" class="ams-visual-unit">
-                <div class="ams-visual-head">
-                  <div>
-                    <strong>{{ unit.title }}</strong>
-                    <span>{{ unit.code }}</span>
-                  </div>
-                  <small>{{ unit.meta }}</small>
-                </div>
-                <div class="ams-visual-slots">
-                  <div
-                    v-for="slot in unit.slots"
-                    :key="slot.key"
-                    class="ams-visual-slot"
-                    :class="{ active: slot.active, empty: !slot.loaded }"
-                  >
-                    <span class="ams-slot-material">{{ slot.material }}</span>
-                    <div class="ams-spool" :style="slot.style"><i></i></div>
-                    <strong>{{ slot.label }}</strong>
-                    <small>{{ slot.remain }}</small>
-                  </div>
-                  <div v-if="!unit.slots.length" class="empty">{{ t("ams.noSlots") }}</div>
-                </div>
-              </article>
-            </div>
-          </section>
-
-          <section class="panel dashboard-live-panel">
-            <div class="panel-header">
-              <h3>{{ t("dashboard.liveCamera") }}</h3>
-              <div class="widget-tools">
-                <Camera :size="18" />
-                <button class="icon-button compact" type="button" :title="t('layout.collapse')" @click="toggleSectionCollapsed('dashboard.liveCamera')">
-                  <ChevronDown v-if="isSectionCollapsed('dashboard.liveCamera')" :size="15" />
-                  <ChevronUp v-else :size="15" />
-                </button>
-              </div>
-            </div>
-            <div v-show="!isSectionCollapsed('dashboard.liveCamera')" class="camera-live-card">
-              <button class="camera-live-frame camera-live-trigger" type="button" :title="t('dashboard.openLiveCamera')" @click="openCameraLightbox">
-                <img
-                  v-if="cameraStreamSrc && !cameraStreamError && !cameraLightboxOpen"
-                  :src="cameraStreamSrc"
-                  :alt="t('dashboard.liveCamera')"
-                  @error="handleCameraStreamError"
-                  @load="handleCameraStreamLoaded"
-                />
-                <div v-else class="camera-live-placeholder">
-                  <Camera :size="28" />
-                  <strong>{{ cameraLivePlaceholder }}</strong>
-                  <span>{{ t("dashboard.cameraStreamForwarding") }}</span>
-                </div>
-              </button>
-              <div class="camera-live-footer">
-                <span>{{ t("dashboard.cameraStreamForwarding") }}</span>
-                <div class="camera-live-actions">
-                  <button class="icon-button compact" type="button" :title="t('dashboard.openLiveCamera')" @click="openCameraLightbox">
-                    <Eye :size="15" />
-                  </button>
-                  <button class="icon-button compact" type="button" :title="t('dashboard.restartCameraStream')" @click="restartCameraStream">
-                    <RefreshCw :size="15" />
-                  </button>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <section class="panel">
-            <div class="panel-header">
-              <h3>{{ t("dashboard.deviceDiagnostics") }}</h3>
-              <div class="widget-tools">
-                <Eye :size="18" />
-                <button class="icon-button compact" type="button" :title="t('layout.collapse')" @click="toggleSectionCollapsed('dashboard.detectionCoverage')">
-                  <ChevronDown v-if="isSectionCollapsed('dashboard.detectionCoverage')" :size="15" />
-                  <ChevronUp v-else :size="15" />
-                </button>
-              </div>
-            </div>
-            <div v-show="!isSectionCollapsed('dashboard.detectionCoverage')" class="combined-status-sections">
-              <div>
-                <div class="section-label">{{ t("dashboard.detectionCapabilities") }}</div>
-                <div class="capability-grid">
-                  <div v-for="[key, value] in detectionRows" :key="key" class="capability-row">
-                    <span>{{ fieldLabel(key) }}</span>
-                    <strong :class="statusTone(value)">{{ boolLabel(value) }}</strong>
-                  </div>
-                  <div v-if="!detectionRows.length" class="empty">{{ t("common.empty") }}</div>
-                </div>
-              </div>
-              <div>
-                <div class="section-label">{{ t("dashboard.dataCoverage") }}</div>
-                <div class="coverage-list">
-                  <div v-for="item in coverageStatusRows" :key="item.key" class="coverage-row">
-                    <span>{{ fieldLabel(item.key) }}</span>
-                    <strong :class="{ on: item.received, off: !item.received }">
-                      {{ item.received ? t("common.received") : t("common.missing") }}
-                    </strong>
-                  </div>
-                  <div v-if="!coverageStatusRows.length" class="empty">{{ t("common.empty") }}</div>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <section class="panel">
-            <div class="panel-header">
-              <h3>{{ t("dashboard.networkHardware") }}</h3>
-              <div class="widget-tools">
-                <Network :size="18" />
-                <button class="icon-button compact" type="button" :title="t('layout.collapse')" @click="toggleSectionCollapsed('dashboard.network')">
-                  <ChevronDown v-if="isSectionCollapsed('dashboard.network')" :size="15" />
-                  <ChevronUp v-else :size="15" />
-                </button>
-              </div>
-            </div>
-            <div v-show="!isSectionCollapsed('dashboard.network')" class="combined-status-sections">
-              <div class="network-info-grid">
-                <div v-for="[key, value] in readableNetworkHardware" :key="key" class="network-info-item">
-                  <span>{{ fieldLabel(key) }}</span>
-                  <strong>{{ displayCell(value) }}</strong>
-                </div>
-                <div v-if="!readableNetworkHardware.length" class="empty">{{ t("common.empty") }}</div>
-              </div>
-              <div>
-                <div class="section-label">{{ t("dashboard.hmsErrors") }}</div>
-                <div class="dashboard-hms-list" :class="{ scrollable: dashboardHmsRows.length > 5 }">
-                  <button v-if="!dashboardHmsRows.length" class="dashboard-hms-empty" type="button" disabled>
-                    {{ t("dashboard.noHmsErrors") }}
-                  </button>
-                  <button
-                    v-for="(item, index) in dashboardHmsRows"
-                    :key="`${item.short_code || item.code}-${item.active}-${index}`"
-                    class="dashboard-hms-row"
-                    type="button"
-                    @click="openHmsDetails(item)"
-                  >
-                    <span class="mono">{{ formatCell(item.short_code || item.code) }}</span>
-                    <strong>{{ displayCell(item.severity_name) }}</strong>
-                    <em>{{ item.active !== false && item.actionable !== false ? t("common.unresolved") : t("common.resolved") }}</em>
-                  </button>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <section class="panel">
-            <div class="panel-header">
-              <h3>{{ t("dashboard.cameraStatus") }}</h3>
-              <div class="widget-tools">
-                <Camera :size="18" />
-                <button class="icon-button compact" type="button" :title="t('layout.collapse')" @click="toggleSectionCollapsed('dashboard.camera')">
-                  <ChevronDown v-if="isSectionCollapsed('dashboard.camera')" :size="15" />
-                  <ChevronUp v-else :size="15" />
-                </button>
-              </div>
-            </div>
-            <div v-show="!isSectionCollapsed('dashboard.camera')" class="camera-info-grid camera-status-grid">
-              <div v-for="[key, value] in cameraStatusRows" :key="key" class="camera-info-item">
-                <span>{{ fieldLabel(key) }}</span>
-                <strong :class="statusTone(value)">{{ displayCell(value) }}</strong>
-              </div>
-              <div v-if="!cameraStatusRows.length" class="empty">{{ t("common.empty") }}</div>
-            </div>
-          </section>
-        </div>
-      </section>
-
-      <section v-else-if="activeView === 'events'" class="view">
-        <div class="toolbar filters">
-          <input v-model="eventFilters.type" :placeholder="t('events.typeFilter')" />
-          <AppSelect v-model="eventFilters.severity" :options="eventSeverityOptions" />
-          <AppSelect v-model="eventFilters.active" :options="eventActiveOptions" />
-        </div>
-        <section class="panel">
-          <div class="panel-header"><h3>{{ t("events.title") }}</h3><Bell :size="18" /></div>
-          <div class="table-wrap">
-            <table>
-              <thead><tr><th>{{ t("table.time") }}</th><th>{{ t("table.type") }}</th><th>{{ t("table.severity") }}</th><th>{{ t("table.current") }}</th><th>{{ t("table.message") }}</th><th>{{ t("table.actions") }}</th></tr></thead>
-              <tbody>
-                <tr v-if="!filteredEvents.length"><td colspan="6" class="empty">{{ t("common.empty") }}</td></tr>
-                <tr v-for="item in filteredEvents" :key="`${item.source}-${item.id}`">
-                  <td>{{ formatCell(item.created_at) }}</td>
-                  <td>{{ eventTypeLabel(item) }}</td>
-                  <td><span class="status-pill" :class="eventTone(item)"><span class="dot"></span>{{ displayCell(item.severity) }}</span></td>
-                  <td>{{ eventCurrentLabel(item) }}</td>
-                  <td>{{ eventMessage(item) }}</td>
-                  <td><button class="text-action compact" type="button" @click="openEventDetails(item)">{{ t("table.details") }}</button></td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
-      </section>
-
-      <section v-else-if="activeView === 'printLog'" class="view">
-        <div class="toolbar filters">
-          <AppSelect v-model="printLogFilters.printer_id" :options="printLogPrinterOptions" />
-          <AppSelect v-model="printLogFilters.status" :options="printLogStatusOptions" />
-          <input v-model="printLogFilters.search" :placeholder="t('printLog.search')" />
-          <input v-model="printLogFilters.date_from" type="date" />
-          <input v-model="printLogFilters.date_to" type="date" />
-          <button class="primary" type="button" @click="applyPrintLogFilters">
-            <Search :size="17" />
-            {{ t("printLog.applyFilters") }}
-          </button>
-        </div>
-
-        <div class="metric-grid overview-metrics">
-          <div class="metric-card">
-            <div class="metric-label">{{ t("printLog.total") }}</div>
-            <div class="metric-value">{{ printLogSummary?.total || 0 }}</div>
-          </div>
-          <div class="metric-card">
-            <div class="metric-label">{{ t("values.succeeded") }}</div>
-            <div class="metric-value">{{ printLogSummary?.succeeded || 0 }}</div>
-          </div>
-          <div class="metric-card">
-            <div class="metric-label">{{ t("values.failed") }}</div>
-            <div class="metric-value">{{ printLogSummary?.failed || 0 }}</div>
-          </div>
-          <div class="metric-card">
-            <div class="metric-label">{{ t("printLog.totalDuration") }}</div>
-            <div class="metric-value compact-value">{{ formatDurationSeconds(printLogSummary?.total_duration_seconds) }}</div>
-          </div>
-        </div>
-
-        <div class="grid two wide">
-          <section class="panel">
-            <div class="panel-header"><h3>{{ t("printLog.analytics") }}</h3><LineChart :size="18" /></div>
-            <div class="analytics-strip">
-              <div><span>{{ t("printLog.successRate") }}</span><strong>{{ percentageLabel(printLogAnalytics?.success_rate) }}</strong></div>
-              <div><span>{{ t("printLog.failureRate") }}</span><strong>{{ percentageLabel(printLogAnalytics?.failure_rate) }}</strong></div>
-              <div><span>{{ t("printLog.averageDuration") }}</span><strong>{{ formatDurationSeconds(printLogAnalytics?.average_duration_seconds) }}</strong></div>
-              <div><span>{{ t("printLog.longestDuration") }}</span><strong>{{ formatDurationSeconds(printLogAnalytics?.longest_duration_seconds) }}</strong></div>
-            </div>
-            <div class="trend-bars">
-              <div v-for="bucket in printLogAnalytics?.by_date || []" :key="bucket.bucket" class="trend-row">
-                <span>{{ bucket.bucket }}</span>
-                <div class="bar"><i :style="{ width: `${percent(bucket.total, 0)}%` }"></i></div>
-                <strong>{{ bucket.total }}</strong>
-              </div>
-              <div v-if="!printLogAnalytics?.by_date?.length" class="empty">{{ t("common.empty") }}</div>
-            </div>
-          </section>
-          <section class="panel">
-            <div class="panel-header"><h3>{{ t("printLog.failureRanking") }}</h3><ShieldAlert :size="18" /></div>
-            <div class="table-wrap compact-table">
-              <table>
-                <thead><tr><th>{{ t("printLog.failureReason") }}</th><th>{{ t("table.value") }}</th></tr></thead>
-                <tbody>
-                  <tr v-if="!printLogAnalytics?.by_failure_reason?.length"><td colspan="2" class="empty">{{ t("common.empty") }}</td></tr>
-                  <tr v-for="item in printLogAnalytics?.by_failure_reason || []" :key="item.reason">
-                    <td>{{ item.reason }}</td>
-                    <td>{{ item.count }}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </section>
-        </div>
-
-        <section class="panel">
-          <div class="panel-header">
-            <h3>{{ t("nav.printLog") }}</h3>
-            <ClipboardList :size="18" />
-          </div>
-          <div class="table-wrap tall-table">
-            <table>
-              <thead><tr><th>{{ t("table.name") }}</th><th>{{ t("table.printer") }}</th><th>{{ t("table.status") }}</th><th>{{ t("printLog.startedAt") }}</th><th>{{ t("printLog.duration") }}</th><th>{{ t("overview.progress") }}</th><th>{{ t("dashboard.layers") }}</th><th>{{ t("printLog.failureReason") }}</th></tr></thead>
-              <tbody>
-                <tr v-if="!printLogs.length"><td colspan="8" class="empty">{{ t("common.empty") }}</td></tr>
-                <tr v-for="log in printLogs" :key="log.id">
-                  <td>{{ formatCell(log.print_name || log.gcode_file) }}</td>
-                  <td>{{ formatCell(log.printer_name_snapshot || log.printer_id) }}</td>
-                  <td><span class="status-pill" :class="printLogTone(log.status)"><span class="dot"></span>{{ displayCell(log.status) }}</span></td>
-                  <td>{{ formatCell(log.started_at) }}</td>
-                  <td>{{ formatDurationSeconds(log.duration_seconds) }}</td>
-                  <td>{{ formatCell(log.max_progress ?? log.final_progress) }}%</td>
-                  <td>{{ softCell(log.layer_current) }} / {{ softCell(log.layer_total) }}</td>
-                  <td>{{ softCell(log.failure_reason) }}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          <div class="pager">
-            <button class="secondary" type="button" :disabled="printLogFilters.offset <= 0" @click="changePrintLogPage(-1)">{{ t("printLog.prev") }}</button>
-            <span>{{ printLogPage }} / {{ printLogTotalPages }} · {{ printLogTotal }}</span>
-            <button class="secondary" type="button" :disabled="printLogPage >= printLogTotalPages" @click="changePrintLogPage(1)">{{ t("printLog.next") }}</button>
-          </div>
-        </section>
-      </section>
-
-      <section v-else-if="activeView === 'metrics'" class="view">
-        <div class="toolbar filters">
-          <AppSelect v-model="metricRange" :options="metricRangeOptions" @change="withLoading(loadMetrics)" />
-        </div>
-        <div class="metrics-chart-grid">
-          <MetricChart
-            :title="t('metrics.temperatureHistory')"
-            :subtitle="t('metrics.temperatureSubtitle')"
-            :items="metricGroups.temperatures"
-            :metric-label="metricLabel"
-            :empty-label="t('common.empty')"
-            :tooltip-labels="metricTooltipLabels"
-          />
-          <MetricChart
-            :title="t('metrics.fanHistory')"
-            :subtitle="t('metrics.fanSubtitle')"
-            :items="metricGroups.fans"
-            :metric-label="metricLabel"
-            :empty-label="t('common.empty')"
-            :tooltip-labels="metricTooltipLabels"
-          />
-          <MetricChart
-            :title="t('metrics.wifiHistory')"
-            :subtitle="t('metrics.wifiSubtitle')"
-            :items="metricGroups.wifi"
-            :metric-label="metricLabel"
-            :empty-label="t('common.empty')"
-            :tooltip-labels="metricTooltipLabels"
-          />
-          <MetricChart
-            :title="t('metrics.amsHistory')"
-            :subtitle="t('metrics.amsSubtitle')"
-            :items="metricGroups.ams"
-            :metric-label="metricLabel"
-            :empty-label="t('common.empty')"
-            :tooltip-labels="metricTooltipLabels"
-          />
-        </div>
-      </section>
-
-      <section v-else-if="activeView === 'storage'" class="view">
-        <div class="toolbar storage-toolbar">
-          <div class="toolbar filters storage-filters">
-            <label class="search-field">
-              <Search :size="16" />
-              <input v-model="storageSearch" :placeholder="t('storage.search')" />
-            </label>
-            <AppSelect v-model="storageSort" :options="storageSortOptions" />
-          </div>
-        </div>
-        <div class="metric-grid small spool-detail-summary">
-          <div v-for="item in storageStats" :key="item.label" class="metric-card">
-            <div class="metric-label">{{ item.label }}</div>
-            <div class="metric-value">{{ item.value }}</div>
-            <div v-if="item.foot" class="metric-foot">{{ item.foot }}</div>
-          </div>
-        </div>
-        <section class="panel">
-          <div class="panel-header">
-            <div>
-              <h3>{{ t("storage.preview") }}</h3>
-              <p class="panel-subtitle">{{ t("storage.previewSubtitle", { count: filteredTimelapseFiles.length }) }}</p>
-            </div>
-            <Camera :size="18" />
-          </div>
-          <div v-if="storageResult?.error" class="inline-error">{{ storageResult.error }}</div>
-          <div class="storage-preview-grid">
-            <article v-for="file in storagePreviewFiles" :key="file.path" class="storage-preview-card">
-              <video
-                :src="storageFileUrl(file, true)"
-                muted
-                controls
-                preload="metadata"
-                playsinline
-                @loadedmetadata="seekVideoPreviewToEnd"
-                @play="resetVideoPlayback"
-              ></video>
-              <div class="storage-preview-meta">
-                <div class="storage-title-row">
-                  <strong>{{ file.name }}</strong>
-                  <button class="icon-button compact" type="button" :title="t('storage.favorite')" @click="toggleTimelapseFavorite(file)">
-                    <Star :size="15" :fill="timelapseNote(file)?.favorite ? 'currentColor' : 'none'" />
-                  </button>
-                </div>
-                <span>{{ formatBytes(file.size || 0) }} · {{ formatCell(file.modified_at) }}</span>
-                <span>{{ t("fields.resolution") }} {{ softCell(timelapseNote(file)?.cached_metadata?.resolution) }} · {{ t("storage.coverCache") }} {{ softCell(timelapseNote(file)?.cached_metadata?.cover_cache) }}</span>
-              </div>
-              <div class="timelapse-note-row">
-                <input
-                  :value="timelapseNoteText(file)"
-                  :placeholder="t('storage.note')"
-                  @input="setTimelapseDraft(file.path, inputValue($event))"
-                />
-                <button class="secondary" type="button" @click="saveTimelapseNote(file)">{{ t("common.save") }}</button>
-              </div>
-              <a class="secondary storage-download-link" :href="storageFileUrl(file)" :download="file.name">
-                <Download :size="15" />
-                {{ t("storage.download") }}
-              </a>
-            </article>
-            <div v-if="!storagePreviewFiles.length" class="empty">{{ t("storage.noPreview") }}</div>
-          </div>
-          <div v-if="filteredTimelapseFiles.length" class="pager">
-            <button class="secondary" type="button" :disabled="storagePage <= 1" @click="changeStoragePage(-1)">{{ t("printLog.prev") }}</button>
-            <span>{{ t("storage.pageInfo", { page: storagePage, total: storageTotalPages, count: filteredTimelapseFiles.length }) }}</span>
-            <button class="secondary" type="button" :disabled="storagePage >= storageTotalPages" @click="changeStoragePage(1)">{{ t("printLog.next") }}</button>
-          </div>
-        </section>
-        <section class="panel">
-          <div class="panel-header"><h3>{{ t("storage.groupByDate") }}</h3><Camera :size="18" /></div>
-          <div class="date-group-list">
-            <div v-for="group in groupedTimelapseFiles" :key="group.date" class="date-group-row">
-              <strong>{{ group.date }}</strong>
-              <span>{{ group.files.length }}</span>
-            </div>
-            <div v-if="!groupedTimelapseFiles.length" class="empty">{{ t("common.empty") }}</div>
-          </div>
-        </section>
-      </section>
-
-      <section v-else-if="activeView === 'ams'" class="view">
-        <div class="toolbar ams-toolbar">
-          <span class="toolbar-field-label">{{ t("ams.historyRange") }}</span>
-          <AppSelect v-model="amsSensorRange" :options="amsSensorRangeOptions" @change="withLoading(loadAmsSensorHistories)" />
-        </div>
-        <div class="metric-grid overview-metrics">
-          <div v-for="item in amsStats" :key="item.label" class="metric-card">
-            <div class="metric-label">{{ item.label }}</div>
-            <div class="metric-value">{{ item.value }}</div>
-          </div>
-        </div>
-        <div class="ams-unit-grid">
-        <section
-          v-for="(unit, unitIndex) in amsOverview?.units || []"
-          :key="unit.ams_id"
-          class="panel ams-unit-card"
-          :class="[amsTone(unit), { collapsed: isSectionCollapsed(amsSectionKey(unit)) }]"
-        >
-          <div class="ams-unit-header" :class="{ collapsed: isSectionCollapsed(amsSectionKey(unit)) }">
-            <div class="ams-unit-title">
-              <div class="badge-row">
-                <span class="ams-badge">{{ unit.ams_type_name === "unknown" ? t("ams.unknownType") : unit.ams_type_name }}</span>
-                <span class="ams-code mono">#{{ unit.ams_id }}</span>
-              </div>
-              <h3>{{ amsTitle(unit) }}</h3>
-            </div>
-            <div class="ams-unit-actions">
-              <span v-if="isSectionCollapsed(amsSectionKey(unit))" class="ams-compact-sensor">{{ softCell(unit.temperature) }}℃ / {{ amsHumidityLabel(unit) }}</span>
-              <button
-                v-if="!isSectionCollapsed(amsSectionKey(unit))"
-                class="icon-button compact subtle"
-                type="button"
-                :title="t('ams.editLabel')"
-                @click="toggleAmsLabelEditor(unit)"
-              >
-                <PencilLine :size="14" />
-              </button>
-              <button class="icon-button compact" type="button" :title="t('layout.collapse')" @click="toggleSectionCollapsed(amsSectionKey(unit))">
-                <ChevronDown v-if="isSectionCollapsed(amsSectionKey(unit))" :size="15" />
-                <ChevronUp v-else :size="15" />
-              </button>
-            </div>
-            <div v-if="amsLabelEditing[unit.ams_id] && !isSectionCollapsed(amsSectionKey(unit))" class="ams-label-row">
-              <input v-model="amsLabelDrafts[unit.ams_id]" :placeholder="t('ams.labelPlaceholder')" />
-              <button class="secondary" type="button" @click="saveAmsLabel(unit)"><Save :size="15" />{{ t("common.save") }}</button>
-              <button class="icon-button compact" type="button" :title="t('ams.clearLabel')" @click="clearAmsLabel(unit)"><X :size="15" /></button>
-            </div>
-            <div v-if="!isSectionCollapsed(amsSectionKey(unit))" class="ams-unit-meta">
-              <span>{{ t("fields.temperature") }} {{ softCell(unit.temperature) }}℃</span>
-              <span>{{ t("fields.humidity_raw") }} {{ amsHumidityLabel(unit) }}</span>
-              <span>{{ t("ams.activeSlot") }} {{ activeSlotDisplayLabel(unit.active_slot) }}</span>
-              <span>{{ t("ams.dryStatus") }} {{ displayCell(unit.dry_status_name || unit.dry_status) }}</span>
-              <span class="quiet-meta">{{ t("fields.firmware") }} {{ softCell(unit.sw_ver) }}</span>
-              <span>{{ t("overview.lastSync") }} {{ formatCell(unit.updated_at) }}</span>
-            </div>
-          </div>
-          <div class="ams-fold-stack">
-            <Transition name="ams-fold">
-              <div v-if="isSectionCollapsed(amsSectionKey(unit))" :key="`${unit.ams_id}-collapsed`" class="ams-fold-region">
-                <div class="ams-collapsed-preview">
-                  <div
-                    class="ams-visual-slots ams-page-preview-slots"
-                    :class="{ 'single-slot': amsPageUnitVisual(unit, unitIndex).slots.length <= 1 }"
-                  >
-                    <div
-                      v-for="slot in amsPageUnitVisual(unit, unitIndex).slots"
-                      :key="slot.key"
-                      class="ams-visual-slot"
-                      :class="{ active: slot.active, empty: !slot.loaded }"
-                    >
-                      <span class="ams-slot-material">{{ slot.material }}</span>
-                      <div class="ams-spool" :style="slot.style"><i></i></div>
-                      <strong>{{ slot.label }}</strong>
-                      <small>{{ slot.remain }}</small>
-                    </div>
-                    <div v-if="!amsPageUnitVisual(unit, unitIndex).slots.length" class="empty">{{ t("ams.noSlots") }}</div>
-                  </div>
-                </div>
-              </div>
-              <div v-else :key="`${unit.ams_id}-expanded`" class="ams-fold-region">
-                <div class="ams-sensor-row">
-                  <MetricChart
-                    :title="t('ams.sensorHistory')"
-                    :subtitle="`${t('fields.temperature')} / ${t('fields.humidity_raw')}`"
-                    :items="amsSensorChartItems(unit.ams_id)"
-                    :metric-label="metricLabel"
-                    :empty-label="t('common.empty')"
-                    :tooltip-labels="metricTooltipLabels"
-                  />
-                </div>
-                <div class="ams-slot-grid">
-                  <div v-if="!unit.slots.length" class="empty">{{ t("ams.noSlots") }}</div>
-                  <article v-for="slot in unit.slots" :key="slotKey(slot)" class="ams-slot-card" :class="{ active: slot.is_active }">
-                    <div class="ams-slot-topline">
-                      <div>
-                        <span class="mini-label">{{ slotDisplayLabel(slot) }}</span>
-                        <strong><span class="swatch" :style="{ background: filamentColor(slot.color) }"></span>{{ slotMaterialColorLabel(slot) }}</strong>
-                      </div>
-                      <button class="icon-button compact" type="button" :title="t('table.details')" @click="openSlotDetails(slot)">
-                        <Eye :size="15" />
-                      </button>
-                    </div>
-                    <div class="ams-slot-remain">
-                      <div class="progress-track">
-                        <span :style="{ width: `${remainPercent(slot.remain)}%` }"></span>
-                      </div>
-                      <strong>{{ remainLabel(slot.remain) }}</strong>
-                    </div>
-                    <div class="ams-slot-facts">
-                      <div><span>{{ t("table.state") }}</span><strong>{{ displayCell(slot.state_name || slot.slot_state) }}</strong></div>
-                      <div><span>K</span><strong>{{ softCell(slot.k) }}</strong></div>
-                      <div><span>{{ t("ams.caliIdx") }}</span><strong>{{ softCell(slot.cali_idx) }}</strong></div>
-                      <div><span>{{ t("table.spool") }}</span><strong>{{ softCell(slot.spool_id) }}</strong></div>
-                    </div>
-                    <span v-if="slot.is_active" class="ams-active-ribbon">{{ t("common.currentInUse") }}</span>
-                  </article>
-                </div>
-              </div>
-            </Transition>
-          </div>
-        </section>
-        </div>
-      </section>
-
-      <section v-else-if="activeView === 'inventory'" class="view">
-        <div class="inventory-tabs" role="tablist">
-          <button
-            v-for="item in inventoryPageOptions"
-            :key="item.key"
-            type="button"
-            :class="{ active: inventoryPage === item.key }"
-            @click="inventoryPage = item.key"
-          >
-            {{ item.label }}
-          </button>
-        </div>
-
-        <template v-if="inventoryPage === 'stock'">
-        <div class="metric-grid small">
-          <div class="metric-card"><div class="metric-label">{{ t("inventory.totalStock") }}</div><div class="metric-value">{{ filamentInventoryKg(inventoryTotalWeightG) }}</div><div class="metric-foot">{{ inventoryTotalRolls }} {{ t("inventory.rolls") }}</div></div>
-          <div class="metric-card"><div class="metric-label">{{ t("inventory.skus") }}</div><div class="metric-value">{{ filamentInventorySummary?.totals.sku_count || 0 }}</div></div>
-          <div class="metric-card"><div class="metric-label">{{ t("inventory.sealedStock") }}</div><div class="metric-value">{{ filamentInventoryKg(inventorySealedWeightG) }}</div><div class="metric-foot">{{ filamentInventorySummary?.totals.sealed_quantity || 0 }} {{ t("inventory.rolls") }}</div></div>
-          <div class="metric-card"><div class="metric-label">{{ t("inventory.openedStock") }}</div><div class="metric-value">{{ filamentInventoryKg(inventoryRealSpoolWeightG) }}</div><div class="metric-foot">{{ inventoryRealSpools.length }} {{ t("inventory.rolls") }}</div></div>
-          <div class="metric-card"><div class="metric-label">{{ t("inventory.amsLoaded") }}</div><div class="metric-value">{{ filamentInventorySummary?.totals.ams_spool_count || 0 }}</div></div>
-          <button class="metric-card metric-button" type="button" @click="jumpToInventorySection('inventory-pending-confirm')"><div class="metric-label">{{ t("inventory.pendingConfirm") }}</div><div class="metric-value">{{ inventoryPendingConfirmCount }}</div><div class="metric-foot">{{ t("inventory.jumpToPending") }}</div></button>
-        </div>
-        <div class="inventory-split-grid inventory-main-grid">
-        <section class="panel inventory-panel">
-          <div class="panel-header">
-            <h3>{{ t("inventory.stockAnalysis") }}</h3>
-            <button class="icon-button compact" type="button" :title="t('inventory.addSpool')" @click="openCreateFilamentSpoolDialog"><Plus :size="16" /></button>
-          </div>
-          <div class="inventory-visual-grid">
-            <div class="inventory-pie" :style="inventoryTypePieStyle"><span>{{ filamentInventoryKg(inventoryTotalWeightG) }}</span></div>
-            <div class="inventory-breakdown">
-              <div class="slot-section-title">
-                <h4>{{ t("inventory.typeBreakdown") }}</h4>
-                <span>{{ filamentInventoryKg(inventoryTotalWeightG) }}</span>
-              </div>
-              <div v-if="!inventoryTypeBreakdown.length" class="slot-empty-state">{{ t("inventory.noStockData") }}</div>
-              <div v-for="(row, index) in inventoryTypeBreakdown" :key="row.key" class="inventory-breakdown-row">
-                <div class="inventory-breakdown-label"><strong>{{ row.label }}</strong><span>{{ filamentInventoryKg(row.grams) }} / {{ row.rolls }} {{ t("inventory.rolls") }}</span></div>
-                <div class="inventory-bar"><span :style="{ width: `${Math.max(4, Math.round((row.grams / inventoryMaxTypeWeightG) * 100))}%`, background: inventoryChartColors[index % inventoryChartColors.length] }"></span></div>
-              </div>
-            </div>
-          </div>
-        </section>
-        <section id="inventory-ams-loaded" class="panel">
-          <div class="panel-header"><h3>{{ t("inventory.amsLoaded") }}</h3><Boxes :size="18" /></div>
-          <div class="table-wrap">
-            <table class="inventory-ams-table">
-              <thead><tr>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('amsLoaded', 'printer')">{{ t("table.printer") }} <span>{{ inventorySortIndicator("amsLoaded", "printer") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('amsLoaded', 'slot')">{{ t("ams.slots") }} <span>{{ inventorySortIndicator("amsLoaded", "slot") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('amsLoaded', 'filament')">{{ t("table.filament") }} <span>{{ inventorySortIndicator("amsLoaded", "filament") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('amsLoaded', 'remaining')">{{ t("inventory.remaining") }} <span>{{ inventorySortIndicator("amsLoaded", "remaining") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('amsLoaded', 'status')">{{ t("table.status") }} <span>{{ inventorySortIndicator("amsLoaded", "status") }}</span></button></th>
-                <th>{{ t("table.actions") }}</th>
-              </tr></thead>
-              <tbody>
-                <tr v-if="!sortedFilamentAmsRows.length"><td colspan="6" class="empty">{{ t("ams.noSlots") }}</td></tr>
-                <tr v-for="row in sortedFilamentAmsRows" :key="row.slot.id" :class="{ 'pending-row': row.spool && isFilamentSpoolPendingConfirm(row.spool) && !isFilamentSpoolSkuReviewDeferred(row.spool) }">
-                  <td>{{ row.slot.printer_name || printerDisplayName(row.slot.printer_id) }}</td>
-                  <td>{{ filamentAmsSlotLocationLabel(row.slot) }}</td>
-                  <td><span class="swatch" :style="{ background: filamentColor(row.spool?.color_hex || row.spool?.color_value || row.slot.color || row.slot.tray_color) }"></span>{{ filamentAmsFilamentLabel(row.slot, row.spool) }}</td>
-                  <td>{{ filamentAmsRemainingLabel(row.slot, row.spool) }}</td>
-                  <td class="inventory-inline-action">
-                    <span>{{ filamentAmsState(row.slot, row.spool) }}</span>
-                    <span v-if="row.spool && isFilamentSpoolSkuReviewDeferred(row.spool)" class="muted small-text">{{ t("inventory.waitingRfidReviewShort") }}</span>
-                    <button
-                      v-else-if="row.spool && isFilamentSpoolPendingConfirm(row.spool)"
-                      class="text-action compact"
-                      type="button"
-                      :title="t('inventory.confirmSkuTitle')"
-                      @click.stop="openConfirmFilamentSpoolSku(row.spool)"
-                    >
-                      {{ t("inventory.confirmSku") }}
-                    </button>
-                  </td>
-                  <td class="inventory-inline-action">
-                    <button v-if="row.spool" class="icon-button compact" type="button" :title="t('common.edit')" @click="openFilamentSpoolDialog(row.spool)"><PencilLine :size="15" /></button>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
-        </div>
-        <div class="inventory-split-grid">
-        <section class="panel">
-          <div class="panel-header"><h3>{{ t("inventory.sealedStock") }}</h3><Archive :size="18" /></div>
-          <div class="table-wrap">
-            <table>
-              <thead><tr>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('sealedStock', 'id')">{{ t("table.id") }} <span>{{ inventorySortIndicator("sealedStock", "id") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('sealedStock', 'filament')">{{ t("table.filament") }} <span>{{ inventorySortIndicator("sealedStock", "filament") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('sealedStock', 'sealed')">{{ t("form.sealedQty") }} <span>{{ inventorySortIndicator("sealedStock", "sealed") }}</span></button></th>
-                <th>{{ t("inventory.sealedWeight") }}</th>
-                <th>{{ t("inventory.openedWeight") }}</th>
-                <th>{{ t("table.actions") }}</th>
-              </tr></thead>
-              <tbody>
-                <tr v-if="!sortedFilamentStockSkus.length"><td colspan="6" class="empty">{{ t("inventory.noSealedStock") }}</td></tr>
-                <tr v-for="sku in sortedFilamentStockSkus" :key="sku.id">
-                  <td>{{ sku.id }}</td>
-                  <td><span class="swatch" :style="{ background: filamentColor(sku.color_hex || sku.color_value) }"></span>{{ filamentSkuLabel(sku) }}</td>
-                  <td>{{ sku.sealed_quantity }}</td>
-                  <td>{{ filamentWeight(skuSealedWeight(sku)) }}</td>
-                  <td>{{ filamentWeight(skuOpenedWeight(sku)) }}</td>
-                  <td class="inventory-inline-action">
-                    <button class="icon-button compact" type="button" :title="t('inventory.adjustStock')" @click="openSealedStockAdjust(sku)"><PencilLine :size="15" /></button>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
-        <section class="panel">
-          <div class="panel-header"><h3>{{ t("inventory.openedUnused") }}</h3><Archive :size="18" /></div>
-          <div class="table-wrap">
-            <table>
-              <thead><tr>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('openedUnused', 'id')">{{ t("table.id") }} <span>{{ inventorySortIndicator("openedUnused", "id") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('openedUnused', 'spool')">{{ t("table.spool") }} <span>{{ inventorySortIndicator("openedUnused", "spool") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('openedUnused', 'status')">{{ t("table.status") }} <span>{{ inventorySortIndicator("openedUnused", "status") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('openedUnused', 'remaining')">{{ t("inventory.remaining") }} <span>{{ inventorySortIndicator("openedUnused", "remaining") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('openedUnused', 'location')">{{ t("table.location") }} <span>{{ inventorySortIndicator("openedUnused", "location") }}</span></button></th>
-                <th>{{ t("table.actions") }}</th>
-              </tr></thead>
-              <tbody>
-                <tr v-if="!sortedFilamentOpenedUnusedSpools.length"><td colspan="6" class="empty">{{ t("inventory.noOpenedUnused") }}</td></tr>
-                <tr v-for="spool in sortedFilamentOpenedUnusedSpools" :key="spool.id" :class="{ selected: selectedFilamentSpoolId === spool.id }">
-                  <td>{{ spool.id }}</td>
-                  <td><span class="swatch" :style="{ background: filamentColor(spool.color_hex || spool.color_value) }"></span>{{ filamentSpoolLabel(spool) }}</td>
-                  <td>{{ filamentSpoolStatusLabel(spool.status) }}</td>
-                  <td>{{ filamentSpoolRemainingLabel(spool) }}</td>
-                  <td>{{ filamentSpoolLocation(spool) }}</td>
-                  <td class="inventory-inline-action">
-                    <button class="icon-button compact" type="button" :title="t('common.edit')" @click="openFilamentSpoolDialog(spool)"><PencilLine :size="15" /></button>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
-        </div>
-        <section v-if="inventoryPendingConfirmCount" id="inventory-pending-confirm" class="panel">
-          <div class="panel-header"><h3>{{ t("inventory.pendingConfirm") }}</h3><AlertCircle :size="18" /></div>
-          <div class="table-wrap">
-            <table>
-              <thead><tr>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('pendingConfirm', 'id')">{{ t("table.id") }} <span>{{ inventorySortIndicator("pendingConfirm", "id") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('pendingConfirm', 'spool')">{{ t("table.spool") }} <span>{{ inventorySortIndicator("pendingConfirm", "spool") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('pendingConfirm', 'remaining')">{{ t("inventory.remaining") }} <span>{{ inventorySortIndicator("pendingConfirm", "remaining") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('pendingConfirm', 'location')">{{ t("table.location") }} <span>{{ inventorySortIndicator("pendingConfirm", "location") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('pendingConfirm', 'status')">{{ t("table.status") }} <span>{{ inventorySortIndicator("pendingConfirm", "status") }}</span></button></th>
-                <th>{{ t("table.actions") }}</th>
-              </tr></thead>
-              <tbody>
-                <tr v-if="!sortedPendingConfirmSpools.length"><td colspan="6" class="empty">{{ t("inventory.noPendingConfirm") }}</td></tr>
-                <tr v-for="spool in sortedPendingConfirmSpools" :key="spool.id" class="pending-row">
-                  <td>{{ spool.id }}</td>
-                  <td><span class="swatch" :style="{ background: filamentColor(spool.color_hex || spool.color_value) }"></span>{{ filamentSpoolLabel(spool) }}</td>
-                  <td>{{ filamentSpoolRemainingLabel(spool) }}</td>
-                  <td>{{ filamentSpoolCurrentPlace(spool) }}</td>
-                  <td>{{ filamentSpoolStatusLabel(spool.status) }}</td>
-                  <td class="inventory-inline-action">
-                    <button class="text-action compact" type="button" :title="t('inventory.confirmSkuTitle')" @click="openConfirmFilamentSpoolSku(spool)">{{ t("inventory.confirmSku") }}</button>
-                    <button class="icon-button compact" type="button" :title="t('common.edit')" @click="openFilamentSpoolDialog(spool)"><PencilLine :size="15" /></button>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
-        <section v-if="sortedNeedsLocationSpools.length" class="panel">
-          <div class="panel-header"><h3>{{ t("inventory.needsLocation") }}</h3><Archive :size="18" /></div>
-          <div class="table-wrap">
-            <table>
-              <thead><tr>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('needsLocation', 'id')">{{ t("table.id") }} <span>{{ inventorySortIndicator("needsLocation", "id") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('needsLocation', 'spool')">{{ t("table.spool") }} <span>{{ inventorySortIndicator("needsLocation", "spool") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('needsLocation', 'location')">{{ t("table.location") }} <span>{{ inventorySortIndicator("needsLocation", "location") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('needsLocation', 'identity')">{{ t("inventory.identity") }} <span>{{ inventorySortIndicator("needsLocation", "identity") }}</span></button></th>
-                <th>{{ t("table.actions") }}</th>
-              </tr></thead>
-              <tbody>
-                <tr v-for="spool in sortedNeedsLocationSpools" :key="spool.id">
-                  <td>{{ spool.id }}</td>
-                  <td>{{ filamentSpoolLabel(spool) }}</td>
-                  <td>{{ filamentSpoolLocation(spool) }}</td>
-                  <td class="mono">{{ formatCell(spool.official_spool_uid || spool.identity_key) }}</td>
-                  <td class="inventory-inline-action">
-                    <button class="icon-button compact" type="button" :title="t('common.edit')" @click="openFilamentSpoolDialog(spool)"><PencilLine :size="15" /></button>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
-        </template>
-
-        <template v-else-if="inventoryPage === 'history'">
-        <section class="panel">
-          <div class="panel-header">
-            <div>
-              <h3>{{ t("inventory.historySpools") }}</h3>
-              <p class="panel-subtitle">{{ t("inventory.historySpoolsSubtitle") }}</p>
-            </div>
-            <Archive :size="18" />
-          </div>
-          <div class="toolbar filters sku-filter-toolbar">
-            <label class="search-field">
-              <Search :size="16" />
-              <input v-model="inventoryHistorySearch" :placeholder="t('inventory.searchHistorySpools')" />
-            </label>
-          </div>
-          <div class="table-wrap">
-            <table>
-              <thead><tr>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('history', 'id')">{{ t("table.id") }} <span>{{ inventorySortIndicator("history", "id") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('history', 'spool')">{{ t("table.filament") }} <span>{{ inventorySortIndicator("history", "spool") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('history', 'status')">{{ t("table.status") }} <span>{{ inventorySortIndicator("history", "status") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('history', 'location')">{{ t("inventory.lastLocation") }} <span>{{ inventorySortIndicator("history", "location") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('history', 'remaining')">{{ t("inventory.remaining") }} <span>{{ inventorySortIndicator("history", "remaining") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('history', 'time')">{{ t("inventory.historyTime") }} <span>{{ inventorySortIndicator("history", "time") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('history', 'note')">{{ t("form.note") }} <span>{{ inventorySortIndicator("history", "note") }}</span></button></th>
-                <th>{{ t("table.actions") }}</th>
-              </tr></thead>
-              <tbody>
-                <tr v-if="!sortedHistoricalFilamentSpools.length"><td colspan="8" class="empty">{{ t("inventory.noHistorySpools") }}</td></tr>
-                <tr v-for="spool in sortedHistoricalFilamentSpools" :key="spool.id">
-                  <td>{{ spool.id }}</td>
-                  <td><span class="swatch" :style="{ background: filamentColor(spool.color_hex || spool.color_value) }"></span>{{ filamentSpoolLabel(spool) }}</td>
-                  <td>{{ filamentSpoolStatusLabel(spool.status) }}</td>
-                  <td>{{ filamentSpoolLastLocation(spool) }}</td>
-                  <td>{{ filamentSpoolRemainingLabel(spool) }}</td>
-                  <td>{{ filamentSpoolHistoryTime(spool) }}</td>
-                  <td>{{ formatCell(spool.note) }}</td>
-                  <td class="inventory-inline-action">
-                    <button class="icon-button compact" type="button" :title="t('common.edit')" @click="openFilamentSpoolDialog(spool)"><PencilLine :size="15" /></button>
-                    <button class="text-action compact" type="button" @click="updateFilamentSpoolStatus(spool, 'opened_in_storage')">{{ t("inventory.restoreOpened") }}</button>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
-        </template>
-
-        <template v-else-if="inventoryPage === 'brands'">
-        <section class="panel">
-          <div class="panel-header"><h3>{{ t("inventory.brands") }}</h3><button class="icon-button compact" type="button" :title="t('inventory.addBrand')" @click="openFilamentBrandCreate"><Plus :size="16" /></button></div>
-          <div class="table-wrap">
-            <table>
-              <thead><tr>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('brands', 'id')">{{ t("table.id") }} <span>{{ inventorySortIndicator("brands", "id") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('brands', 'brand')">{{ t("form.brand") }} <span>{{ inventorySortIndicator("brands", "brand") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('brands', 'aliases')">{{ t("inventory.aliases") }} <span>{{ inventorySortIndicator("brands", "aliases") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('brands', 'typeSeries')">{{ t("inventory.typeSeries") }} <span>{{ inventorySortIndicator("brands", "typeSeries") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('brands', 'skus')">{{ t("inventory.skus") }} <span>{{ inventorySortIndicator("brands", "skus") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('brands', 'spools')">{{ t("inventory.spools") }} <span>{{ inventorySortIndicator("brands", "spools") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('brands', 'note')">{{ t("form.note") }} <span>{{ inventorySortIndicator("brands", "note") }}</span></button></th>
-                <th>{{ t("table.actions") }}</th>
-              </tr></thead>
-              <tbody>
-                <tr v-if="!sortedFilamentBrands.length"><td colspan="8" class="empty">{{ t("inventory.noBrands") }}</td></tr>
-                <tr v-for="brand in sortedFilamentBrands" :key="brand.id">
-                  <td>{{ brand.id }}</td>
-                  <td>{{ brand.name }}</td>
-                  <td>{{ (brand.aliases || []).join(", ") || "—" }}</td>
-                  <td>{{ brand.type_series_count || 0 }}</td>
-                  <td>{{ brand.sku_count || 0 }}</td>
-                  <td>{{ brand.spool_count || 0 }}</td>
-                  <td>{{ formatCell(brand.note) }}</td>
-                  <td class="inventory-inline-action">
-                    <button class="icon-button compact" type="button" :title="t('common.edit')" @click="editFilamentBrand(brand)"><PencilLine :size="15" /></button>
-                    <button class="icon-button compact danger" type="button" :title="t('common.delete')" @click="deleteFilamentBrand(brand)"><Trash2 :size="15" /></button>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
-        </template>
-
-        <template v-else-if="inventoryPage === 'types'">
-        <section class="panel">
-          <div class="panel-header"><h3>{{ t("inventory.typeSeries") }}</h3><button class="icon-button compact" type="button" :title="t('inventory.addTypeSeries')" @click="openFilamentTypeSeriesCreate"><Plus :size="16" /></button></div>
-          <div class="table-wrap">
-            <table>
-              <thead><tr>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('typeSeries', 'id')">{{ t("table.id") }} <span>{{ inventorySortIndicator("typeSeries", "id") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('typeSeries', 'brand')">{{ t("form.brand") }} <span>{{ inventorySortIndicator("typeSeries", "brand") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('typeSeries', 'material')">{{ t("table.material") }} <span>{{ inventorySortIndicator("typeSeries", "material") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('typeSeries', 'emptyWeight')">{{ t("inventory.emptySpoolWeight") }} <span>{{ inventorySortIndicator("typeSeries", "emptyWeight") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('typeSeries', 'skus')">{{ t("inventory.skus") }} <span>{{ inventorySortIndicator("typeSeries", "skus") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('typeSeries', 'spools')">{{ t("inventory.spools") }} <span>{{ inventorySortIndicator("typeSeries", "spools") }}</span></button></th>
-                <th>{{ t("table.actions") }}</th>
-              </tr></thead>
-              <tbody>
-                <tr v-if="!sortedFilamentTypeSeries.length"><td colspan="7" class="empty">{{ t("inventory.noTypeSeries") }}</td></tr>
-                <tr v-for="row in sortedFilamentTypeSeries" :key="row.id">
-                  <td>{{ row.id }}</td>
-                  <td>{{ filamentBrandDisplay(row.brands) }}</td>
-                  <td>{{ filamentTypeSeriesLabel(row) }}</td>
-                  <td>{{ filamentWeight(row.empty_spool_weight_g) }}</td>
-                  <td>{{ row.sku_count }}</td>
-                  <td>{{ row.spool_count }}</td>
-                  <td class="inventory-inline-action">
-                    <button class="icon-button compact" type="button" :title="t('common.edit')" @click="editFilamentTypeSeries(row)"><PencilLine :size="15" /></button>
-                    <button class="icon-button compact danger" type="button" :title="t('common.delete')" @click="deleteFilamentTypeSeries(row)"><Trash2 :size="15" /></button>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
-        </template>
-
-        <template v-else-if="inventoryPage === 'skus'">
-        <section class="panel">
-          <div class="panel-header"><h3>{{ t("inventory.skus") }}</h3><button class="icon-button compact" type="button" :title="t('inventory.addSku')" @click="openFilamentSkuCreate"><Plus :size="16" /></button></div>
-          <div class="toolbar filters sku-filter-toolbar">
-            <label class="search-field">
-              <Search :size="16" />
-              <input v-model="filamentSkuFilters.search" :placeholder="t('inventory.searchSku')" />
-            </label>
-            <AppSelect v-model="filamentSkuFilters.brand_id" :options="filamentSkuFilterBrandOptions" />
-            <AppSelect v-model="filamentSkuFilters.type_series_id" :options="filamentSkuFilterTypeSeriesOptions" />
-            <AppSelect v-model="filamentSkuFilters.nominal_weight_g" :options="filamentSkuWeightOptions" />
-            <AppSelect v-model="filamentSkuFilters.color_state" :options="filamentSkuColorStateOptions" />
-            <button class="secondary" type="button" @click="resetFilamentSkuFilters">{{ t("common.clear") }}</button>
-          </div>
-          <div class="table-wrap">
-            <table>
-              <thead><tr>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('skus', 'id')">{{ t("table.id") }} <span>{{ inventorySortIndicator("skus", "id") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('skus', 'brand')">{{ t("form.brand") }} <span>{{ inventorySortIndicator("skus", "brand") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('skus', 'material')">{{ t("table.material") }} <span>{{ inventorySortIndicator("skus", "material") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('skus', 'color')">{{ t("inventory.officialColorName") }} <span>{{ inventorySortIndicator("skus", "color") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('skus', 'weight')">{{ t("inventory.nominalWeight") }} <span>{{ inventorySortIndicator("skus", "weight") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('skus', 'sealed')">{{ t("form.sealedQty") }} <span>{{ inventorySortIndicator("skus", "sealed") }}</span></button></th>
-                <th>{{ t("table.actions") }}</th>
-              </tr></thead>
-              <tbody>
-                <tr v-if="!sortedFilteredFilamentSkus.length"><td colspan="7" class="empty">{{ t("inventory.noSkuMatches") }}</td></tr>
-                <tr v-for="sku in sortedFilteredFilamentSkus" :key="sku.id">
-                  <td>{{ sku.id }}</td>
-                  <td>{{ filamentBrandDisplay(sku.brands) }}</td>
-                  <td>{{ filamentTypeSeriesDisplay(sku.type_series) }}</td>
-                  <td>
-                    <span class="swatch" :style="{ background: filamentColor(sku.color_hex || sku.color_value) }"></span>{{ filamentColorDisplay(sku.color_hex || sku.color_value, sku.color_name, sku) }}
-                    <button v-if="colorNeedsMapping(sku.color_hex || sku.color_value, sku)" class="text-action compact" type="button" @click="startFilamentColorMapping(sku.color_hex || sku.color_value, sku)">{{ t("inventory.addOfficialName") }}</button>
-                  </td>
-                  <td>{{ filamentWeight(sku.nominal_weight_g) }}</td>
-                  <td>{{ sku.sealed_quantity }}</td>
-                  <td class="inventory-inline-action">
-                    <button class="icon-button compact" type="button" :title="t('common.edit')" @click="editFilamentSku(sku)"><PencilLine :size="15" /></button>
-                    <button class="icon-button compact danger" type="button" :title="t('common.delete')" @click="deleteFilamentSku(sku)"><Trash2 :size="15" /></button>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
-        </template>
-
-        <template v-else-if="inventoryPage === 'colors'">
-        <section class="panel">
-          <div class="panel-header"><h3>{{ t("inventory.colorMappings") }}</h3><button class="icon-button compact" type="button" :title="t('inventory.addColorMapping')" @click="openFilamentColorMappingCreate"><Plus :size="16" /></button></div>
-          <div class="table-wrap">
-            <table>
-              <thead><tr>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('colorMappings', 'id')">{{ t("table.id") }} <span>{{ inventorySortIndicator("colorMappings", "id") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('colorMappings', 'brand')">{{ t("form.brand") }} <span>{{ inventorySortIndicator("colorMappings", "brand") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('colorMappings', 'material')">{{ t("table.material") }} <span>{{ inventorySortIndicator("colorMappings", "material") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('colorMappings', 'hex')">{{ t("inventory.hexValue") }} <span>{{ inventorySortIndicator("colorMappings", "hex") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('colorMappings', 'color')">{{ t("inventory.officialColorName") }} <span>{{ inventorySortIndicator("colorMappings", "color") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('colorMappings', 'note')">{{ t("form.note") }} <span>{{ inventorySortIndicator("colorMappings", "note") }}</span></button></th>
-                <th>{{ t("table.actions") }}</th>
-              </tr></thead>
-              <tbody>
-                <tr v-if="!sortedFilamentColorMappings.length"><td colspan="7" class="empty">{{ t("inventory.noColorMappings") }}</td></tr>
-                <tr v-for="mapping in sortedFilamentColorMappings" :key="mapping.id">
-                  <td>{{ mapping.id }}</td>
-                  <td>{{ formatCell(mapping.brand_name) }}</td>
-                  <td>{{ formatCell(mapping.material_type || mapping.material) }} / {{ formatCell(mapping.series_name || mapping.series) }}</td>
-                  <td><span class="swatch" :style="{ background: filamentColor(mapping.color_hex || mapping.hex_value) }"></span><span class="mono">{{ mapping.color_hex || mapping.hex_value }}</span></td>
-                  <td>{{ mapping.color_name || mapping.official_name }}</td>
-                  <td>{{ formatCell(mapping.note) }}</td>
-                  <td class="inventory-inline-action">
-                    <button class="icon-button compact" type="button" :title="t('common.edit')" @click="editFilamentColorMapping(mapping)"><PencilLine :size="15" /></button>
-                    <button class="icon-button compact danger" type="button" :title="t('common.delete')" @click="deleteFilamentColorMapping(mapping)"><Trash2 :size="15" /></button>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
-        <section class="panel">
-          <div class="panel-header"><h3>{{ t("inventory.incompleteSkuColors") }}</h3><Archive :size="18" /></div>
-          <div class="table-wrap">
-            <table>
-              <thead><tr>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('colorGaps', 'id')">{{ t("table.id") }} <span>{{ inventorySortIndicator("colorGaps", "id") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('colorGaps', 'brand')">{{ t("form.brand") }} <span>{{ inventorySortIndicator("colorGaps", "brand") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('colorGaps', 'material')">{{ t("table.material") }} <span>{{ inventorySortIndicator("colorGaps", "material") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('colorGaps', 'color')">{{ t("inventory.officialColorName") }} <span>{{ inventorySortIndicator("colorGaps", "color") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('colorGaps', 'hex')">{{ t("inventory.hexValue") }} <span>{{ inventorySortIndicator("colorGaps", "hex") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('colorGaps', 'source')">{{ t("inventory.source") }} <span>{{ inventorySortIndicator("colorGaps", "source") }}</span></button></th>
-              </tr></thead>
-              <tbody>
-                <tr v-if="!sortedFilamentColorMappingGaps.length"><td colspan="6" class="empty">{{ t("inventory.noColorGaps") }}</td></tr>
-                <tr v-for="row in sortedFilamentColorMappingGaps" :key="row.sku_id">
-                  <td>{{ row.sku_id }}</td>
-                  <td>{{ filamentBrandDisplay(row.brands) }}</td>
-                  <td>{{ filamentTypeSeriesDisplay(row.type_series) }}</td>
-                  <td>{{ formatCell(row.color_name) }}</td>
-                  <td><span class="swatch" :style="{ background: filamentColor(row.color_hex) }"></span><span class="mono">{{ formatCell(row.color_hex) }}</span></td>
-                  <td>{{ row.missing.join(", ") }}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
-        </template>
-
-      </section>
-
-      <section v-else-if="activeView === 'maintenance'" class="view">
-        <section class="maintenance-hero">
-          <div>
-            <div class="mini-label">{{ t("maintenance.titleKicker") }}</div>
-            <h2>{{ selectedPrinter ? selectedPrinter.name : t("nav.maintenance") }}</h2>
-            <p>{{ t("maintenance.subtitle") }}</p>
-          </div>
-          <div class="maintenance-hero-stats">
-            <div>
-              <span>{{ t("maintenance.currentHours") }}</span>
-              <strong>{{ selectedPrinterPrintHours }}h</strong>
-            </div>
-            <div>
-              <span>{{ t("maintenance.health") }}</span>
-              <strong>{{ maintenanceHealthPercent }}%</strong>
-            </div>
-          </div>
-        </section>
-
-        <div class="maintenance-summary-grid">
-          <div v-for="item in maintenanceStats" :key="item.label" class="maintenance-summary-card" :class="item.tone">
-            <span>{{ item.label }}</span>
-            <strong>{{ item.value }}</strong>
-          </div>
-          <div class="maintenance-summary-card neutral">
-            <span>{{ t("maintenance.totalItems") }}</span>
-            <strong>{{ maintenanceOverview?.total_items || 0 }}</strong>
-          </div>
-        </div>
-
-        <div class="maintenance-layout">
-          <section class="panel maintenance-fleet-panel">
-            <div class="panel-header">
-              <h3>{{ t("maintenance.fleet") }}</h3>
-              <Wrench :size="18" />
-            </div>
-            <div class="maintenance-printer-list">
-              <button
-                v-for="printer in maintenanceOverview?.printers || []"
-                :key="printer.printer_id"
-                type="button"
-                class="maintenance-printer-row"
-                :class="{ selected: printer.printer_id === selectedPrinterId }"
-                @click="selectedPrinterId = Number(printer.printer_id); loadMaintenance()"
-              >
-                <span>{{ printer.printer_name }}</span>
-                <strong>{{ printer.due_count }} / {{ printer.soon_count }} / {{ printer.ok_count }}</strong>
-              </button>
-              <div v-if="!maintenanceOverview?.printers?.length" class="empty">{{ t("common.empty") }}</div>
-            </div>
-          </section>
-
-          <section class="panel maintenance-worklist-panel">
-            <div class="panel-header">
-              <div>
-                <h3>{{ t("maintenance.worklist") }}</h3>
-                <p class="panel-subtitle">{{ t("maintenance.worklistSubtitle") }}</p>
-              </div>
-              <span class="status-pill" :class="maintenanceOverview?.due_count ? 'bad' : maintenanceOverview?.soon_count ? 'warn' : 'good'">
-                <span class="dot"></span>
-                {{ maintenanceOverview?.due_count ? t("maintenance.due") : maintenanceOverview?.soon_count ? t("maintenance.soon") : t("maintenance.ok") }}
-              </span>
-            </div>
-
-            <div v-if="!maintenanceItems.length" class="maintenance-empty">
-              <Wrench :size="24" />
-              <strong>{{ t("common.empty") }}</strong>
-            </div>
-
-            <div v-else class="maintenance-group-list">
-              <section v-for="group in maintenanceStatusGroups" :key="group.key" class="maintenance-group">
-                <div class="maintenance-group-header">
-                  <span class="status-pill" :class="group.tone"><span class="dot"></span>{{ group.label }}</span>
-                  <small>{{ group.items.length }}</small>
-                </div>
-
-                <article
-                  v-for="item in group.items"
-                  :key="item.id"
-                  class="maintenance-card"
-                  :class="maintenanceTone(item.due_status)"
-                >
-                  <div class="maintenance-card-main">
-                    <div class="maintenance-title-row">
-                      <div class="maintenance-icon" :class="{ ams: item.target_type === 'ams' }">
-                        <Boxes v-if="item.target_type === 'ams'" :size="16" />
-                        <Wrench v-else :size="16" />
-                      </div>
-                      <div>
-                        <h4>{{ item.maintenance_type.name }}</h4>
-                        <div v-if="item.target_label" class="maintenance-target">{{ item.target_label }}</div>
-                        <p>{{ item.maintenance_type.description }}</p>
-                      </div>
-                    </div>
-
-                    <div class="maintenance-progress-row">
-                      <div class="maintenance-progress-label">
-                        <span>{{ t("maintenance.sinceLast") }} {{ item.hours_since_last }}h</span>
-                        <strong>{{ maintenanceRemainingLabel(item) }}</strong>
-                      </div>
-                      <div class="maintenance-progress-track">
-                        <i :style="{ width: `${maintenanceProgress(item)}%` }"></i>
-                      </div>
-                    </div>
-
-                    <div class="maintenance-facts">
-                      <div><span>{{ t("maintenance.interval") }}</span><strong>{{ item.interval }}h</strong></div>
-                      <div><span>{{ t("maintenance.currentHours") }}</span><strong>{{ item.current_print_hours }}h</strong></div>
-                      <div><span>{{ t("maintenance.lastDone") }}</span><strong>{{ formatCell(item.last_performed_at) }}</strong></div>
-                    </div>
-                  </div>
-
-                  <div class="maintenance-actions">
-                    <input v-model="maintenanceNotes[item.id]" :placeholder="t('maintenance.note')" />
-                    <button class="primary" type="button" @click="performMaintenance(item)">
-                      <CheckCircle2 :size="17" />
-                      {{ t("maintenance.perform") }}
-                    </button>
-                  </div>
-                </article>
-              </section>
-            </div>
-          </section>
-        </div>
-      </section>
-
-      <section v-else-if="activeView === 'notifications'" class="view">
-        <div class="grid two wide">
-          <section class="panel">
-            <div class="panel-header"><h3>{{ t("notifications.targets") }}</h3><Send :size="18" /></div>
-            <div class="form-grid compact-form">
-              <AppSelect v-model="notificationTargetForm.channel" :options="notificationChannelOptions" />
-              <input v-model="notificationTargetForm.name" :placeholder="t('form.name')" />
-              <input v-model="notificationTargetForm.url" :placeholder="t('notifications.url')" />
-              <input v-model="notificationTargetForm.token" :placeholder="t('notifications.token')" type="password" />
-              <label class="checkbox"><input v-model="notificationTargetForm.enabled" type="checkbox" /> {{ t("common.active") }}</label>
-              <button class="primary" type="button" @click="saveNotificationTarget"><Save :size="17" />{{ t("common.save") }}</button>
-            </div>
-            <div class="table-wrap">
-              <table>
-                <thead><tr><th>{{ t("table.name") }}</th><th>{{ t("table.type") }}</th><th>{{ t("table.status") }}</th><th>{{ t("table.details") }}</th><th>{{ t("table.actions") }}</th></tr></thead>
-                <tbody>
-                  <tr v-if="!notificationTargets.length"><td colspan="5" class="empty">{{ t("common.empty") }}</td></tr>
-                  <tr v-for="target in notificationTargets" :key="target.id">
-                    <td>{{ target.name }}</td>
-                    <td>{{ target.channel }}</td>
-                    <td>{{ target.enabled ? t("common.active") : t("common.inactive") }}</td>
-                    <td>{{ formatCell(target.display_config) }}</td>
-                    <td>
-                      <button class="icon-button compact" type="button" :title="t('table.actions')" @click="editNotificationTarget(target)"><PencilLine :size="14" /></button>
-                      <button class="icon-button compact" type="button" :title="t('notifications.test')" @click="testNotificationTarget(target)"><Send :size="14" /></button>
-                      <button class="icon-button compact danger" type="button" :title="t('common.delete')" @click="deleteNotificationTarget(target)"><Trash2 :size="14" /></button>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </section>
-
-          <section class="panel">
-            <div class="panel-header"><h3>{{ t("notifications.rules") }}</h3><Bell :size="18" /></div>
-            <div class="form-grid compact-form">
-              <input v-model="notificationRuleForm.name" :placeholder="t('form.name')" />
-              <input v-model="notificationRuleForm.event_types" :placeholder="t('notifications.eventTypes')" />
-              <input v-model="notificationRuleForm.printer_ids" :placeholder="t('notifications.printerIds')" />
-              <input v-model="notificationRuleForm.severities" :placeholder="t('notifications.severities')" />
-              <input v-model="notificationRuleForm.quiet_start" type="time" />
-              <input v-model="notificationRuleForm.quiet_end" type="time" />
-              <input v-model.number="notificationRuleForm.repeat_suppression_minutes" type="number" min="0" />
-              <label class="checkbox"><input v-model="notificationRuleForm.enabled" type="checkbox" /> {{ t("common.active") }}</label>
-              <button class="primary" type="button" @click="saveNotificationRule"><Save :size="17" />{{ t("common.save") }}</button>
-            </div>
-            <div class="table-wrap">
-              <table>
-                <thead><tr><th>{{ t("table.name") }}</th><th>{{ t("notifications.eventTypes") }}</th><th>{{ t("table.status") }}</th><th>{{ t("table.actions") }}</th></tr></thead>
-                <tbody>
-                  <tr v-if="!notificationRules.length"><td colspan="4" class="empty">{{ t("common.empty") }}</td></tr>
-                  <tr v-for="rule in notificationRules" :key="rule.id">
-                    <td>{{ rule.name }}</td>
-                    <td>{{ (rule.event_types || []).join(', ') || t("common.none") }}</td>
-                    <td>{{ rule.enabled ? t("common.active") : t("common.inactive") }}</td>
-                    <td>
-                      <button class="icon-button compact" type="button" @click="editNotificationRule(rule)"><PencilLine :size="14" /></button>
-                      <button class="icon-button compact danger" type="button" @click="deleteNotificationRule(rule)"><Trash2 :size="14" /></button>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </section>
-        </div>
-        <section class="panel">
-          <div class="panel-header"><h3>{{ t("notifications.deliveries") }}</h3><Database :size="18" /></div>
-          <div class="table-wrap">
-            <table>
-              <thead><tr><th>{{ t("table.time") }}</th><th>{{ t("table.type") }}</th><th>{{ t("table.status") }}</th><th>{{ t("table.message") }}</th></tr></thead>
-              <tbody>
-                <tr v-if="!notificationDeliveries.length"><td colspan="4" class="empty">{{ t("common.empty") }}</td></tr>
-                <tr v-for="delivery in notificationDeliveries" :key="delivery.id">
-                  <td>{{ formatCell(delivery.created_at) }}</td>
-                  <td>{{ delivery.event_type }}</td>
-                  <td>{{ displayCell(delivery.status) }}</td>
-                  <td>{{ softCell(delivery.error_summary) }}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
-      </section>
-
-      <section v-else-if="activeView === 'printers'" class="view">
-        <div class="grid two wide">
-          <section class="panel">
-            <div class="panel-header"><h3>{{ t("printers.config") }}</h3><Settings :size="18" /></div>
-            <div class="form-grid">
-              <label>{{ t("form.name") }}<input v-model="printerForm.name" /></label>
-              <label>{{ t("form.host") }}<input v-model="printerForm.host" /></label>
-              <label>{{ t("form.port") }}<input v-model.number="printerForm.port" type="number" /></label>
-              <label>{{ t("form.serial") }}<input v-model="printerForm.serial" /></label>
-              <label class="access-code-field">
-                {{ t("form.accessCode") }}
-                <div class="input-with-action">
-                  <input v-model="printerForm.access_code" :type="accessCodeVisible ? 'text' : 'password'" autocomplete="off" />
-                  <button
-                    class="icon-button compact"
-                    type="button"
-                    :disabled="accessCodeRevealLoading"
-                    :title="accessCodeVisible ? t('form.hideAccessCode') : t('form.showAccessCode')"
-                    @click="toggleAccessCodeVisibility"
-                  >
-                    <Loader2 v-if="accessCodeRevealLoading" class="spin" :size="15" />
-                    <EyeOff v-else-if="accessCodeVisible" :size="15" />
-                    <Eye v-else :size="15" />
-                  </button>
-                </div>
-              </label>
-              <div class="printer-security-options">
-                <label class="checkbox"><input v-model="printerForm.tls_enabled" type="checkbox" /> TLS</label>
-                <label class="checkbox"><input v-model="printerForm.certificate_verify" type="checkbox" /> {{ t("form.verifyCert") }}</label>
-              </div>
-            </div>
-            <div class="toolbar printer-config-actions">
-              <button class="primary" type="button" @click="savePrinter"><Save :size="17" />{{ t("common.save") }}</button>
-              <button class="secondary" type="button" @click="connectPrinter"><PlugZap :size="17" />{{ t("common.connect") }}</button>
-              <button class="secondary" type="button" @click="disconnectPrinter"><Unplug :size="17" />{{ t("common.disconnect") }}</button>
-              <button class="secondary" type="button" :disabled="scanning" @click="scanDevices">
-                <Loader2 v-if="scanning" class="spin" :size="17" />
-                <Search v-else :size="17" />
-                {{ scanning ? t("common.scanning") : t("common.scanLan") }}
-              </button>
-            </div>
-            <div v-if="scanning || scanPhase" class="scan-progress">
-              <div class="scan-progress-header">
-                <span>{{ scanPhase }}</span>
-                <strong>{{ scanProgressLabel }}%</strong>
-              </div>
-              <div class="progress-track">
-                <span :style="{ width: `${scanProgressWidth}%` }"></span>
-              </div>
-            </div>
-          </section>
-          <section class="panel">
-            <div class="panel-header"><h3>{{ t("printers.list") }}</h3><Network :size="18" /></div>
-            <div class="table-wrap">
-              <table>
-                <thead><tr><th>{{ t("table.id") }}</th><th>{{ t("table.name") }}</th><th>{{ t("table.host") }}</th><th>{{ t("table.status") }}</th><th>{{ t("table.lastSync") }}</th><th>{{ t("table.actions") }}</th></tr></thead>
-                <tbody>
-                  <tr v-for="printer in printers" :key="printer.id" :class="{ selected: printer.id === selectedPrinterId }" @click="selectedPrinterId = printer.id">
-                    <td>{{ printer.id }}</td>
-                    <td>{{ printer.name }}</td>
-                    <td>{{ printer.host }}</td>
-                    <td>{{ displayCell(printer.connection_status) }}</td>
-                    <td>{{ formatCell(printer.last_sync_at) }}</td>
-                    <td>
-                      <button class="icon-button danger" type="button" :title="t('printers.delete')" @click.stop="deletePrinterConfig(printer)">
-                        <Trash2 :size="16" />
-                      </button>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </section>
-        </div>
-        <section class="panel">
-          <div class="panel-header"><h3>{{ t("printers.discovery") }}</h3><Search :size="18" /></div>
-          <div class="table-wrap">
-            <table>
-              <thead><tr><th>{{ t("table.host") }}</th><th>{{ t("table.model") }}</th><th>{{ t("table.deviceName") }}</th><th>{{ t("table.serial") }}</th><th>{{ t("table.confidence") }}</th><th>{{ t("table.reason") }}</th></tr></thead>
-              <tbody>
-                <tr v-if="!discovery.length"><td colspan="6" class="empty">{{ t("printers.noDiscovery") }}</td></tr>
-                <tr v-for="item in discovery" :key="item.host">
-                  <td>{{ item.host }}</td>
-                  <td>{{ formatCell(item.model) }}</td>
-                  <td>{{ formatCell(item.device_name) }}</td>
-                  <td>{{ formatCell(item.serial) }}</td>
-                  <td>{{ item.confidence }}</td>
-                  <td>{{ item.reason }}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
-      </section>
-
-      <section v-else class="view">
-        <section class="panel">
-          <div class="panel-header">
-            <h3>{{ t("debug.systemInfo") }}</h3>
-            <div class="widget-tools">
-              <button v-if="experimentalFeatures.notifications" class="secondary" type="button" @click="switchView('notifications')">
-                <Bell :size="17" />
-                {{ t("nav.notifications") }}
-              </button>
-              <button class="secondary" type="button" @click="downloadSupportBundle">
-                <Download :size="17" />
-                {{ t("debug.supportBundle") }}
-              </button>
-              <Database :size="18" />
-            </div>
-          </div>
-          <div class="network-info-grid">
-            <div class="network-info-item"><span>{{ t("debug.appVersion") }}</span><strong>{{ systemInfo?.app_version || "--" }}</strong></div>
-            <div class="network-info-item"><span>{{ t("debug.uptime") }}</span><strong>{{ formatDurationSeconds(systemInfo?.uptime_seconds) }}</strong></div>
-            <div class="network-info-item"><span>{{ t("debug.databaseSize") }}</span><strong>{{ formatBytes(systemInfo?.database_size_bytes || 0) }}</strong></div>
-            <div class="network-info-item"><span>{{ t("debug.storageSize") }}</span><strong>{{ formatBytes(systemInfo?.storage_size_bytes || 0) }}</strong></div>
-            <div class="network-info-item"><span>CPU</span><strong>{{ formatCell(systemInfo?.cpu_percent) }}%</strong></div>
-            <div class="network-info-item"><span>{{ t("debug.memory") }}</span><strong>{{ formatBytes(Number(systemInfo?.memory?.project_rss_bytes || systemInfo?.memory?.rss_bytes || 0)) }}</strong></div>
-            <div class="network-info-item"><span>{{ t("debug.configuredPrinters") }}</span><strong>{{ systemInfo?.configured_printers || 0 }}</strong></div>
-            <div class="network-info-item"><span>{{ t("debug.onlinePrinters") }}</span><strong>{{ systemInfo?.online_printers || 0 }}</strong></div>
-          </div>
-        </section>
-        <section class="panel experimental-panel">
-          <div class="panel-header"><h3>{{ t("debug.experimentalFeatures") }}</h3><ShieldAlert :size="18" /></div>
-          <p class="panel-subtitle experimental-note">{{ t("debug.experimentalHint") }}</p>
-          <div class="experimental-feature-grid">
-            <label v-for="item in experimentalFeatureItems" :key="item.key" class="experimental-toggle-row">
-              <span class="experimental-toggle-copy">
-                <strong>{{ item.label }}</strong>
-                <span>{{ item.description }}</span>
-              </span>
-              <input v-model="experimentalFeatures[item.key]" type="checkbox" />
-              <span class="app-switch" :class="{ on: experimentalFeatures[item.key] }" aria-hidden="true"><i></i></span>
-              <em>{{ experimentalFeatures[item.key] ? t("common.on") : t("common.off") }}</em>
-            </label>
-          </div>
-        </section>
-        <section class="panel export-panel">
-          <div class="panel-header"><h3>{{ t("export.title") }}</h3><FileDown :size="18" /></div>
-          <p class="panel-subtitle">{{ t("export.backupHint") }}</p>
-          <div class="export-controls">
-            <AppSelect v-model="exportOptions.type" :options="[{ label: 'JSON', value: 'json' }, { label: 'CSV ZIP', value: 'csv' }]" />
-            <button class="primary" type="button" @click="downloadExport"><Download :size="17" />{{ t("export.download") }}</button>
-          </div>
-          <div class="export-section-grid">
-            <label v-for="section in exportSectionItems" :key="section.key" class="checkbox export-section">
-              <input
-                type="checkbox"
-                :checked="exportOptions.sections.includes(section.key)"
-                @change="toggleExportSection(section.key, checkboxChecked($event))"
-              />
-              {{ section.label }}
-            </label>
-          </div>
-        </section>
-        <section class="panel export-panel">
-          <div class="panel-header"><h3>{{ t("export.importTitle") }}</h3><Upload :size="18" /></div>
-          <p class="panel-subtitle">{{ t("export.importHint") }}</p>
-          <div class="export-controls">
-            <AppSelect v-model="importOptions.mode" :options="importModeOptions" />
-            <button class="primary" type="button" @click="importFileInput?.click()"><Upload :size="17" />{{ t("export.importJson") }}</button>
-            <input ref="importFileInput" class="hidden-file-input" type="file" accept="application/json,.json" @change="importBackupFile" />
-          </div>
-          <pre v-if="importResult" class="json-block import-result">{{ JSON.stringify(importResult.counts || importResult, null, 2) }}</pre>
-        </section>
-        <div class="grid two wide debug-grid">
-          <section class="panel debug-card">
-            <div class="panel-header"><h3>{{ t("debug.events") }}</h3><Activity :size="18" /></div>
-            <div class="table-wrap debug-scroll">
-              <table>
-                <thead><tr><th>{{ t("table.time") }}</th><th>{{ t("table.type") }}</th><th>{{ t("table.severity") }}</th><th>{{ t("table.message") }}</th></tr></thead>
-                <tbody>
-                  <tr v-for="item in recentEvents" :key="item.id">
-                    <td>{{ formatCell(item.created_at) }}</td>
-                    <td>{{ eventTypeLabel(item) }}</td>
-                    <td>{{ displayCell(item.severity) }}</td>
-                    <td>{{ eventMessage(item) }}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </section>
-          <section class="panel debug-card">
-            <div class="panel-header"><h3>{{ t("debug.rawMqtt") }}</h3><Database :size="18" /></div>
-            <pre class="json-block debug-scroll">{{ JSON.stringify(rawMqtt, null, 2) }}</pre>
-          </section>
-        </div>
-      </section>
+      <OverviewPage v-if="activeView === 'overview'" :ctx="viewContext" />
+      <DashboardPage v-else-if="activeView === 'dashboard'" :ctx="viewContext" />
+      <EventsPage v-else-if="activeView === 'events'" :ctx="viewContext" />
+      <PrintLogPage v-else-if="activeView === 'printLog'" :ctx="viewContext" />
+      <MetricsPage v-else-if="activeView === 'metrics'" :ctx="viewContext" />
+      <StoragePage v-else-if="activeView === 'storage'" :ctx="viewContext" />
+      <AmsPage v-else-if="activeView === 'ams'" :ctx="viewContext" />
+      <InventoryPage v-else-if="activeView === 'inventory'" :ctx="viewContext" />
+      <MaintenancePage v-else-if="activeView === 'maintenance'" :ctx="viewContext" />
+      <NotificationsPage v-else-if="activeView === 'notifications'" :ctx="viewContext" />
+      <PrintersPage v-else-if="activeView === 'printers'" :ctx="viewContext" />
+      <DebugPage v-else :ctx="viewContext" />
     </main>
 
-    <div v-if="cameraLightboxOpen" class="modal-backdrop camera-lightbox-backdrop" @click.self="closeCameraLightbox">
-      <section class="modal-panel camera-lightbox-modal">
-        <div class="modal-header">
-          <div class="modal-title-stack">
-            <h3>{{ t("dashboard.liveCamera") }}</h3>
-            <p>{{ selectedPrinter?.name || t("dashboard.cameraStreamForwarding") }}</p>
-          </div>
-          <button class="icon-button" type="button" :title="t('common.close')" @click="closeCameraLightbox"><X :size="17" /></button>
-        </div>
-        <div class="camera-lightbox-frame">
-          <img
-            v-if="cameraStreamSrc && !cameraStreamError"
-            :src="cameraStreamSrc"
-            :alt="t('dashboard.liveCamera')"
-            @error="handleCameraStreamError"
-            @load="handleCameraStreamLoaded"
-          />
-          <div v-else class="camera-live-placeholder">
-            <Camera :size="34" />
-            <strong>{{ cameraLivePlaceholder }}</strong>
-            <span>{{ t("dashboard.cameraStreamForwarding") }}</span>
-          </div>
-        </div>
-        <div class="camera-lightbox-footer">
-          <span>{{ t("dashboard.cameraStreamForwarding") }}</span>
-          <div class="camera-live-actions">
-            <button class="secondary" type="button" @click="restartCameraStream"><RefreshCw :size="16" />{{ t("dashboard.restartCameraStream") }}</button>
-            <button class="primary" type="button" @click="closeCameraLightbox">{{ t("common.close") }}</button>
-          </div>
-        </div>
-      </section>
-    </div>
-
-    <div v-if="inventoryDialog.key" class="modal-backdrop" @click.self="closeInventoryDialog">
-      <section v-if="inventoryDialog.key === 'brand'" class="modal-panel">
-        <div class="modal-header">
-          <h3>{{ editingFilamentBrandId ? t("inventory.editBrand") : t("inventory.addBrand") }}</h3>
-          <button class="icon-button" type="button" :title="t('common.close')" @click="closeInventoryDialog"><X :size="17" /></button>
-        </div>
-        <form class="form-grid compact-form modal-form" @submit.prevent="saveFilamentBrand">
-          <label class="field-label"><span>{{ t("form.brand") }}</span><input v-model="filamentBrandForm.name" :placeholder="t('form.brand')" /></label>
-          <label class="field-label"><span>{{ t("inventory.aliases") }}</span><input v-model="filamentBrandForm.aliases" :placeholder="t('inventory.aliases')" /></label>
-          <label class="field-label"><span>{{ t("form.note") }}</span><input v-model="filamentBrandForm.note" :placeholder="t('form.note')" /></label>
-          <div class="modal-actions">
-            <button class="secondary" type="button" @click="closeInventoryDialog">{{ t("common.cancel") }}</button>
-            <button class="primary" type="submit"><Save :size="17" />{{ t("common.save") }}</button>
-          </div>
-        </form>
-      </section>
-
-      <section v-else-if="inventoryDialog.key === 'typeSeries'" class="modal-panel">
-        <div class="modal-header">
-          <h3>{{ editingFilamentTypeSeriesId ? t("inventory.editTypeSeries") : t("inventory.addTypeSeries") }}</h3>
-          <button class="icon-button" type="button" :title="t('common.close')" @click="closeInventoryDialog"><X :size="17" /></button>
-        </div>
-        <form class="form-grid compact-form modal-form" @submit.prevent="saveFilamentTypeSeries">
-          <label class="field-label"><span>{{ t("form.brand") }}</span><AppSelect v-model="filamentTypeSeriesForm.brand_id" :options="filamentRequiredBrandOptions" :placeholder="t('form.brand')" /></label>
-          <label class="field-label"><span>{{ t("form.material") }}</span><input v-model="filamentTypeSeriesForm.material_type" :placeholder="t('form.material')" /></label>
-          <label class="field-label"><span>{{ t("form.series") }}</span><input v-model="filamentTypeSeriesForm.series_name" :placeholder="t('form.series')" /></label>
-          <label class="field-label"><span>{{ t("inventory.emptySpoolWeight") }}</span><input v-model.number="filamentTypeSeriesForm.empty_spool_weight_g" type="number" min="0" :placeholder="t('inventory.emptySpoolWeight')" /></label>
-          <label class="field-label"><span>{{ t("form.note") }}</span><input v-model="filamentTypeSeriesForm.note" :placeholder="t('form.note')" /></label>
-          <div class="modal-actions">
-            <button class="secondary" type="button" @click="closeInventoryDialog">{{ t("common.cancel") }}</button>
-            <button class="primary" type="submit"><Save :size="17" />{{ t("common.save") }}</button>
-          </div>
-        </form>
-      </section>
-
-      <section v-else-if="inventoryDialog.key === 'sku'" class="modal-panel">
-        <div class="modal-header">
-          <h3>{{ editingFilamentSkuId ? t("inventory.editSku") : t("inventory.addSku") }}</h3>
-          <button class="icon-button" type="button" :title="t('common.close')" @click="closeInventoryDialog"><X :size="17" /></button>
-        </div>
-        <form class="form-grid compact-form modal-form" @submit.prevent="saveFilamentSku">
-          <label class="field-label"><span>{{ t("inventory.typeSeries") }}</span><AppSelect v-model="filamentSkuForm.type_series_id" :options="filamentTypeSeriesOptions" :placeholder="t('inventory.typeSeries')" /></label>
-          <label class="field-label"><span>{{ t("inventory.officialColorName") }}</span><input v-model="filamentSkuForm.color_name" :placeholder="t('inventory.officialColorName')" /></label>
-          <label class="field-label"><span>{{ t("inventory.hexValue") }}</span><input v-model="filamentSkuForm.color_value" :placeholder="t('inventory.hexValue')" /></label>
-          <label class="field-label"><span>{{ t("inventory.nominalWeight") }}</span><input v-model.number="filamentSkuForm.nominal_weight_g" type="number" min="0" :placeholder="t('inventory.nominalWeight')" /></label>
-          <label class="field-label"><span>{{ t("inventory.diameter") }}</span><input v-model.number="filamentSkuForm.filament_diameter_mm" type="number" min="0.1" step="0.01" :placeholder="t('inventory.diameter')" /></label>
-          <label class="field-label"><span>{{ t("inventory.trayInfoIdx") }}</span><input v-model="filamentSkuForm.tray_info_idx" :placeholder="t('inventory.trayInfoIdx')" /></label>
-          <label class="field-label"><span>{{ t("form.sealedQty") }}</span><input v-model.number="filamentSkuForm.sealed_quantity" type="number" min="0" :placeholder="t('form.sealedQty')" /></label>
-          <label class="field-label"><span>{{ t("form.note") }}</span><input v-model="filamentSkuForm.note" :placeholder="t('form.note')" /></label>
-          <div class="modal-actions">
-            <button class="secondary" type="button" @click="cancelFilamentSkuEdit">{{ t("common.cancel") }}</button>
-            <button class="primary" type="submit"><Save :size="17" />{{ t("common.save") }}</button>
-          </div>
-        </form>
-      </section>
-
-      <section v-else-if="inventoryDialog.key === 'colorMapping'" class="modal-panel">
-        <div class="modal-header">
-          <h3>{{ editingFilamentColorMappingId ? t("inventory.editColorMapping") : t("inventory.addColorMapping") }}</h3>
-          <button class="icon-button" type="button" :title="t('common.close')" @click="closeInventoryDialog"><X :size="17" /></button>
-        </div>
-        <form class="form-grid compact-form modal-form" @submit.prevent="saveFilamentColorMapping">
-          <label class="field-label"><span>{{ t("form.brand") }}</span><AppSelect v-model="filamentColorMappingForm.brand_id" :options="filamentRequiredBrandOptions" /></label>
-          <label class="field-label"><span>{{ t("inventory.typeSeries") }}</span><AppSelect v-model="filamentColorMappingForm.type_series_id" :options="filamentColorMappingTypeSeriesOptions" /></label>
-          <label class="field-label"><span>{{ t("inventory.hexValue") }}</span><input v-model="filamentColorMappingForm.hex_value" :placeholder="t('inventory.hexValue')" /></label>
-          <label class="field-label"><span>{{ t("inventory.officialColorName") }}</span><input v-model="filamentColorMappingForm.official_name" :placeholder="t('inventory.officialColorName')" /></label>
-          <label class="field-label"><span>{{ t("form.note") }}</span><input v-model="filamentColorMappingForm.note" :placeholder="t('form.note')" /></label>
-          <div class="modal-actions">
-            <button class="secondary" type="button" @click="closeInventoryDialog">{{ t("common.cancel") }}</button>
-            <button class="primary" type="submit"><Save :size="17" />{{ t("common.save") }}</button>
-          </div>
-        </form>
-      </section>
-
-      <section v-else-if="inventoryDialog.key === 'stockAdjust'" class="modal-panel">
-        <div class="modal-header">
-          <div class="modal-title-stack">
-            <h3>{{ t("inventory.adjustStock") }}</h3>
-            <p>{{ inventoryDialogSkuLabel() }}</p>
-          </div>
-          <button class="icon-button" type="button" :title="t('common.close')" @click="closeInventoryDialog"><X :size="17" /></button>
-        </div>
-        <form class="form-grid compact-form modal-form" @submit.prevent="saveSealedStockAdjust">
-          <label class="field-label"><span>{{ t("inventory.currentSealedQty") }}</span><input :value="sealedStockAdjustForm.current_quantity" disabled :placeholder="t('inventory.currentSealedQty')" /></label>
-          <label class="field-label"><span>{{ t("inventory.targetSealedQty") }}</span><input v-model.number="sealedStockAdjustForm.target_quantity" type="number" min="0" :placeholder="t('inventory.targetSealedQty')" /></label>
-          <label class="field-label"><span>{{ t("form.note") }}</span><input v-model="sealedStockAdjustForm.note" :placeholder="t('form.note')" /></label>
-          <div class="modal-actions">
-            <button class="secondary" type="button" @click="closeInventoryDialog">{{ t("common.cancel") }}</button>
-            <button class="primary" type="submit"><Save :size="17" />{{ t("common.save") }}</button>
-          </div>
-        </form>
-      </section>
-
-      <section v-else-if="inventoryDialog.key === 'spoolCreate'" class="modal-panel wide-modal">
-        <div class="modal-header">
-          <h3>{{ t("inventory.addSpool") }}</h3>
-          <button class="icon-button" type="button" :title="t('common.close')" @click="closeInventoryDialog"><X :size="17" /></button>
-        </div>
-        <form class="form-grid compact-form modal-form" @submit.prevent="createFilamentSpool">
-          <label class="field-label"><span>{{ t("form.brand") }}</span><AppSelect v-model="filamentSpoolForm.brand_id" :options="filamentSpoolBrandOptions" :placeholder="t('form.brand')" /></label>
-          <label class="field-label"><span>{{ t("inventory.typeSeries") }}</span><AppSelect v-model="filamentSpoolForm.type_series_id" :options="filamentSpoolTypeSeriesOptions" :placeholder="t('inventory.typeSeries')" /></label>
-          <label class="field-label"><span>{{ t("inventory.skus") }}</span><AppSelect v-model="filamentSpoolForm.sku_id" :options="filamentSpoolSkuOptions" :placeholder="t('inventory.skus')" /></label>
-          <label class="field-label"><span>{{ t("table.status") }}</span><AppSelect v-model="filamentSpoolForm.status" :options="filamentSpoolStatusOptions" /></label>
-          <label class="field-label"><span>{{ t("fields.tray_uuid") }}</span><input v-model="filamentSpoolForm.tray_uuid" :placeholder="t('fields.tray_uuid')" /></label>
-          <label class="field-label"><span>{{ t("fields.tag_uid") }}</span><input v-model="filamentSpoolForm.tag_uid" :placeholder="t('fields.tag_uid')" /></label>
-          <label class="field-label"><span>{{ t("inventory.remainingWeight") }}</span><input v-model.number="filamentSpoolForm.current_remaining_g" type="number" min="0" :placeholder="t('inventory.remainingWeight')" /></label>
-          <label class="field-label"><span>{{ t("inventory.manualLocation") }}</span><input v-model="filamentSpoolForm.manual_location" :placeholder="t('inventory.manualLocation')" /></label>
-          <label class="field-label"><span>{{ t("form.note") }}</span><input v-model="filamentSpoolForm.note" :placeholder="t('form.note')" /></label>
-          <div class="modal-actions">
-            <button class="secondary" type="button" @click="closeInventoryDialog">{{ t("common.cancel") }}</button>
-            <button class="primary" type="submit"><Save :size="17" />{{ t("common.save") }}</button>
-          </div>
-        </form>
-      </section>
-
-      <section v-else-if="inventoryDialog.key === 'spoolDetail' && selectedFilamentSpool" class="modal-panel wide-modal">
-        <div class="modal-header">
-          <div class="modal-title-stack">
-            <h3>{{ t("inventory.spoolDetail") }}</h3>
-            <p>{{ inventoryDialogSpoolLabel() }}</p>
-          </div>
-          <button class="icon-button" type="button" :title="t('common.close')" @click="closeInventoryDialog"><X :size="17" /></button>
-        </div>
-        <div class="metric-grid small">
-          <div class="metric-card"><div class="metric-label">{{ t("table.spool") }}</div><div class="metric-value compact-value">{{ filamentSpoolLabel(selectedFilamentSpool) }}</div></div>
-          <div class="metric-card"><div class="metric-label">{{ t("inventory.remaining") }}</div><div class="metric-value compact-value">{{ filamentWeight(filamentSpoolRemainingWeight(selectedFilamentSpool)) }}</div><div class="metric-foot">{{ filamentRemainPercent(selectedFilamentSpool) }}</div></div>
-          <div class="metric-card"><div class="metric-label">{{ t("table.location") }}</div><div class="metric-value compact-value">{{ filamentSpoolLocation(selectedFilamentSpool) }}</div></div>
-          <div class="metric-card"><div class="metric-label">{{ t("table.status") }}</div><div class="metric-value compact-value">{{ filamentSpoolStatusLabel(selectedFilamentSpool.status) }}</div></div>
-        </div>
-        <div v-if="isFilamentSpoolPendingConfirm(selectedFilamentSpool)" class="modal-note">
-          <span>{{ t("inventory.confirmSkuTitle") }}</span>
-          <button class="secondary" type="button" @click="openConfirmFilamentSpoolSku(selectedFilamentSpool)">{{ t("inventory.confirmSku") }}</button>
-        </div>
-        <div class="spool-status-actions">
-          <button
-            v-if="selectedFilamentSpool.status !== 'empty' && selectedFilamentSpool.status !== 'archived'"
-            class="secondary"
-            type="button"
-            @click="updateFilamentSpoolStatus(selectedFilamentSpool, 'empty')"
-          >
-            {{ t("inventory.markEmpty") }}
-          </button>
-          <button
-            v-if="selectedFilamentSpool.status !== 'archived'"
-            class="secondary"
-            type="button"
-            @click="updateFilamentSpoolStatus(selectedFilamentSpool, 'archived')"
-          >
-            {{ t("inventory.archiveSpool") }}
-          </button>
-          <button
-            v-if="selectedFilamentSpool.status === 'empty' || selectedFilamentSpool.status === 'archived'"
-            class="primary"
-            type="button"
-            @click="updateFilamentSpoolStatus(selectedFilamentSpool, 'opened_in_storage')"
-          >
-            <CheckCircle2 :size="17" />{{ t("inventory.restoreOpened") }}
-          </button>
-        </div>
-        <div class="spool-dialog-forms">
-          <form class="modal-subform" @submit.prevent="adjustSelectedFilamentQuantity">
-            <h4>{{ t("inventory.quantityAdjust") }}</h4>
-            <div class="spool-adjust-grid">
-              <label class="field-label"><span>{{ t("inventory.remainingWeight") }}</span><input v-model.number="quantityAdjustForm.current_remaining_g" type="number" min="0" :placeholder="t('inventory.remainingWeight')" /></label>
-              <label class="field-label"><span>{{ t("inventory.remainPercent") }}</span><input v-model.number="quantityAdjustForm.remain_percent" type="number" min="0" max="100" :placeholder="t('inventory.remainPercent')" /></label>
-              <label class="field-label"><span>{{ t("inventory.source") }}</span><AppSelect v-model="quantityAdjustForm.source" :options="quantityAdjustSourceOptions" /></label>
-              <label class="field-label"><span>{{ t("form.note") }}</span><input v-model="quantityAdjustForm.note" :placeholder="t('form.note')" /></label>
-            </div>
-            <div class="modal-actions"><button class="primary" type="submit"><Save :size="17" />{{ t("common.save") }}</button></div>
-          </form>
-          <form class="modal-subform" @submit.prevent="updateSelectedFilamentLocation">
-            <h4>{{ t("inventory.locationAdjust") }}</h4>
-            <div class="spool-adjust-grid">
-              <label class="field-label"><span>{{ t("table.printer") }}</span><AppSelect v-model="locationAdjustForm.printer_id" :options="locationPrinterOptions" :placeholder="t('table.printer')" /></label>
-              <label class="field-label"><span>{{ t("fields.ams_id") }}</span><input v-model="locationAdjustForm.ams_id" :placeholder="t('fields.ams_id')" /></label>
-              <label class="field-label"><span>{{ t("form.slotId") }}</span><input v-model="locationAdjustForm.tray_id" :placeholder="t('form.slotId')" /></label>
-              <label class="field-label"><span>{{ t("inventory.manualLocation") }}</span><input v-model="locationAdjustForm.manual_location" :placeholder="t('inventory.manualLocation')" /></label>
-              <label class="field-label"><span>{{ t("form.note") }}</span><input v-model="locationAdjustForm.note" :placeholder="t('form.note')" /></label>
-            </div>
-            <div class="modal-actions"><button class="primary" type="submit"><Save :size="17" />{{ t("common.save") }}</button></div>
-          </form>
-        </div>
-      </section>
-
-      <section v-else-if="inventoryDialog.key === 'skuConfirm'" class="modal-panel">
-        <div class="modal-header">
-          <div class="modal-title-stack">
-            <h3>{{ t("inventory.confirmSku") }}</h3>
-            <p>{{ inventoryDialogSpoolLabel() }}</p>
-          </div>
-          <button class="icon-button" type="button" :title="t('common.close')" @click="closeInventoryDialog"><X :size="17" /></button>
-        </div>
-        <dl class="kv compact">
-          <dt>{{ t("table.spool") }}</dt><dd>{{ inventoryDialogSpoolLabel() }}</dd>
-          <dt>{{ t("inventory.identity") }}</dt><dd class="mono">{{ formatCell(inventoryDialog.context?.official_spool_uid || inventoryDialog.context?.identity_key) }}</dd>
-          <dt>{{ t("inventory.remaining") }}</dt><dd>{{ filamentSpoolRemainingLabel(inventoryDialog.context) }}</dd>
-        </dl>
-        <div class="modal-note">{{ filamentSkuReviewDescription(inventoryDialog.context) }}</div>
-        <div v-if="inventoryDialog.context && filamentSpoolNeedsUidConflictResolution(inventoryDialog.context)" class="modal-actions">
-          <button class="secondary" type="button" @click="resolveFilamentUidConflict(inventoryDialog.context, 'restore_old')">{{ t("inventory.restoreHistoricalSpool") }}</button>
-          <button class="secondary" type="button" @click="resolveFilamentUidConflict(inventoryDialog.context, 'create_new')">{{ t("inventory.createNewSpool") }}</button>
-          <button class="secondary" type="button" @click="resolveFilamentUidConflict(inventoryDialog.context, 'ignore')">{{ t("inventory.ignoreRecognition") }}</button>
-        </div>
-        <div v-else class="modal-actions">
-          <button class="secondary" type="button" @click="editSkuFromConfirmDialog">{{ t("inventory.editSku") }}</button>
-          <button class="primary" type="button" @click="inventoryDialog.context && confirmFilamentSpoolSku(inventoryDialog.context)"><CheckCircle2 :size="17" />{{ t("inventory.confirmSku") }}</button>
-        </div>
-      </section>
-    </div>
-
-    <div v-if="selectedEvent" class="modal-backdrop" @click.self="selectedEvent = null">
-      <section class="modal-panel event-detail-modal">
-        <div class="modal-header">
-          <div class="modal-title-stack">
-            <h3>{{ t("events.details") }} · {{ eventTypeLabel(selectedEvent) }}</h3>
-            <p>{{ formatCell(selectedEvent.created_at) }}</p>
-          </div>
-          <button class="icon-button" type="button" :title="t('common.close')" @click="selectedEvent = null"><X :size="17" /></button>
-        </div>
-        <dl class="kv compact">
-          <dt>{{ t("table.type") }}</dt><dd>{{ eventTypeLabel(selectedEvent) }}</dd>
-          <dt>{{ t("table.severity") }}</dt><dd>{{ displayCell(selectedEvent.severity) }}</dd>
-          <dt>{{ t("table.current") }}</dt><dd>{{ eventCurrentLabel(selectedEvent) }}</dd>
-          <dt>{{ t("table.message") }}</dt><dd>{{ eventMessage(selectedEvent) }}</dd>
-          <dt>{{ t("events.rawMessage") }}</dt><dd>{{ eventRawMessage(selectedEvent) }}</dd>
-          <dt>{{ t("table.printer") }}</dt><dd>{{ printerDisplayName(selectedEvent.printer_id) }}</dd>
-          <dt>{{ t("table.spool") }}</dt><dd>{{ formatCell(selectedEvent.spool_id) }}</dd>
-          <dt>{{ t("events.source") }}</dt><dd>{{ displayCell(selectedEvent.source) }}</dd>
-        </dl>
-        <div class="event-raw-block">
-          <h4>{{ t("events.rawData") }}</h4>
-          <pre>{{ prettyJson(selectedEvent.data) }}</pre>
-        </div>
-      </section>
-    </div>
-
-    <div v-if="selectedHms" class="modal-backdrop" @click.self="selectedHms = null">
-      <section class="modal-panel">
-        <div class="modal-header">
-          <h3>{{ t("hms.details") }} · {{ formatCell(selectedHms.short_code || selectedHms.code) }}</h3>
-          <button class="icon-button" type="button" :title="t('common.close')" @click="selectedHms = null"><X :size="17" /></button>
-        </div>
-        <dl class="kv">
-          <dt>{{ t("table.description") }}</dt><dd>{{ hmsMessage(selectedHms) }}</dd>
-          <dt>{{ t("hms.suggestion") }}</dt><dd>{{ hmsSuggestion(selectedHms) || "--" }}</dd>
-          <dt>{{ t("table.current") }}</dt><dd>{{ selectedHms.active ? t("common.unresolved") : t("common.resolved") }}</dd>
-          <dt>{{ t("table.module") }}</dt><dd>{{ formatCell(selectedHms.module_name) }}</dd>
-          <dt>{{ t("hms.known") }}</dt><dd>{{ selectedHms.known === false ? t("common.off") : t("common.on") }}</dd>
-          <dt>{{ t("hms.actionable") }}</dt><dd>{{ selectedHms.actionable === false ? t("common.off") : t("common.on") }}</dd>
-          <dt>{{ t("hms.recentCount") }}</dt><dd>{{ selectedHmsStats?.recent_count ?? "--" }}</dd>
-          <dt>{{ t("hms.lastRecovered") }}</dt><dd>{{ formatCell(selectedHmsStats?.last_recovered_at) }}</dd>
-          <dt>{{ t("hms.highFrequency") }}</dt><dd>{{ selectedHmsStats?.high_frequency ? t("common.on") : t("common.off") }}</dd>
-          <dt>attr / code / source</dt><dd class="mono">{{ formatCell(selectedHms.attr) }} / {{ formatCell(selectedHms.code) }} / {{ formatCell(selectedHms.source) }}</dd>
-          <dt>Wiki</dt><dd><a v-if="selectedHms.wiki_url" :href="selectedHms.wiki_url" target="_blank" rel="noreferrer">{{ selectedHms.wiki_url }}</a><span v-else>--</span></dd>
-        </dl>
-      </section>
-    </div>
-
-    <div v-if="selectedSlot" class="modal-backdrop" @click.self="selectedSlot = null">
-      <section class="modal-panel wide-modal slot-detail-modal">
-        <div class="modal-header">
-          <div class="modal-title-stack">
-            <h3>{{ t("ams.slotDetails") }}</h3>
-            <p>AMS {{ selectedSlot.ams_id }} / {{ slotDisplayLabel(selectedSlot) }}</p>
-          </div>
-          <button class="icon-button" type="button" :title="t('common.close')" @click="selectedSlot = null"><X :size="17" /></button>
-        </div>
-
-        <div class="slot-detail-hero">
-          <div class="slot-detail-spool">
-            <div class="ams-spool" :style="{ '--filament-color': filamentColor(selectedSlot.color || selectedSlot.tray_color) }"><i></i></div>
-            <div>
-              <span>{{ t("table.material") }}</span>
-              <strong>{{ softCell(selectedSlot.material) }}</strong>
-              <small>{{ slotColorLabel(selectedSlot) }}</small>
-            </div>
-          </div>
-          <div class="slot-detail-facts">
-            <div><span>{{ t("table.state") }}</span><strong>{{ displayCell(selectedSlot.state_name || selectedSlot.slot_state) }}</strong></div>
-            <div><span>{{ t("table.remain") }}</span><strong>{{ remainLabel(selectedSlot.remain) }}</strong></div>
-            <div><span>K</span><strong>{{ softCell(selectedSlot.k) }}</strong></div>
-            <div><span>{{ t("ams.caliIdx") }}</span><strong>{{ softCell(selectedSlot.cali_idx) }}</strong></div>
-            <div><span>RFID</span><strong>{{ softCell(selectedSlot.rfid_status_name || selectedSlot.rfid_status || selectedSlot.tray_info_idx) }}</strong></div>
-            <div><span>{{ t("table.spool") }}</span><strong>{{ softCell(selectedSlot.spool_id) }}</strong></div>
-          </div>
-        </div>
-
-        <section class="slot-detail-section">
-          <div class="slot-section-title">
-            <h4>{{ t("ams.changeSummary") }}</h4>
-            <span>{{ t("ams.historySamples") }} {{ selectedSlotHistory.length }}</span>
-          </div>
-          <div class="slot-change-grid">
-            <section v-for="kind in slotChangeKinds" :key="kind" class="slot-change-card">
-              <div class="slot-change-card-head">
-                <h4>{{ t(`ams.change.${kind}`) }}</h4>
-                <span>{{ slotHistoryChanges(kind).length }}</span>
-              </div>
-              <div v-if="!slotHistoryChanges(kind).length" class="slot-empty-state">{{ t("ams.noChanges") }}</div>
-              <div v-for="change in slotHistoryChanges(kind)" :key="`${kind}-${change.time}`" class="slot-change-row">
-                <time>{{ formatCell(change.time) }}</time>
-                <div class="slot-change-flow">
-                  <span>{{ change.before }}</span>
-                  <i>→</i>
-                  <strong>{{ change.after }}</strong>
-                </div>
-              </div>
-            </section>
-          </div>
-        </section>
-
-        <section class="slot-detail-section">
-          <div class="slot-section-title">
-            <h4>{{ t("ams.historySamples") }}</h4>
-            <span>{{ selectedSlotHistory.length }}</span>
-          </div>
-          <div class="table-wrap slot-history-table">
-          <table>
-            <thead><tr><th>{{ t("table.time") }}</th><th>{{ t("table.state") }}</th><th>{{ t("table.material") }}</th><th>{{ t("form.color") }}</th><th>{{ t("table.remain") }}</th><th>K</th><th>{{ t("ams.caliIdx") }}</th><th>RFID</th></tr></thead>
-            <tbody>
-              <tr v-if="!selectedSlotHistory.length"><td colspan="8" class="empty">{{ t("common.empty") }}</td></tr>
-              <tr v-for="sample in selectedSlotHistory" :key="sample.id">
-                <td>{{ formatCell(sample.sampled_at) }}</td>
-                <td>{{ displayCell(sample.state_name) }}</td>
-                <td>{{ softCell(sample.material) }}</td>
-                <td><span class="swatch" :style="{ background: filamentColor(sample.color) }"></span>{{ filamentColorDisplay(sample.color) }}</td>
-                <td>{{ softCell(sample.remain) }}</td>
-                <td>{{ softCell(sample.k) }}</td>
-                <td>{{ softCell(sample.cali_idx) }}</td>
-                <td>{{ softCell(sample.rfid_status) }}</td>
-              </tr>
-            </tbody>
-          </table>
-          </div>
-        </section>
-      </section>
-    </div>
-
-    <div v-if="loading" class="loading-mask" :title="displayCell('loading')">
-      <Loader2 class="spin" :size="24" />
-    </div>
+    <AppModals :ctx="viewContext" />
   </div>
 </template>
