@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { navGroups, navItems, type NavGroupKey, type ViewKey } from "../app/navigation";
+import logoUrl from "../assets/brand/filament-manager-logo.svg";
 
 const props = defineProps<{
   activeView: ViewKey;
@@ -19,7 +20,9 @@ function navItemsByGroup(group: NavGroupKey) {
 <template>
   <aside class="sidebar">
     <div class="brand">
-      <div class="brand-mark">FM</div>
+      <div class="brand-mark" aria-hidden="true">
+        <img class="brand-logo" :src="logoUrl" alt="" />
+      </div>
       <div>
         <div class="brand-name">{{ translate("app.name") }}</div>
         <div class="brand-sub">{{ translate("app.subtitle") }}</div>

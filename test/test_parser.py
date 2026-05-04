@@ -72,6 +72,27 @@ def test_state_ten_without_filament_payload_is_transition() -> None:
     assert slot.identity.identity_source == "manual_required"
 
 
+def test_state_eleven_without_filament_payload_is_transition() -> None:
+    units = parse_ams_units(
+        {
+            "print": {
+                "ams": {
+                    "ams": [
+                        {
+                            "id": "128",
+                            "tray": [{"id": "0", "state": 11}],
+                        }
+                    ]
+                }
+            }
+        }
+    )
+
+    slot = units[0].slots[0]
+    assert slot.is_transitioning is True
+    assert slot.identity.identity_source == "manual_required"
+
+
 def test_state_ten_with_only_identity_is_transition() -> None:
     units = parse_ams_units(
         {

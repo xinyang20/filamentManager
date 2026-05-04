@@ -589,3 +589,21 @@ def test_ams_transition_frame_without_payload_does_not_create_phantom_spool(api_
     assert slots[0]["filament_spool_id"] == first_spool["id"]
     debug_events = api_client.get("/api/debug/events").json()
     assert not any(item["event_type"] == "spool.unidentified" for item in debug_events)
+
+
+def test_ams_ht_loaded_state_without_payload_does_not_create_phantom_spool(api_client, printer_payload, fixture_dir) -> None:
+    printer = _printer(api_client, printer_payload)
+    payload = json.loads((fixture_dir / "push_status_valid_tray_uuid.json").read_text())
+    payload["print"]["ams"]["ams"][0]["id"] = "128"
+    payload["print"]["ams"]["ams"][0]["tray"] = [{"id": "0", "state": 11}]
+
+    _ingest(api_client, printer["id"], payload)
+
+    assert api_client.get("/api/filament/spools").json() == []
+    slots = api_client.get(f"/api/printers/{printer['id']}/ams/slots").json()
+    assert slots[0]["ams_id"] == "128"
+    assert slots[0]["tray_id"] == "0"
+    assert slots[0]["is_transitioning"] is True
+    assert slots[0]["filament_spool_id"] is None
+    debug_events = api_client.get("/api/debug/events").json()
+    assert not any(item["event_type"] in {"spool.discovered", "spool.unidentified"} for item in debug_events)

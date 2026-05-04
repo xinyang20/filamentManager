@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="frontend/vue/src/assets/brand/filament-manager-logo.svg" alt="FilamentManager logo" width="96" height="96">
+</p>
+
 # FilamentManager
 
 FilamentManager 是一个面向个人 3D 打印工作流的本地打印机运维与耗材管理系统。项目以 Bambu Lab 局域网模式为主要场景，读取本地 MQTT 与设备状态，将打印监控、AMS 状态、耗材库存、打印记录、维护提醒和调试导入导出整合在一个本地应用中。

@@ -147,7 +147,7 @@ def is_transitioning_tray(tray: dict[str, Any], remain: int | None) -> bool:
     )
     if state is None:
         return False
-    if state in {"4", "5", "9", "10", "17", "21", "25", "27", "FILAMENT_PRESENT"} and not _tray_has_filament_payload(tray):
+    if state in {"4", "5", "9", "10", "11", "17", "21", "25", "27", "FILAMENT_PRESENT"} and not _tray_has_filament_payload(tray):
         return True
     transition_markers = {"LOADING", "UNLOADING", "READING", "BUSY", "CHANGE", "TRANSITION"}
     return any(marker in state for marker in transition_markers)
