@@ -387,6 +387,18 @@
   width: min(1020px, 100%);
 }
 
+.sku-modal {
+  width: min(900px, 100%);
+}
+
+.sku-modal-form {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.sku-modal-form .field-label:first-child {
+  grid-column: 1 / -1;
+}
+
 .wide-modal:has(.spool-dialog-forms) {
   width: min(900px, 100%);
 }
@@ -773,4 +785,3 @@ summary {
     transform: rotate(360deg);
   }
 }
-

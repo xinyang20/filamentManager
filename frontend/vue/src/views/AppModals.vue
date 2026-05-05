@@ -205,12 +205,12 @@ const {
         </form>
       </section>
 
-      <section v-else-if="inventoryDialog.key === 'sku'" class="modal-panel">
+      <section v-else-if="inventoryDialog.key === 'sku'" class="modal-panel sku-modal">
         <div class="modal-header">
           <h3>{{ editingFilamentSkuId ? t("inventory.editSku") : t("inventory.addSku") }}</h3>
           <button class="icon-button" type="button" :title="t('common.close')" @click="closeInventoryDialog"><X :size="17" /></button>
         </div>
-        <form class="form-grid compact-form modal-form" @submit.prevent="saveFilamentSku">
+        <form class="form-grid compact-form modal-form sku-modal-form" @submit.prevent="saveFilamentSku">
           <label class="field-label"><span>{{ t("inventory.typeSeries") }}</span><AppSelect v-model="filamentSkuForm.type_series_id" :options="filamentTypeSeriesOptions" :placeholder="t('inventory.typeSeries')" /></label>
           <label class="field-label"><span>{{ t("inventory.officialColorName") }}</span><input v-model="filamentSkuForm.color_name" :placeholder="t('inventory.officialColorName')" /></label>
           <label class="field-label"><span>{{ t("inventory.hexValue") }}</span><input v-model="filamentSkuForm.color_value" :placeholder="t('inventory.hexValue')" /></label>
