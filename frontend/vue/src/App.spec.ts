@@ -1,4 +1,5 @@
 import { mount, flushPromises } from "@vue/test-utils";
+import { createPinia } from "pinia";
 import { describe, expect, it, vi } from "vitest";
 
 import App from "./App.vue";
@@ -24,7 +25,7 @@ function mockApi() {
 describe("App", () => {
   it("bootstraps the overview without a real backend", async () => {
     const fetchMock = mockApi();
-    const wrapper = mount(App);
+    const wrapper = mount(App, { global: { plugins: [createPinia()] } });
 
     await flushPromises();
 
@@ -44,7 +45,7 @@ describe("App", () => {
 
   it("switches views through the sidebar", async () => {
     mockApi();
-    const wrapper = mount(App);
+    const wrapper = mount(App, { global: { plugins: [createPinia()] } });
 
     await flushPromises();
     await wrapper.findAll(".nav-item").find((item) => item.text().includes("打印机配置"))?.trigger("click");
