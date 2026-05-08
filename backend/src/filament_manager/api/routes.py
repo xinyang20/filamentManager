@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 import mimetypes
 from typing import Any
@@ -238,6 +238,12 @@ from filament_manager.services.storage import (
 
 router = APIRouter()
 router.include_router(filament_router)
+
+METRIC_BUCKET_DEFAULT_LOOKBACKS = {
+    "minute": timedelta(hours=24),
+    "hour": timedelta(days=30),
+    "day": timedelta(days=180),
+}
 
 
 @router.get("/health")
@@ -507,19 +513,28 @@ def api_get_printer_metrics(
     if prefix:
         query = query.where(DeviceMetricSample.metric.like(prefix))
     lower_bound = from_ or since
+    if bucket != "raw" and lower_bound is None:
+        lookback = METRIC_BUCKET_DEFAULT_LOOKBACKS.get(bucket)
+        if lookback is not None:
+            lower_bound = (to or datetime.now(timezone.utc)) - lookback
     if lower_bound:
         query = query.where(DeviceMetricSample.sampled_at >= lower_bound)
     if to:
         query = query.where(DeviceMetricSample.sampled_at <= to)
+    if bucket == "raw":
+        rows = list(
+            db.scalars(
+                query.order_by(DeviceMetricSample.sampled_at.desc(), DeviceMetricSample.id.desc()).limit(limit)
+            ).all()
+        )
+        rows.reverse()
+        return [_metric_sample_read(row) for row in rows]
     rows = list(
         db.scalars(
-            query.order_by(DeviceMetricSample.sampled_at.desc(), DeviceMetricSample.id.desc()).limit(limit)
+            query.order_by(DeviceMetricSample.sampled_at, DeviceMetricSample.id)
         ).all()
     )
-    rows.reverse()
-    if bucket == "raw":
-        return [_metric_sample_read(row) for row in rows]
-    return _bucket_metric_samples(rows, bucket)
+    return _bucket_metric_samples(rows, bucket)[-limit:]
 
 
 @router.post("/printers/{printer_id}/storage/scan", response_model=StorageScanResultRead)

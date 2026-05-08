@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { formatCell, formatUnit, parseApiDateTime } from "../api";
+import { formatUnit, parseApiDateTime } from "../api";
 import type { MetricSample } from "../types";
 
 const props = defineProps<{
@@ -190,11 +190,28 @@ function tooltipX(value: number) {
 }
 
 function tooltipY() {
-  return padding.top + 8;
+  const margin = 4;
+  const maxY = Math.max(0, height - tooltipHeight.value - margin);
+  return Math.min(padding.top + 8, maxY);
 }
 
 function hoverValue(item: MetricSample) {
   return `${formatNumber(item.value_float ?? undefined)} ${unitLabel(item.unit || "")}`.trim();
+}
+
+function estimateTextWidth(text: string, fontSize: number) {
+  let width = 0;
+  for (const char of text) {
+    const code = char.codePointAt(0) || 0;
+    if (char === " ") {
+      width += fontSize * 0.35;
+    } else if (code > 255) {
+      width += fontSize;
+    } else {
+      width += fontSize * 0.62;
+    }
+  }
+  return width;
 }
 
 function nearestPoint(points: MetricSample[], time: number) {
@@ -241,8 +258,30 @@ function tickAnchor(index: number) {
   return "middle";
 }
 
-const tooltipWidth = computed(() => 310);
-const tooltipHeight = computed(() => Math.max(70, 38 + (hovered.value?.rows.length || 0) * 18));
+const tooltipHeight = computed(() => Math.max(104, 54 + (hovered.value?.rows.length || 0) * 30));
+const tooltipTitle = computed(() => {
+  if (!hovered.value) return "";
+  return `${props.tooltipLabels?.time || "Time"}: ${formatAxisTime(hovered.value.time)}`;
+});
+const tooltipRows = computed(() =>
+  (hovered.value?.rows || []).map((row) => {
+    const value = hoverValue(row.point);
+    return {
+      ...row,
+      label: row.label,
+      value,
+      text: `${row.label}: ${value}`,
+    };
+  }),
+);
+const tooltipWidth = computed(() => {
+  const lineWidths = [
+    estimateTextWidth(tooltipTitle.value, 20),
+    ...tooltipRows.value.map((row) => estimateTextWidth(row.text, 18)),
+  ];
+  const contentWidth = Math.max(180, ...lineWidths);
+  return Math.min(560, Math.ceil(contentWidth + 32));
+});
 </script>
 
 <template>
@@ -315,15 +354,15 @@ const tooltipHeight = computed(() => Math.max(70, 38 + (hovered.value?.rows.leng
           />
           <g :transform="`translate(${tooltipX(hovered.x)}, ${tooltipY()})`">
             <rect :width="tooltipWidth" :height="tooltipHeight" rx="8" class="chart-tooltip-bg" />
-            <text x="10" y="19" class="chart-tooltip-title">{{ props.tooltipLabels?.time || "Time" }}: {{ formatAxisTime(hovered.time) }}</text>
+            <text x="16" y="30" class="chart-tooltip-title">{{ tooltipTitle }}</text>
             <text
-              v-for="(row, index) in hovered.rows"
+              v-for="(row, index) in tooltipRows"
               :key="`tip-${row.metric}`"
-              x="10"
-              :y="42 + index * 18"
+              x="16"
+              :y="68 + index * 30"
               class="chart-tooltip-line"
             >
-              {{ row.label }}: {{ hoverValue(row.point) }} · {{ formatCell(row.point.sampled_at) }}
+              {{ row.text }}
             </text>
           </g>
         </g>

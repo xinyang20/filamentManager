@@ -24,14 +24,22 @@ def _type_series(api_client, brand_id: int, material: str = "PLA", series: str =
     return response.json()
 
 
-def _sku(api_client, type_series_id: int, *, color_name: str | None = "Orange", color_hex: str | None = "FF6600", sealed: int = 1) -> dict:
+def _sku(
+    api_client,
+    type_series_id: int,
+    *,
+    color_name: str | None = "Orange",
+    color_hex: str | None = "FF6600",
+    sealed: int = 1,
+    nominal_weight_g: float = 1000,
+) -> dict:
     response = api_client.post(
         "/api/filament/skus",
         json={
             "type_series_id": type_series_id,
             "color_name": color_name,
             "color_hex": color_hex,
-            "nominal_weight_g": 1000,
+            "nominal_weight_g": nominal_weight_g,
             "sealed_quantity": sealed,
         },
     )
@@ -358,6 +366,7 @@ def test_spool_empty_and_archived_are_history_not_current_stock(api_client) -> N
     body = marked_empty.json()
     assert body["status"] == "empty"
     assert body["actual_weight_g"] == 0
+    assert body["last_ams_remain_percent"] == 0
     assert body["empty_at"] is not None
     assert body["last_location"]["storage_location"] == "Dry box A"
 
@@ -368,13 +377,47 @@ def test_spool_empty_and_archived_are_history_not_current_stock(api_client) -> N
 
     restored = api_client.post(f"/api/filament/spools/{spool['id']}/status", json={"status": "opened_in_storage"})
     assert restored.status_code == 200
-    assert restored.json()["status"] == "opened_in_storage"
+    restored_body = restored.json()
+    assert restored_body["status"] == "opened_in_storage"
+    assert restored_body["actual_weight_g"] is None
+    assert restored_body["last_ams_remain_percent"] is None
+    assert "last_ams_remain_percent" not in restored_body["config"]
+
+    summary = api_client.get("/api/filament/inventory/summary").json()
+    assert summary["totals"]["opened_spool_count"] == 1
+    assert summary["opened_spools"][0]["id"] == spool["id"]
+    assert summary["opened_spools"][0]["last_ams_remain_percent"] is None
 
     archived = api_client.post(f"/api/filament/spools/{spool['id']}/status", json={"status": "archived"})
     assert archived.status_code == 200
     summary = api_client.get("/api/filament/inventory/summary").json()
     assert summary["totals"]["archived_spool_count"] == 1
     assert summary["totals"]["opened_spool_count"] == 0
+
+
+def test_spool_zero_weight_update_marks_empty(api_client) -> None:
+    _, _, sku = _inventory_tree(api_client)
+    created = api_client.post(
+        "/api/filament/spools",
+        json={"sku_id": sku["id"], "status": "opened_in_storage", "actual_weight_g": 120},
+    )
+    assert created.status_code == 201, created.text
+    spool = created.json()
+
+    weighted = api_client.post(f"/api/filament/spools/{spool['id']}/weight", json={"actual_weight_g": 0})
+    assert weighted.status_code == 200, weighted.text
+    body = weighted.json()
+    assert body["status"] == "empty"
+    assert body["actual_weight_g"] == 0
+    assert body["last_ams_remain_percent"] == 0
+    assert body["empty_at"] is not None
+
+    summary = api_client.get("/api/filament/inventory/summary").json()
+    assert summary["totals"]["opened_spool_count"] == 0
+    assert summary["totals"]["empty_spool_count"] == 1
+    assert summary["history_spools"][0]["id"] == spool["id"]
+    events = api_client.get(f"/api/filament/spools/{spool['id']}/events").json()["events"]
+    assert any(item["event_type"] == "status_empty" for item in events)
 
 
 def test_ams_existing_official_uid_does_not_decrement_stock(api_client, printer_payload, fixture_dir) -> None:
@@ -469,6 +512,51 @@ def test_ams_new_official_uid_matches_sku_and_decrements_once(api_client, printe
     assert len(spools) == 1
     assert spools[0]["sku_id"] == skus[0]["id"]
     assert spools[0]["last_ams_remain_percent"] == 88
+
+
+def test_ams_jade_white_uses_weight_to_match_existing_sku(api_client, printer_payload, fixture_dir) -> None:
+    printer = _printer(api_client, printer_payload)
+    brand = _brand(api_client)
+    type_series = _type_series(api_client, brand["id"], material="PLA", series="Basic")
+    full_sku = _sku(
+        api_client,
+        type_series["id"],
+        color_name="玉石白",
+        color_hex="FFFFFF",
+        sealed=1,
+        nominal_weight_g=1000,
+    )
+    small_sku = _sku(
+        api_client,
+        type_series["id"],
+        color_name="玉石白",
+        color_hex="FFFFFF",
+        sealed=1,
+        nominal_weight_g=250,
+    )
+    payload = json.loads((fixture_dir / "push_status_valid_tray_uuid.json").read_text())
+    tray = payload["print"]["ams"]["ams"][0]["tray"][0]
+    tray["tray_uuid"] = "C27BF5A592BD43898492BD61E354E427"
+    tray["tag_uid"] = "725BB97700000100"
+    tray["tray_type"] = "PLA"
+    tray["tray_sub_brands"] = "PLA Basic"
+    tray["tray_color"] = "FFFFFFFF"
+    tray["tray_id_name"] = "A00-W1"
+    tray["tray_info_idx"] = "GFA00"
+    tray["tray_weight"] = "1000"
+    tray["remain"] = 100
+
+    _ingest(api_client, printer["id"], payload)
+
+    skus = {item["id"]: item for item in api_client.get("/api/filament/skus").json()}
+    spools = api_client.get("/api/filament/spools").json()
+    assert len(skus) == 2
+    assert skus[full_sku["id"]]["sealed_quantity"] == 0
+    assert skus[small_sku["id"]]["sealed_quantity"] == 1
+    assert len(spools) == 1
+    assert spools[0]["sku_id"] == full_sku["id"]
+    assert spools[0]["status"] == "loaded_in_ams"
+    assert spools[0]["config"].get("needs_sku_review") is None
 
 
 def test_ams_replacement_with_existing_sku_loads_new_spool_and_decrements_stock(api_client, printer_payload, fixture_dir) -> None:
@@ -591,19 +679,41 @@ def test_ams_transition_frame_without_payload_does_not_create_phantom_spool(api_
     assert not any(item["event_type"] == "spool.unidentified" for item in debug_events)
 
 
-def test_ams_ht_loaded_state_without_payload_does_not_create_phantom_spool(api_client, printer_payload, fixture_dir) -> None:
+def test_ams_ht_transition_states_without_payload_do_not_create_phantom_spool(api_client, printer_payload, fixture_dir) -> None:
     printer = _printer(api_client, printer_payload)
-    payload = json.loads((fixture_dir / "push_status_valid_tray_uuid.json").read_text())
-    payload["print"]["ams"]["ams"][0]["id"] = "128"
-    payload["print"]["ams"]["ams"][0]["tray"] = [{"id": "0", "state": 11}]
 
-    _ingest(api_client, printer["id"], payload)
+    for state in (8, 11, 23):
+        payload = json.loads((fixture_dir / "push_status_valid_tray_uuid.json").read_text())
+        payload["print"]["ams"]["ams"][0]["id"] = "128"
+        payload["print"]["ams"]["ams"][0]["tray"] = [{"id": "0", "state": state}]
 
-    assert api_client.get("/api/filament/spools").json() == []
-    slots = api_client.get(f"/api/printers/{printer['id']}/ams/slots").json()
-    assert slots[0]["ams_id"] == "128"
-    assert slots[0]["tray_id"] == "0"
-    assert slots[0]["is_transitioning"] is True
-    assert slots[0]["filament_spool_id"] is None
+        _ingest(api_client, printer["id"], payload)
+
+        assert api_client.get("/api/filament/spools").json() == []
+        slots = api_client.get(f"/api/printers/{printer['id']}/ams/slots").json()
+        assert slots[0]["ams_id"] == "128"
+        assert slots[0]["tray_id"] == "0"
+        assert slots[0]["is_transitioning"] is True
+        assert slots[0]["filament_spool_id"] is None
+
     debug_events = api_client.get("/api/debug/events").json()
     assert not any(item["event_type"] in {"spool.discovered", "spool.unidentified"} for item in debug_events)
+
+
+def test_historical_ams_ht_transition_phantom_spools_are_hidden(api_client) -> None:
+    spool_ids = []
+    for state in (8, 23):
+        response = api_client.post(
+            "/api/filament/spools",
+            json={
+                "identity_source": "manual",
+                "status": "needs_location",
+                "config": {"ams_raw": {"id": "0", "state": state}},
+            },
+        )
+        assert response.status_code == 201, response.text
+        spool_ids.append(response.json()["id"])
+
+    assert api_client.get("/api/filament/spools").json() == []
+    for spool_id in spool_ids:
+        assert api_client.get(f"/api/filament/spools/{spool_id}").status_code == 404

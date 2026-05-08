@@ -756,6 +756,19 @@
   border-top-color: var(--amber);
 }
 
+.ams-unit-card.drying {
+  border-color: rgba(224, 68, 46, 0.72);
+  box-shadow:
+    0 0 0 3px rgba(224, 68, 46, 0.24),
+    0 0 26px rgba(224, 68, 46, 0.36),
+    var(--shadow);
+  animation: ams-drying-glow 2.4s ease-in-out infinite;
+}
+
+.ams-unit-card.drying.ht {
+  border-top-color: #e0442e;
+}
+
 .ams-unit-card.pro {
   border-top-color: var(--dify-blue);
 }
@@ -1166,3 +1179,24 @@
   font-weight: 720;
 }
 
+@keyframes ams-drying-glow {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 3px rgba(224, 68, 46, 0.2),
+      0 0 22px rgba(224, 68, 46, 0.3),
+      var(--shadow);
+  }
+  50% {
+    box-shadow:
+      0 0 0 5px rgba(224, 68, 46, 0.3),
+      0 0 36px rgba(224, 68, 46, 0.48),
+      var(--shadow);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ams-unit-card.drying {
+    animation: none;
+  }
+}

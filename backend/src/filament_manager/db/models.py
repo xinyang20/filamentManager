@@ -180,7 +180,13 @@ class AmsUnit(Base):
 
     @property
     def dry_status(self) -> Any:
-        return _raw_get(self.raw, "dry_status")
+        status = _raw_get(self.raw, "dry_status")
+        if status is not None:
+            return status
+        dry_time = _number_or_none(_raw_get(self.raw, "dry_time"))
+        if dry_time is not None and dry_time > 0:
+            return "drying"
+        return None
 
     @property
     def dry_sub_status(self) -> Any:
@@ -650,6 +656,15 @@ def _raw_get(raw: dict[str, Any] | None, *keys: str) -> Any:
     return None
 
 
+def _number_or_none(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 AMS_DRY_STATUS_NAMES = {
     "0": "idle",
     "1": "drying",
@@ -678,11 +693,13 @@ AMS_SLOT_STATE_NAMES = {
     "1": "empty",
     "4": "loading",
     "5": "unloading",
+    "8": "transitioning",
     "9": "filament_present",
     "10": "filament_present",
     "11": "loaded",
     "17": "transitioning",
     "21": "transitioning",
+    "23": "transitioning",
     "25": "rfid_reading",
     "27": "rfid_reading_or_transitioning",
     "idle": "loaded",

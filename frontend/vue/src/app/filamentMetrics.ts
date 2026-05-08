@@ -31,13 +31,15 @@ export function filamentInventoryKg(value: unknown): string {
 
 export function filamentRemainPercent(spool: FilamentRecord | null | undefined): string {
   if (!spool) return "—";
+  const remaining = numeric(spool.actual_weight_g ?? spool.current_remaining_g);
+  const initial = numeric(spool.nominal_weight_g ?? spool.initial_net_weight_g);
+  if (remaining !== null && initial !== null && initial > 0) {
+    return `${Math.round((remaining / initial) * 100)}%`;
+  }
   if (spool.last_ams_remain_percent !== null && spool.last_ams_remain_percent !== undefined) {
     return `${spool.last_ams_remain_percent}%`;
   }
-  const remaining = numeric(spool.actual_weight_g ?? spool.current_remaining_g);
-  const initial = numeric(spool.nominal_weight_g ?? spool.initial_net_weight_g);
-  if (remaining === null || initial === null || initial <= 0) return "—";
-  return `${Math.round((remaining / initial) * 100)}%`;
+  return "—";
 }
 
 export function filamentSpoolRemainingWeight(spool: FilamentRecord | null | undefined): number | null {

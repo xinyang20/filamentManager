@@ -50,6 +50,7 @@ const {
   amsOverview,
   amsPageUnitVisual,
   amsSectionKey,
+  amsIsDrying,
   amsSensorChartItems,
   amsSensorRange,
   amsSensorRangeOptions,
@@ -98,7 +99,7 @@ const {
           v-for="(unit, unitIndex) in amsOverview?.units || []"
           :key="unit.ams_id"
           class="panel ams-unit-card"
-          :class="[amsTone(unit), { collapsed: isSectionCollapsed(amsSectionKey(unit)) }]"
+          :class="[amsTone(unit), { collapsed: isSectionCollapsed(amsSectionKey(unit)), drying: amsIsDrying(unit) }]"
         >
           <div class="ams-unit-header" :class="{ collapsed: isSectionCollapsed(amsSectionKey(unit)) }">
             <div class="ams-unit-title">

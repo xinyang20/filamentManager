@@ -80,14 +80,6 @@ const {
             :tooltip-labels="metricTooltipLabels"
           />
           <MetricChart
-            :title="t('metrics.wifiHistory')"
-            :subtitle="t('metrics.wifiSubtitle')"
-            :items="metricGroups.wifi"
-            :metric-label="metricLabel"
-            :empty-label="t('common.empty')"
-            :tooltip-labels="metricTooltipLabels"
-          />
-          <MetricChart
             :title="t('metrics.amsHistory')"
             :subtitle="t('metrics.amsSubtitle')"
             :items="metricGroups.ams"

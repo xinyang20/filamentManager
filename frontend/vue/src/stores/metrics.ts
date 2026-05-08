@@ -26,7 +26,6 @@ export const useMetricsStore = defineStore("metrics", () => {
   const metricGroups = computed(() => ({
     temperatures: metrics.value.filter((item) => item.metric.startsWith("temperature.")),
     fans: metrics.value.filter((item) => item.metric.startsWith("fan.") && item.metric !== "fan.fan_gear.percent"),
-    wifi: metrics.value.filter((item) => item.metric === "dashboardStore().network.wifi_signal"),
     ams: metrics.value.filter((item) => item.metric.startsWith("ams.")),
   }));
 
@@ -39,10 +38,21 @@ export const useMetricsStore = defineStore("metrics", () => {
   async function loadMetrics() {
     if (!printersStore().selectedPrinterId) return;
     const since = metricSince();
-    const bucket = metricRange.value === "30d" || metricRange.value === "7d" ? "hour" : metricRange.value === "1h" ? "minute" : "raw";
-    metrics.value = await apiRequest<MetricSample[]>(
-      `/printers/${printersStore().selectedPrinterId}/metrics?limit=1000&bucket=${bucket}&since=${encodeURIComponent(since)}`,
+    const bucket = metricBucket();
+    const groups = ["temperature", "fan", "ams"];
+    const results = await Promise.all(
+      groups.map((group) =>
+        apiRequest<MetricSample[]>(
+          `/printers/${printersStore().selectedPrinterId}/metrics?limit=5000&bucket=${bucket}&group=${group}&since=${encodeURIComponent(since)}`,
+        )
+      ),
     );
+    metrics.value = results.flat();
+  }
+
+
+  function metricBucket() {
+    return metricRange.value === "1h" || metricRange.value === "6h" ? "minute" : "hour";
   }
 
 
@@ -90,6 +100,7 @@ export const useMetricsStore = defineStore("metrics", () => {
     metricGroups,
     metricTooltipLabels,
     loadMetrics,
+    metricBucket,
     metricSince,
     metricLabel,
     fanMetricLabel,

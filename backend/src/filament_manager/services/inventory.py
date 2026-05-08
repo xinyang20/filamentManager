@@ -16,7 +16,7 @@ from filament_manager.db.models import (
     FilamentTypeSeries,
     utc_now,
 )
-from filament_manager.mqtt.parser import ParsedAmsSlot, is_valid_identity_value
+from filament_manager.mqtt.parser import ParsedAmsSlot, is_transition_state_without_payload, is_valid_identity_value
 from filament_manager.services.inventory_constants import (
     HISTORICAL_SPOOL_STATUSES,
     MATERIAL_TYPES,
@@ -352,7 +352,10 @@ def list_filament_spools(db: Session) -> list[FilamentSpool]:
 
 
 def get_filament_spool(db: Session, spool_id: int) -> FilamentSpool | None:
-    return db.get(FilamentSpool, spool_id)
+    spool = db.get(FilamentSpool, spool_id)
+    if spool is not None and _is_phantom_ams_spool(spool):
+        return None
+    return spool
 
 
 def create_filament_spool(db: Session, data: FilamentSpoolCreate) -> FilamentSpool:
@@ -504,17 +507,32 @@ def update_filament_weight(
     spool: FilamentSpool,
     data: FilamentSpoolWeightUpdate,
 ) -> FilamentSpool:
-    previous = {"actual_weight_g": spool.actual_weight_g}
-    spool.actual_weight_g = data.actual_weight_g
+    previous = _spool_snapshot(spool)
+    if data.actual_weight_g == 0:
+        if spool.status not in HISTORICAL_SPOOL_STATUSES:
+            _apply_filament_status_change(db, spool, status="empty")
+            event_type = "status_empty"
+            message = "Filament spool marked empty after weight update"
+        else:
+            spool.actual_weight_g = 0
+            config = dict(spool.config or {})
+            config["last_ams_remain_percent"] = 0
+            spool.config = config
+            event_type = "weight_updated"
+            message = "Filament spool weight updated"
+    else:
+        spool.actual_weight_g = data.actual_weight_g
+        event_type = "weight_updated"
+        message = "Filament spool weight updated"
     db.add(spool)
     _record_event(
         db,
         spool=spool,
         sku_id=spool.sku_id,
-        event_type="weight_updated",
-        message="Filament spool weight updated",
+        event_type=event_type,
+        message=message,
         previous=previous,
-        current={"actual_weight_g": spool.actual_weight_g},
+        current=_spool_snapshot(spool),
         note=data.note,
     )
     db.commit()
@@ -1643,18 +1661,23 @@ def _record_ams_slot_unload(
 def _apply_filament_status_change(db: Session, spool: FilamentSpool, *, status: str) -> None:
     now = utc_now()
     previous_location = _location_snapshot(spool)
+    restoring_from_empty = spool.status == "empty" and status in {"opened_in_storage", "loaded_in_ams", "needs_location", "unknown"}
     config = dict(spool.config or {})
     if any(value is not None and value != "" for value in previous_location.values()):
         config["last_location"] = previous_location
     config["status_changed_at"] = now.isoformat()
     if status == "empty":
         config["empty_at"] = now.isoformat()
+        config["last_ams_remain_percent"] = 0
         spool.actual_weight_g = 0
     elif status == "archived":
         config["archived_at"] = now.isoformat()
     elif status in {"opened_in_storage", "loaded_in_ams", "needs_location", "unknown"}:
         if spool.status in HISTORICAL_SPOOL_STATUSES:
             config["restored_at"] = now.isoformat()
+        if restoring_from_empty and spool.actual_weight_g == 0:
+            spool.actual_weight_g = None
+            config.pop("last_ams_remain_percent", None)
         if status == "opened_in_storage":
             config.pop("empty_at", None)
             config.pop("archived_at", None)
@@ -1767,8 +1790,7 @@ def _match_sku_for_slot(db: Session, slot: ParsedAmsSlot) -> FilamentSku | None:
         ):
             continue
         matches.append(sku)
-    unique = {sku.id: sku for sku in matches}
-    return next(iter(unique.values())) if len(unique) == 1 else None
+    return _select_sku_match_for_slot(matches, slot)
 
 
 def _resolve_sku_for_ams_slot(db: Session, slot: ParsedAmsSlot) -> tuple[FilamentSku | None, bool]:
@@ -1794,6 +1816,7 @@ def _find_or_create_sku_from_ams_slot(db: Session, slot: ParsedAmsSlot) -> tuple
         type_series_id=type_series.id,
         color_hex=color_hex,
         color_name=color_name,
+        slot=slot,
     )
     if existing is not None:
         _fill_sku_color_from_slot(db, existing, slot)
@@ -1860,6 +1883,7 @@ def _find_sku_for_type_series_color(
     type_series_id: int,
     color_hex: str | None,
     color_name: str | None,
+    slot: ParsedAmsSlot,
 ) -> FilamentSku | None:
     query = select(FilamentSku).where(FilamentSku.type_series_id == type_series_id)
     if color_hex:
@@ -1869,7 +1893,39 @@ def _find_sku_for_type_series_color(
     else:
         return None
     rows = list(db.scalars(query).all())
-    return rows[0] if len(rows) == 1 else None
+    return _select_sku_match_for_slot(rows, slot)
+
+
+def _select_sku_match_for_slot(candidates: list[FilamentSku], slot: ParsedAmsSlot) -> FilamentSku | None:
+    unique = list({sku.id: sku for sku in candidates}.values())
+    if len(unique) <= 1:
+        return unique[0] if unique else None
+
+    pool = unique
+    nominal_weight_g = _slot_nominal_weight_g(slot)
+    if nominal_weight_g is not None:
+        weight_matches = [sku for sku in pool if _same_number(sku.nominal_weight_g, nominal_weight_g)]
+        if weight_matches:
+            pool = weight_matches
+
+    manual_matches = [sku for sku in pool if not _is_auto_created_sku(sku)]
+    if manual_matches:
+        pool = manual_matches
+
+    raw = slot.raw if isinstance(slot.raw, dict) else {}
+    tray_info_idx = _clean_text(raw.get("tray_info_idx"))
+    if tray_info_idx:
+        tray_matches = [sku for sku in pool if sku.tray_info_idx and _same(sku.tray_info_idx, tray_info_idx)]
+        if tray_matches:
+            pool = tray_matches
+
+    unique = list({sku.id: sku for sku in pool}.values())
+    return unique[0] if len(unique) == 1 else None
+
+
+def _is_auto_created_sku(sku: FilamentSku) -> bool:
+    note = _clean_text(sku.note)
+    return bool(note and "auto-created from ams" in note.lower())
 
 
 def _find_brand_by_name_or_alias(db: Session, brand_name: str) -> FilamentBrand | None:
@@ -2049,25 +2105,7 @@ def _is_phantom_ams_spool(spool: FilamentSpool) -> bool:
         or _clean_text(raw.get("tray_status"))
         or _clean_text(raw.get("state"))
     )
-    return (state or "").lower() in {
-        "4",
-        "5",
-        "9",
-        "10",
-        "11",
-        "17",
-        "21",
-        "25",
-        "27",
-        "loading",
-        "unloading",
-        "filament_present",
-        "reading",
-        "rfid_reading",
-        "rfid_reading_or_transitioning",
-        "busy",
-        "transitioning",
-    }
+    return is_transition_state_without_payload(state)
 
 
 def _slot_is_empty_observation(slot: ParsedAmsSlot) -> bool:
@@ -2079,25 +2117,7 @@ def _slot_is_transition_without_payload(slot: ParsedAmsSlot) -> bool:
     if _slot_has_filament_payload(slot):
         return False
     state = _slot_state_text(slot)
-    return slot.is_transitioning or state in {
-        "4",
-        "5",
-        "9",
-        "10",
-        "11",
-        "17",
-        "21",
-        "25",
-        "27",
-        "loading",
-        "unloading",
-        "filament_present",
-        "reading",
-        "rfid_reading",
-        "rfid_reading_or_transitioning",
-        "busy",
-        "transitioning",
-    }
+    return slot.is_transitioning or is_transition_state_without_payload(state)
 
 
 def _slot_state_text(slot: ParsedAmsSlot) -> str:
@@ -2223,6 +2243,13 @@ def _unique_ints(values: list[int]) -> list[int]:
 
 def _same(left: Any, right: Any) -> bool:
     return _norm(left) == _norm(right)
+
+
+def _same_number(left: Any, right: Any) -> bool:
+    try:
+        return float(left) == float(right)
+    except (TypeError, ValueError):
+        return False
 
 
 def _norm(value: Any) -> str:

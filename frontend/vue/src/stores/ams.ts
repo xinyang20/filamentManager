@@ -38,10 +38,10 @@ export const useAmsStore = defineStore("ams", () => {
   const selectedSlotHistory = ref<AmsSlotHistorySample[]>([]);
 
   const amsSensorRangeOptions = computed(() => [
-    { label: t("metricsStore().metrics.range6h"), value: "6" },
-    { label: t("metricsStore().metrics.range24h"), value: "24" },
-    { label: t("metricsStore().metrics.range7d"), value: "168" },
-    { label: t("metricsStore().metrics.range30d"), value: "720" },
+    { label: t("metrics.range6h"), value: "6" },
+    { label: t("metrics.range24h"), value: "24" },
+    { label: t("metrics.range7d"), value: "168" },
+    { label: t("metrics.range30d"), value: "720" },
   ]);
 
   const amsStats = computed(() => {
@@ -139,6 +139,15 @@ export const useAmsStore = defineStore("ams", () => {
     if (unit.ams_type_name === "AMS 2 Pro") return "pro";
     if (unit.ams_type_name === "unknown") return "unknown";
     return "standard";
+  }
+
+
+  function amsIsDrying(unit: Record<string, any>) {
+    const status = String(unit.dry_status_name || unit.dry_status || "").trim().toLowerCase();
+    if (status === "drying" || status === "烘干中") return true;
+    if (status) return false;
+    const dryTime = numeric(unit.dry_time);
+    return dryTime !== null && dryTime > 0;
   }
 
 
@@ -263,6 +272,7 @@ export const useAmsStore = defineStore("ams", () => {
     clearAmsLabel,
     openSlotDetails,
     amsTone,
+    amsIsDrying,
     slotKey,
     amsSectionKey,
     amsTitle,

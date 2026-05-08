@@ -22,6 +22,30 @@ INVALID_IDENTITY_VALUES = {
     "n/a",
 }
 
+AMS_TRANSITION_WITHOUT_PAYLOAD_STATES = {
+    "4",
+    "5",
+    "8",
+    "9",
+    "10",
+    "11",
+    "17",
+    "21",
+    "23",
+    "25",
+    "27",
+    "FILAMENT_PRESENT",
+    "LOADING",
+    "UNLOADING",
+    "READING",
+    "RFID_READING",
+    "RFID_READING_OR_TRANSITIONING",
+    "BUSY",
+    "TRANSITIONING",
+}
+
+AMS_TRANSITION_STATE_MARKERS = {"LOADING", "UNLOADING", "READING", "BUSY", "CHANGE", "TRANSITION"}
+
 
 @dataclass(frozen=True)
 class SpoolIdentity:
@@ -112,6 +136,15 @@ def is_valid_identity_value(value: Any) -> bool:
     return True
 
 
+def is_transition_state_without_payload(value: Any) -> bool:
+    state = normalize_state(value)
+    if state is None:
+        return False
+    if state in AMS_TRANSITION_WITHOUT_PAYLOAD_STATES:
+        return True
+    return any(marker in state for marker in AMS_TRANSITION_STATE_MARKERS)
+
+
 def identify_tray(tray: dict[str, Any]) -> SpoolIdentity:
     tray_uuid = clean_text(tray.get("tray_uuid"))
     tag_uid = clean_text(tray.get("tag_uid"))
@@ -147,10 +180,9 @@ def is_transitioning_tray(tray: dict[str, Any], remain: int | None) -> bool:
     )
     if state is None:
         return False
-    if state in {"4", "5", "9", "10", "11", "17", "21", "25", "27", "FILAMENT_PRESENT"} and not _tray_has_filament_payload(tray):
+    if is_transition_state_without_payload(state) and not _tray_has_filament_payload(tray):
         return True
-    transition_markers = {"LOADING", "UNLOADING", "READING", "BUSY", "CHANGE", "TRANSITION"}
-    return any(marker in state for marker in transition_markers)
+    return any(marker in state for marker in AMS_TRANSITION_STATE_MARKERS)
 
 
 def _tray_has_filament_payload(tray: dict[str, Any]) -> bool:

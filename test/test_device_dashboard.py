@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from filament_manager.api import routes as api_routes
 from filament_manager.api.routes import _sanitize_camera_response
-from filament_manager.db.models import AmsSlot
+from filament_manager.db.models import AmsSlot, DeviceMetricSample
 from filament_manager.db import session as db_session
 from filament_manager.services import storage as storage_service
 
@@ -246,6 +248,29 @@ def test_push_status_updates_device_dashboard_and_derived_ams_fields(api_client,
     assert "ams.0.temperature" in metric_names
 
 
+def test_ams_ht_dry_status_is_derived_from_remaining_time(api_client, printer_payload) -> None:
+    printer_id = _create_printer(api_client, printer_payload)
+    payload = _dashboard_push_status()
+    unit = payload["print"]["ams"]["ams"][0]
+    unit.pop("dry_status")
+    unit["dry_time"] = 629
+    unit["dry_setting"] = {
+        "dry_duration": 12,
+        "dry_filament": "PETG",
+        "dry_temperature": 65,
+    }
+
+    _ingest(api_client, printer_id, payload)
+
+    units = api_client.get(f"/api/printers/{printer_id}/ams/units").json()
+    assert units[0]["dry_status"] == "drying"
+    assert units[0]["dry_status_name"] == "drying"
+
+    overview = api_client.get(f"/api/printers/{printer_id}/ams/overview").json()
+    assert overview["units"][0]["dry_status"] == "drying"
+    assert overview["units"][0]["dry_status_name"] == "drying"
+
+
 def test_running_before_first_layer_is_user_visible_preparing(api_client, printer_payload) -> None:
     printer_id = _create_printer(api_client, printer_payload)
     payload = _dashboard_push_status()
@@ -407,6 +432,86 @@ def test_events_metrics_history_and_storage_summary(api_client, printer_payload,
     assert summary["storage_usage"]["external"]["total_bytes"] == 4096 * 1024
     assert summary["storage_usage"]["internal"]["free_bytes"] == 256 * 1024
     assert summary["storage_usage"]["current_target"] == "external"
+
+
+def test_metric_bucketing_uses_full_time_range_before_limit(api_client, printer_payload) -> None:
+    printer_id = _create_printer(api_client, printer_payload)
+    start = datetime(2026, 5, 7, tzinfo=timezone.utc)
+
+    assert db_session.SessionLocal is not None
+    with db_session.SessionLocal() as db:
+        for minute in range(1200):
+            sampled_at = start + timedelta(minutes=minute)
+            db.add(
+                DeviceMetricSample(
+                    printer_id=printer_id,
+                    metric="temperature.bed",
+                    value_float=float(minute),
+                    value_text=str(minute),
+                    unit="celsius",
+                    details={},
+                    sampled_at=sampled_at,
+                )
+            )
+        db.commit()
+
+    metrics = api_client.get(
+        f"/api/printers/{printer_id}/metrics",
+        params={
+            "bucket": "hour",
+            "group": "temperature",
+            "since": start.isoformat(),
+            "limit": 10,
+        },
+    ).json()
+
+    assert len(metrics) == 10
+    assert metrics[0]["sampled_at"].startswith("2026-05-07T10:00:00")
+    assert metrics[-1]["sampled_at"].startswith("2026-05-07T19:00:00")
+
+
+def test_bucketed_metrics_default_range_uses_bounded_query_window(api_client, printer_payload, monkeypatch) -> None:
+    printer_id = _create_printer(api_client, printer_payload)
+    now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    start = now - timedelta(days=45)
+    captured_row_counts: list[int] = []
+    original_bucket_metric_samples = api_routes._bucket_metric_samples
+
+    def capture_bucket_rows(rows, bucket):
+        captured_row_counts.append(len(rows))
+        return original_bucket_metric_samples(rows, bucket)
+
+    assert db_session.SessionLocal is not None
+    with db_session.SessionLocal() as db:
+        for hour in range(45 * 24):
+            sampled_at = start + timedelta(hours=hour)
+            db.add(
+                DeviceMetricSample(
+                    printer_id=printer_id,
+                    metric="temperature.bucket_window",
+                    value_float=float(hour),
+                    value_text=str(hour),
+                    unit="celsius",
+                    details={},
+                    sampled_at=sampled_at,
+                )
+            )
+        db.commit()
+
+    monkeypatch.setattr(api_routes, "_bucket_metric_samples", capture_bucket_rows)
+    metrics = api_client.get(
+        f"/api/printers/{printer_id}/metrics",
+        params={
+            "bucket": "hour",
+            "metric": "temperature.bucket_window",
+            "limit": 10,
+            "to": now.isoformat(),
+        },
+    ).json()
+
+    assert len(metrics) == 10
+    assert captured_row_counts == [30 * 24]
+    assert all(item["details"]["bucket"] == "hour" for item in metrics)
 
 
 def test_hms_error_becomes_inactive_when_absent_from_next_hms_frame(api_client, printer_payload) -> None:

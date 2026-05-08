@@ -116,13 +116,14 @@
 
 .chart-tooltip-title {
   fill: #ffffff;
-  font-size: 12px;
+  font-size: 20px;
   font-weight: 760;
 }
 
 .chart-tooltip-line {
   fill: #d8e1dc;
-  font-size: 10px;
+  font-size: 18px;
+  font-weight: 680;
 }
 
 .chart-empty {
@@ -758,4 +759,3 @@ tbody tr:last-child td {
   color: var(--muted);
   font-size: 12px;
 }
-

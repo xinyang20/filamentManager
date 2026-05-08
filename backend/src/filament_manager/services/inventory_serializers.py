@@ -120,6 +120,7 @@ def filament_spool_to_read(spool: FilamentSpool) -> dict[str, Any]:
     first_series = sku.type_series if sku else None
     first_brand = first_series.brand if first_series else None
     config = spool.config or {}
+    last_ams_remain_percent = 0 if spool.status == "empty" and spool.actual_weight_g == 0 else config.get("last_ams_remain_percent")
     return {
         "id": spool.id,
         "sku_id": spool.sku_id,
@@ -160,7 +161,7 @@ def filament_spool_to_read(spool: FilamentSpool) -> dict[str, Any]:
         "archived_at": datetime_from_config(config.get("archived_at")),
         "manual_quantity_protected": False,
         "last_weighed_g": spool.actual_weight_g,
-        "last_ams_remain_percent": config.get("last_ams_remain_percent"),
+        "last_ams_remain_percent": last_ams_remain_percent,
         "note": spool.note,
         "config": config,
         "created_at": spool.created_at,

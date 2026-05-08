@@ -35,4 +35,15 @@ describe("useAmsStore", () => {
     expect(useInventoryStore().filamentColorMappings).toHaveLength(1);
     expect(requestPaths(fetchMock)).toContain("/printers/1/ams/overview");
   });
+
+  it("labels sensor ranges and detects drying units", () => {
+    const store = useAmsStore();
+
+    expect(store.amsSensorRangeOptions[1]).toEqual({ label: "24 小时", value: "24" });
+    expect(store.amsIsDrying({ dry_status_name: "drying" })).toBe(true);
+    expect(store.amsIsDrying({ dry_status: "idle", dry_time: 0 })).toBe(false);
+    expect(store.amsIsDrying({ dry_status: "idle", dry_time: 629 })).toBe(false);
+    expect(store.amsIsDrying({ dry_status_name: "cooling", dry_time: 629 })).toBe(false);
+    expect(store.amsIsDrying({ dry_time: 629 })).toBe(true);
+  });
 });

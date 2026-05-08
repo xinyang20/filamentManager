@@ -32,6 +32,8 @@ describe("filamentMetrics", () => {
     expect(filamentSpoolRemainingWeight({ actual_weight_g: 321, nominal_weight_g: 1000, last_ams_remain_percent: 50 })).toBe(321);
     expect(filamentSpoolRemainingWeight({ nominal_weight_g: 1000, last_ams_remain_percent: 42 })).toBe(420);
     expect(filamentRemainPercent({ current_remaining_g: 250, nominal_weight_g: 1000 })).toBe("25%");
+    expect(filamentRemainPercent({ actual_weight_g: 0, nominal_weight_g: 1000, last_ams_remain_percent: 12 })).toBe("0%");
+    expect(filamentSpoolRemainingLabel({ actual_weight_g: 0, nominal_weight_g: 1000, last_ams_remain_percent: 12 })).toBe("0% / 0 g");
     expect(filamentSpoolRemainingLabel({ nominal_weight_g: 1000, last_ams_remain_percent: 42 })).toBe("42% / 420 g");
   });
 

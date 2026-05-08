@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from filament_manager.db.models import AmsSlot
 from filament_manager.mqtt.parser import extract_command, identify_tray, parse_ams_units
 
 
@@ -91,6 +92,32 @@ def test_state_eleven_without_filament_payload_is_transition() -> None:
     slot = units[0].slots[0]
     assert slot.is_transitioning is True
     assert slot.identity.identity_source == "manual_required"
+
+
+def test_ams_ht_state_eight_and_twenty_three_without_filament_payload_are_transitions() -> None:
+    for state in (8, 23):
+        units = parse_ams_units(
+            {
+                "print": {
+                    "ams": {
+                        "ams": [
+                            {
+                                "id": "128",
+                                "tray": [{"id": "0", "state": state}],
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+
+        slot = units[0].slots[0]
+        assert slot.is_transitioning is True
+        assert slot.identity.identity_source == "manual_required"
+
+        model_slot = AmsSlot(printer_id=1, ams_id="128", tray_id="0", slot_state=str(state), raw={"state": state})
+        assert model_slot.state_name == "transitioning"
+        assert not model_slot.state_name.startswith("unknown:")
 
 
 def test_state_ten_with_only_identity_is_transition() -> None:
