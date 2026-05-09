@@ -667,8 +667,9 @@ def test_ams_transition_frame_without_payload_does_not_create_phantom_spool(api_
     first_spool = api_client.get("/api/filament/spools").json()[0]
 
     transition_payload = deepcopy(payload)
-    transition_payload["print"]["ams"]["ams"][0]["tray"][0] = {"id": "0", "state": 10}
-    _ingest(api_client, printer["id"], transition_payload)
+    for state in (10, 26):
+        transition_payload["print"]["ams"]["ams"][0]["tray"][0] = {"id": "0", "state": state}
+        _ingest(api_client, printer["id"], transition_payload)
 
     spools = api_client.get("/api/filament/spools").json()
     assert [item["id"] for item in spools] == [first_spool["id"]]
@@ -682,7 +683,7 @@ def test_ams_transition_frame_without_payload_does_not_create_phantom_spool(api_
 def test_ams_ht_transition_states_without_payload_do_not_create_phantom_spool(api_client, printer_payload, fixture_dir) -> None:
     printer = _printer(api_client, printer_payload)
 
-    for state in (8, 11, 23):
+    for state in (8, 11, 23, 26):
         payload = json.loads((fixture_dir / "push_status_valid_tray_uuid.json").read_text())
         payload["print"]["ams"]["ams"][0]["id"] = "128"
         payload["print"]["ams"]["ams"][0]["tray"] = [{"id": "0", "state": state}]
@@ -702,7 +703,7 @@ def test_ams_ht_transition_states_without_payload_do_not_create_phantom_spool(ap
 
 def test_historical_ams_ht_transition_phantom_spools_are_hidden(api_client) -> None:
     spool_ids = []
-    for state in (8, 23):
+    for state in (8, 23, 26):
         response = api_client.post(
             "/api/filament/spools",
             json={

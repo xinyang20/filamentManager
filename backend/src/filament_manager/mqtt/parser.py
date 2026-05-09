@@ -33,6 +33,7 @@ AMS_TRANSITION_WITHOUT_PAYLOAD_STATES = {
     "21",
     "23",
     "25",
+    "26",
     "27",
     "FILAMENT_PRESENT",
     "LOADING",

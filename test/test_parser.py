@@ -94,8 +94,8 @@ def test_state_eleven_without_filament_payload_is_transition() -> None:
     assert slot.identity.identity_source == "manual_required"
 
 
-def test_ams_ht_state_eight_and_twenty_three_without_filament_payload_are_transitions() -> None:
-    for state in (8, 23):
+def test_ams_ht_state_eight_twenty_three_and_twenty_six_without_filament_payload_are_transitions() -> None:
+    for state in (8, 23, 26):
         units = parse_ams_units(
             {
                 "print": {

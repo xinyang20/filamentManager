@@ -1,5 +1,17 @@
 # Repository Guidelines
 
+## Global Environment Rules
+
+Never use the system-level Python environment as the project runtime, and never install, remove, upgrade, or reconfigure packages in it. Treat system Python as read-only.
+
+Use `uv` high-level commands for all Python-related project work, prioritizing `uv init`, `uv venv`, `uv add`, `uv remove`, `uv sync`, and `uv run`. Unless explicitly requested, do not use `uv pip`, direct `python`, or `pip` for project environments, dependency management, or script execution.
+
+Use `pnpm` and `pnpm dlx` for all Node-related work. Do not use `npm` or `npx` for dependency installation, script execution, or one-off CLI usage.
+
+Do not create another Python virtual environment, Node environment, or similar nested runtime environment inside an existing project environment. Reuse the current project environment by default unless explicitly requested otherwise.
+
+Communicate with users in Simplified Chinese by default. Final review reports should also be written in Simplified Chinese by default. This does not apply to code, technical identifiers, paths, commands, proper nouns, or rule files that should remain in their original language.
+
 ## Project Structure & Module Organization
 
 FilamentManager is a local 3D printer operations and filament management app. Backend code lives in `backend/src/filament_manager`, with FastAPI routes, SQLAlchemy models, MQTT parsing, and business services grouped by domain. Vue 3 frontend code lives in `frontend/vue/src`, with Pinia stores in `src/stores`, page views in `src/views`, shared components in `src/components`, styles in `src/styles`, and brand assets in `src/assets`. Backend tests and synthetic payload fixtures live in `test/`. Local runtime data such as `filament_manager.db`, backups, and generated outputs must not be committed.

@@ -701,6 +701,7 @@ AMS_SLOT_STATE_NAMES = {
     "21": "transitioning",
     "23": "transitioning",
     "25": "rfid_reading",
+    "26": "transitioning",
     "27": "rfid_reading_or_transitioning",
     "idle": "loaded",
     "loaded": "loaded",
