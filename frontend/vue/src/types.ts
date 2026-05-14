@@ -259,6 +259,42 @@ export interface SystemInfo {
   online_printers: number;
 }
 
+export type RawMqttDbLimit = "1gb" | "5gb" | "10gb" | "20gb" | "unlimited";
+
+export interface DatabaseRetentionCleanup {
+  started_at: string;
+  finished_at: string;
+  raw_mqtt_db_limit?: string | null;
+  limit_bytes?: number | null;
+  trigger_threshold_bytes?: number | null;
+  database_size_before_bytes?: number | null;
+  database_size_after_bytes?: number | null;
+  deleted_rows: number;
+  nullified_device_metric_samples: number;
+  nullified_ams_slot_history_samples: number;
+  vacuumed: boolean;
+  blocked_non_raw_size: boolean;
+  skipped_reason?: string | null;
+  error?: string | null;
+}
+
+export interface DatabaseRetentionStatus {
+  raw_mqtt_db_limit: RawMqttDbLimit;
+  limit_bytes?: number | null;
+  trigger_threshold_bytes?: number | null;
+  database_size_bytes: number;
+  sqlite: boolean;
+  enforcement_supported: boolean;
+  is_over_threshold: boolean;
+  raw_mqtt_row_count: number;
+  raw_mqtt_payload_bytes_estimate: number;
+  raw_mqtt_oldest_received_at?: string | null;
+  raw_mqtt_newest_received_at?: string | null;
+  retention_running: boolean;
+  retention_running_since?: string | null;
+  last_cleanup?: DatabaseRetentionCleanup | null;
+}
+
 export interface MetricSample {
   id: number;
   metric: string;

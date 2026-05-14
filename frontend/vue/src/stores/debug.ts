@@ -1,7 +1,7 @@
 import { computed, reactive, ref } from "vue";
 import { acceptHMRUpdate, defineStore, storeToRefs } from "pinia";
 import { API_BASE, apiRequest } from "../api";
-import type { SystemInfo, UnifiedEvent } from "../types";
+import type { DatabaseRetentionStatus, RawMqttDbLimit, SystemInfo, UnifiedEvent } from "../types";
 import { useEventsStore } from "./events";
 import { useI18nStore } from "./i18n";
 import { useNavigationStore } from "./navigation";
@@ -24,6 +24,8 @@ export const useDebugStore = defineStore("debug", () => {
   const rawMqtt = ref<Record<string, any>[]>([]);
 
   const systemInfo = ref<SystemInfo | null>(null);
+  const databaseRetention = ref<DatabaseRetentionStatus | null>(null);
+  const pendingRawMqttDbLimit = ref<RawMqttDbLimit>("5gb");
 
   const exportOptions = reactive({
     type: "json",
@@ -50,6 +52,23 @@ export const useDebugStore = defineStore("debug", () => {
 
   const importResult = ref<Record<string, any> | null>(null);
 
+  const rawMqttDbLimitOptions = computed(() => [
+    { label: t("debug.retentionLimit1gb"), value: "1gb" },
+    { label: t("debug.retentionLimit5gb"), value: "5gb" },
+    { label: t("debug.retentionLimit10gb"), value: "10gb" },
+    { label: t("debug.retentionLimit20gb"), value: "20gb" },
+    { label: t("debug.retentionLimitUnlimited"), value: "unlimited" },
+  ]);
+
+  const databaseRetentionLastCleanupLabel = computed(() => {
+    const cleanup = databaseRetention.value?.last_cleanup;
+    if (!cleanup) return t("common.empty");
+    if (cleanup.error) return t("debug.retentionCleanupError");
+    if (cleanup.blocked_non_raw_size) return t("debug.retentionCleanupBlocked");
+    if (cleanup.skipped_reason) return t("debug.retentionCleanupSkipped", { reason: cleanup.skipped_reason });
+    return t("debug.retentionCleanupDeleted", { count: cleanup.deleted_rows });
+  });
+
 
   const exportSectionItems = computed(() => [
     { key: "config", label: t("export.sectionConfig") },
@@ -71,14 +90,45 @@ export const useDebugStore = defineStore("debug", () => {
   ]);
 
   async function loadDebug() {
-    const [raw, eventResult, infoResult] = await Promise.all([
+    const [raw, eventResult, infoResult, retentionResult] = await Promise.all([
       apiRequest<Record<string, any>[]>("/debug/raw-mqtt?limit=20"),
       apiRequest<UnifiedEvent[]>("/events?limit=80"),
       apiRequest<SystemInfo>("/system/info"),
+      apiRequest<DatabaseRetentionStatus>("/debug/database-retention"),
     ]);
     rawMqtt.value = raw;
     eventsStore().events = eventResult;
     systemInfo.value = infoResult;
+    updateDatabaseRetention(retentionResult);
+  }
+
+
+  async function saveRawMqttDbLimit(value: string | number | null) {
+    const next = String(value || "5gb") as RawMqttDbLimit;
+    const previous = databaseRetention.value?.raw_mqtt_db_limit || "5gb";
+    pendingRawMqttDbLimit.value = next;
+    if (rawMqttLimitWouldCleanup(next)) {
+      const confirmed = window.confirm(t("debug.retentionLimitConfirm"));
+      if (!confirmed) {
+        pendingRawMqttDbLimit.value = previous;
+        return;
+      }
+    }
+    await withLoading(async () => {
+      const result = await apiRequest<DatabaseRetentionStatus>("/debug/database-retention", {
+        method: "PATCH",
+        body: JSON.stringify({ raw_mqtt_db_limit: next }),
+      });
+      updateDatabaseRetention(result);
+    });
+  }
+
+
+  async function enforceDatabaseRetention() {
+    await withLoading(async () => {
+      const result = await apiRequest<DatabaseRetentionStatus>("/debug/database-retention/enforce", { method: "POST" });
+      updateDatabaseRetention(result);
+    });
   }
 
 
@@ -154,17 +204,42 @@ export const useDebugStore = defineStore("debug", () => {
     if (!enabled) exportOptions.sections = exportOptions.sections.filter((item) => item !== key);
   }
 
+  function updateDatabaseRetention(result: DatabaseRetentionStatus) {
+    databaseRetention.value = result;
+    pendingRawMqttDbLimit.value = result.raw_mqtt_db_limit;
+  }
+
+
+  function rawMqttLimitWouldCleanup(limit: RawMqttDbLimit) {
+    if (limit === "unlimited") return false;
+    const size = databaseRetention.value?.database_size_bytes || 0;
+    const limitBytes = {
+      "1gb": 1 * 1024 ** 3,
+      "5gb": 5 * 1024 ** 3,
+      "10gb": 10 * 1024 ** 3,
+      "20gb": 20 * 1024 ** 3,
+      unlimited: null,
+    }[limit];
+    return Boolean(limitBytes && size >= limitBytes * 1.05 && (databaseRetention.value?.raw_mqtt_row_count || 0) > 0);
+  }
+
 
   return {
     rawMqtt,
     systemInfo,
+    databaseRetention,
+    pendingRawMqttDbLimit,
     exportOptions,
     importOptions,
     importFileInput,
     importResult,
+    rawMqttDbLimitOptions,
+    databaseRetentionLastCleanupLabel,
     exportSectionItems,
     importModeOptions,
     loadDebug,
+    saveRawMqttDbLimit,
+    enforceDatabaseRetention,
     downloadSupportBundle,
     downloadExport,
     importBackupFile,

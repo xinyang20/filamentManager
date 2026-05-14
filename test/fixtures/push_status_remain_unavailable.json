@@ -5,16 +5,19 @@
     "ams": {
       "ams": [
         {
-          "id": "0",
+          "id": "128",
           "tray": [
             {
-              "id": "3",
-              "tray_uuid": "99999999-8888-7777-6666-555555555555",
-              "tag_uid": "REMAINUNAVAILABLE",
-              "tray_type": "PLA",
-              "tray_color": "FFFFFF",
+              "id": "0",
+              "tray_uuid": "C27BF5A592BD43898492BD61E354E427",
+              "tag_uid": "725BB97700000100",
+              "tray_type": "PETG",
+              "tray_sub_brands": "PETG Basic",
+              "tray_color": "FFFFFFFF",
+              "tray_info_idx": "GFG00",
+              "tray_weight": "1000",
               "remain": -1,
-              "tray_state": "loading"
+              "state": 11
             }
           ]
         }

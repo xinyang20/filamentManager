@@ -395,8 +395,16 @@
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.sku-modal-form .field-label:first-child {
-  grid-column: 1 / -1;
+.color-mapping-modal {
+  width: min(960px, 100%);
+}
+
+.modal-panel:has(.app-select.open) {
+  overflow: visible;
+}
+
+.modal-panel:has(.app-select.open) .app-select-menu {
+  max-height: min(360px, calc(100vh - 180px));
 }
 
 .wide-modal:has(.spool-dialog-forms) {

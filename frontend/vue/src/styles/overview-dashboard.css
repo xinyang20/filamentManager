@@ -321,6 +321,33 @@
   flex: 0 0 auto;
 }
 
+.retention-toolbar-label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 680;
+  white-space: nowrap;
+}
+
+.retention-select {
+  width: 120px;
+  min-width: 120px;
+}
+
+.retention-check-button {
+  min-width: 124px;
+}
+
+.network-info-grid.system-info-grid,
+.network-info-grid.retention-info-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.retention-info-grid {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
 .experimental-panel {
   border-color: rgba(195, 122, 0, 0.26);
   background:

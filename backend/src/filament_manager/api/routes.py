@@ -41,6 +41,8 @@ from filament_manager.schemas import (
     AmsSlotHistorySampleRead,
     AmsUnitRead,
     DashboardSummaryItemRead,
+    DatabaseRetentionStatusRead,
+    DatabaseRetentionUpdate,
     DeviceStatusSnapshotRead,
     DeviceMetricSampleRead,
     DiscoveryCandidateRead,
@@ -219,6 +221,11 @@ from filament_manager.services.notifications import (
 from filament_manager.services.local_records import (
     list_timelapse_notes,
     upsert_timelapse_note,
+)
+from filament_manager.services.database_retention import (
+    database_retention_status,
+    schedule_raw_mqtt_retention_check,
+    set_raw_mqtt_db_limit,
 )
 from filament_manager.services.observability import prometheus_metrics, support_bundle, system_info
 from filament_manager.services.print_log import list_print_logs, print_log_analytics, print_log_summary
@@ -1013,6 +1020,30 @@ def api_list_raw_mqtt(limit: int = 50, db: Session = Depends(get_db)) -> list[Ra
         RawMqttMessageRead.model_validate(row).model_copy(update={"payload": redact_sensitive(row.payload)})
         for row in rows
     ]
+
+
+@router.get("/debug/database-retention", response_model=DatabaseRetentionStatusRead)
+def api_database_retention_status(db: Session = Depends(get_db)) -> dict[str, Any]:
+    return database_retention_status(db)
+
+
+@router.patch("/debug/database-retention", response_model=DatabaseRetentionStatusRead)
+def api_update_database_retention(
+    data: DatabaseRetentionUpdate,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    set_raw_mqtt_db_limit(db, data.raw_mqtt_db_limit)
+    status_payload = database_retention_status(db)
+    if status_payload["is_over_threshold"]:
+        schedule_raw_mqtt_retention_check(throttled=False)
+        status_payload = database_retention_status(db)
+    return status_payload
+
+
+@router.post("/debug/database-retention/enforce", response_model=DatabaseRetentionStatusRead)
+def api_enforce_database_retention(db: Session = Depends(get_db)) -> dict[str, Any]:
+    schedule_raw_mqtt_retention_check(throttled=False)
+    return database_retention_status(db)
 
 
 @router.get("/debug/events", response_model=list[PrinterEventRead])

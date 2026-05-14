@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from sqlalchemy import select
@@ -31,10 +32,13 @@ from filament_manager.services.device_status import (
     upsert_device_status_from_push_status,
 )
 from filament_manager.services.ams import record_ams_slot_history_sample
+from filament_manager.services.database_retention import schedule_raw_mqtt_retention_check
 from filament_manager.services.inventory import process_ams_slot_filament, record_print_filament_context
 from filament_manager.services.metrics import record_metric_samples_from_push_status
 from filament_manager.services.notifications import dispatch_event_notifications
 from filament_manager.services.print_log import upsert_print_log_from_snapshot
+
+LOGGER = logging.getLogger(__name__)
 
 
 def emit_printer_event(
@@ -427,25 +431,26 @@ def _process_ams(db: Session, printer_id: int, payload: dict[str, Any], raw_mess
                 slot_model=slot,
                 parsed_slot=parsed_slot,
             )
-            if filament_spool is not None and created:
-                emit_printer_event(
-                    db,
-                    printer_id=printer_id,
-                    event_type="spool.discovered",
-                    severity="info",
-                    message="RFID spool discovered",
-                    dedupe_key=f"spool.discovered:{filament_spool.official_spool_uid or filament_spool.id}",
-                    data={
-                        "filament_spool_id": filament_spool.id,
-                        "official_spool_uid": filament_spool.official_spool_uid,
-                        "identity_source": filament_spool.identity_source,
-                        "ams_id": parsed_slot.ams_id,
-                        "tray_id": parsed_slot.tray_id,
-                        "status": filament_spool.status,
-                        "sku_id": filament_spool.sku_id,
-                    },
-                )
-                if _filament_spool_needs_sku_review(filament_spool):
+            if filament_spool is not None:
+                if created:
+                    emit_printer_event(
+                        db,
+                        printer_id=printer_id,
+                        event_type="spool.discovered",
+                        severity="info",
+                        message="RFID spool discovered",
+                        dedupe_key=f"spool.discovered:{filament_spool.official_spool_uid or filament_spool.id}",
+                        data={
+                            "filament_spool_id": filament_spool.id,
+                            "official_spool_uid": filament_spool.official_spool_uid,
+                            "identity_source": filament_spool.identity_source,
+                            "ams_id": parsed_slot.ams_id,
+                            "tray_id": parsed_slot.tray_id,
+                            "status": filament_spool.status,
+                            "sku_id": filament_spool.sku_id,
+                        },
+                    )
+                if not parsed_slot.is_transitioning and _filament_spool_needs_sku_review(filament_spool):
                     emit_printer_event(
                         db,
                         printer_id=printer_id,
@@ -544,6 +549,10 @@ def process_mqtt_payload(
         )
 
     db.commit()
+    try:
+        schedule_raw_mqtt_retention_check(throttled=True)
+    except Exception:  # noqa: BLE001 - retention scheduling must not interrupt ingestion.
+        LOGGER.exception("Failed to schedule raw MQTT retention check")
     db.refresh(raw_message)
     return raw_message
 

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { nextTick } from "vue";
 import { useInventoryStore } from "./inventory";
 import { mockApi, requestPaths, resetStoreTest } from "./testHelpers";
 
@@ -26,5 +27,29 @@ describe("useInventoryStore", () => {
     expect(store.selectedFilamentSpoolId).toBe(1);
     expect(store.selectedFilamentSpoolEvents?.events).toHaveLength(1);
     expect(requestPaths(fetchMock)).toContain("/filament/inventory/summary");
+  });
+
+  it("sorts SKU brand and type-series selectors and filters type-series by brand", async () => {
+    const store = useInventoryStore();
+    store.filamentBrands = [
+      { id: 2, name: "Zeta", aliases: [], created_at: "", updated_at: "" },
+      { id: 1, name: "Alpha", aliases: [], created_at: "", updated_at: "" },
+    ];
+    store.filamentTypeSeries = [
+      { id: 3, brand_id: 2, brand_name: "Zeta", material_type: "PETG", series_name: "Basic", brand_ids: [2], brands: [], sku_count: 0, spool_count: 0, created_at: "", updated_at: "" },
+      { id: 2, brand_id: 1, brand_name: "Alpha", material_type: "PLA", series_name: "Matte", brand_ids: [1], brands: [], sku_count: 0, spool_count: 0, created_at: "", updated_at: "" },
+      { id: 1, brand_id: 1, brand_name: "Alpha", material_type: "ABS", series_name: "ABS", brand_ids: [1], brands: [], sku_count: 0, spool_count: 0, created_at: "", updated_at: "" },
+    ];
+
+    expect(store.filamentRequiredBrandOptions.map((item) => item.label)).toEqual(["Alpha", "Zeta"]);
+
+    store.filamentSkuForm.brand_id = 1;
+    expect(store.filamentSkuTypeSeriesOptions.map((item) => item.label)).toEqual(["ABS · ABS", "PLA · Matte"]);
+
+    store.filamentSkuForm.type_series_id = 1;
+    store.filamentSkuForm.brand_id = 2;
+    await nextTick();
+    expect(store.filamentSkuForm.type_series_id).toBeNull();
+    expect(store.filamentSkuTypeSeriesOptions.map((item) => item.label)).toEqual(["PETG · Basic"]);
   });
 });

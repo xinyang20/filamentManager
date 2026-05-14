@@ -24,6 +24,13 @@ class TimestampMixin:
     )
 
 
+class AppSetting(Base, TimestampMixin):
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(120), primary_key=True)
+    value: Mapped[str] = mapped_column(Text)
+
+
 class Printer(Base, TimestampMixin):
     __tablename__ = "printers"
 
@@ -693,6 +700,7 @@ AMS_SLOT_STATE_NAMES = {
     "1": "empty",
     "4": "loading",
     "5": "unloading",
+    "7": "transitioning",
     "8": "transitioning",
     "9": "filament_present",
     "10": "filament_present",

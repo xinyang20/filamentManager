@@ -19,6 +19,11 @@
   .maintenance-fleet-panel {
     position: static;
   }
+
+  .network-info-grid.system-info-grid,
+  .network-info-grid.retention-info-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 860px) {
@@ -48,6 +53,12 @@
   .nav-list {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     overflow: visible;
+  }
+
+  .retention-select,
+  .retention-check-button {
+    width: 100%;
+    min-width: 0;
   }
 
   .topbar,
@@ -147,6 +158,11 @@
   .bar-row,
   .kv,
   .kv.compact {
+    grid-template-columns: 1fr;
+  }
+
+  .network-info-grid.system-info-grid,
+  .network-info-grid.retention-info-grid {
     grid-template-columns: 1fr;
   }
 

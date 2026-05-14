@@ -75,6 +75,7 @@ const {
   filamentRequiredBrandOptions,
   filamentSkuForm,
   filamentSkuReviewDescription,
+  filamentSkuTypeSeriesOptions,
   filamentSpoolBrandOptions,
   filamentSpoolForm,
   filamentSpoolLabel,
@@ -87,7 +88,6 @@ const {
   filamentSpoolStatusOptions,
   filamentSpoolTypeSeriesOptions,
   filamentTypeSeriesForm,
-  filamentTypeSeriesOptions,
   filamentWeight,
   formatCell,
   handleCameraStreamError,
@@ -211,7 +211,8 @@ const {
           <button class="icon-button" type="button" :title="t('common.close')" @click="closeInventoryDialog"><X :size="17" /></button>
         </div>
         <form class="form-grid compact-form modal-form sku-modal-form" @submit.prevent="saveFilamentSku">
-          <label class="field-label"><span>{{ t("inventory.typeSeries") }}</span><AppSelect v-model="filamentSkuForm.type_series_id" :options="filamentTypeSeriesOptions" :placeholder="t('inventory.typeSeries')" /></label>
+          <label class="field-label"><span>{{ t("form.brand") }}</span><AppSelect v-model="filamentSkuForm.brand_id" :options="filamentRequiredBrandOptions" :placeholder="t('form.brand')" /></label>
+          <label class="field-label"><span>{{ t("inventory.typeSeries") }}</span><AppSelect v-model="filamentSkuForm.type_series_id" :options="filamentSkuTypeSeriesOptions" :placeholder="t('inventory.typeSeries')" /></label>
           <label class="field-label"><span>{{ t("inventory.officialColorName") }}</span><input v-model="filamentSkuForm.color_name" :placeholder="t('inventory.officialColorName')" /></label>
           <label class="field-label"><span>{{ t("inventory.hexValue") }}</span><input v-model="filamentSkuForm.color_value" :placeholder="t('inventory.hexValue')" /></label>
           <label class="field-label"><span>{{ t("inventory.nominalWeight") }}</span><input v-model.number="filamentSkuForm.nominal_weight_g" type="number" min="0" :placeholder="t('inventory.nominalWeight')" /></label>
@@ -226,7 +227,7 @@ const {
         </form>
       </section>
 
-      <section v-else-if="inventoryDialog.key === 'colorMapping'" class="modal-panel">
+      <section v-else-if="inventoryDialog.key === 'colorMapping'" class="modal-panel color-mapping-modal">
         <div class="modal-header">
           <h3>{{ editingFilamentColorMappingId ? t("inventory.editColorMapping") : t("inventory.addColorMapping") }}</h3>
           <button class="icon-button" type="button" :title="t('common.close')" @click="closeInventoryDialog"><X :size="17" /></button>

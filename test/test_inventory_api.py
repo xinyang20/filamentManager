@@ -559,6 +559,73 @@ def test_ams_jade_white_uses_weight_to_match_existing_sku(api_client, printer_pa
     assert spools[0]["config"].get("needs_sku_review") is None
 
 
+def test_ams_remain_unavailable_with_rfid_payload_matches_existing_sku(api_client, printer_payload, fixture_dir) -> None:
+    printer = _printer(api_client, printer_payload)
+    brand = _brand(api_client)
+    petg_series = _type_series(api_client, brand["id"], material="PETG", series="Basic")
+    petg_sku = _sku(
+        api_client,
+        petg_series["id"],
+        color_name="White",
+        color_hex="FFFFFF",
+        sealed=1,
+        nominal_weight_g=1000,
+    )
+    payload = json.loads((fixture_dir / "push_status_remain_unavailable.json").read_text())
+
+    _ingest(api_client, printer["id"], payload)
+
+    spools = api_client.get("/api/filament/spools").json()
+    assert len(spools) == 1
+    assert spools[0]["official_spool_uid"] == "C27BF5A592BD43898492BD61E354E427"
+    assert spools[0]["sku_id"] == petg_sku["id"]
+    assert spools[0]["status"] == "loaded_in_ams"
+    assert spools[0]["current_ams_id"] == "128"
+    assert spools[0]["current_tray_id"] == "0"
+    assert spools[0]["last_ams_remain_percent"] is None
+    assert spools[0]["config"]["ams_raw"]["remain"] == -1
+    assert spools[0]["config"].get("needs_sku_review") is None
+    skus = {item["id"]: item for item in api_client.get("/api/filament/skus").json()}
+    assert skus[petg_sku["id"]]["sealed_quantity"] == 0
+    assert not any(item["event_type"] == "filament.spool.pending_confirmation" for item in api_client.get("/api/debug/events").json())
+
+
+def test_ams_rfid_payload_reuses_uidless_skuless_placeholder(api_client, printer_payload, fixture_dir) -> None:
+    printer = _printer(api_client, printer_payload)
+    brand = _brand(api_client)
+    petg_series = _type_series(api_client, brand["id"], material="PETG", series="Basic")
+    petg_sku = _sku(
+        api_client,
+        petg_series["id"],
+        color_name="White",
+        color_hex="FFFFFF",
+        sealed=1,
+        nominal_weight_g=1000,
+    )
+    payload = json.loads((fixture_dir / "push_status_remain_unavailable.json").read_text())
+    placeholder_payload = deepcopy(payload)
+    placeholder_payload["print"]["ams"]["ams"][0]["tray"] = [{"id": "0"}]
+
+    _ingest(api_client, printer["id"], placeholder_payload)
+    placeholder = api_client.get("/api/filament/spools").json()[0]
+    assert placeholder["official_spool_uid"] is None
+    assert placeholder["sku_id"] is None
+
+    _ingest(api_client, printer["id"], payload)
+
+    spools = api_client.get("/api/filament/spools").json()
+    assert len(spools) == 1
+    assert spools[0]["id"] == placeholder["id"]
+    assert spools[0]["official_spool_uid"] == "C27BF5A592BD43898492BD61E354E427"
+    assert spools[0]["identity_source"] == "ams_official_id"
+    assert spools[0]["sku_id"] == petg_sku["id"]
+    assert spools[0]["status"] == "loaded_in_ams"
+    assert spools[0]["last_ams_remain_percent"] is None
+    assert spools[0]["config"]["ams_raw"]["remain"] == -1
+    slots = api_client.get(f"/api/printers/{printer['id']}/ams/slots").json()
+    assert slots[0]["filament_spool_id"] == placeholder["id"]
+
+
 def test_ams_replacement_with_existing_sku_loads_new_spool_and_decrements_stock(api_client, printer_payload, fixture_dir) -> None:
     printer = _printer(api_client, printer_payload)
     brand = _brand(api_client)
@@ -683,7 +750,7 @@ def test_ams_transition_frame_without_payload_does_not_create_phantom_spool(api_
 def test_ams_ht_transition_states_without_payload_do_not_create_phantom_spool(api_client, printer_payload, fixture_dir) -> None:
     printer = _printer(api_client, printer_payload)
 
-    for state in (8, 11, 23, 26):
+    for state in (7, 8, 11, 23, 26):
         payload = json.loads((fixture_dir / "push_status_valid_tray_uuid.json").read_text())
         payload["print"]["ams"]["ams"][0]["id"] = "128"
         payload["print"]["ams"]["ams"][0]["tray"] = [{"id": "0", "state": state}]
@@ -703,7 +770,7 @@ def test_ams_ht_transition_states_without_payload_do_not_create_phantom_spool(ap
 
 def test_historical_ams_ht_transition_phantom_spools_are_hidden(api_client) -> None:
     spool_ids = []
-    for state in (8, 23, 26):
+    for state in (7, 8, 23, 26):
         response = api_client.post(
             "/api/filament/spools",
             json={

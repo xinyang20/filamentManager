@@ -1003,60 +1003,74 @@ def process_ams_slot_filament(
         )
     created = spool is None
     if spool is None:
-        sku, auto_created_sku = _resolve_sku_for_ams_slot(db, parsed_slot)
-        config = {"last_ams_remain_percent": parsed_slot.remain, "ams_raw": parsed_slot.raw}
-        if auto_created_sku:
-            config["needs_sku_review"] = True
-            config["auto_created_sku_id"] = sku.id if sku else None
-            if previous_spool_id is not None:
-                config["sku_review_reason"] = "ams_filament_change"
-        spool = FilamentSpool(
-            sku_id=sku.id if sku else None,
-            official_spool_uid=official_uid,
-            identity_source="ams_official_id",
-            nominal_weight_g=(sku.nominal_weight_g if sku else _slot_nominal_weight_g(parsed_slot)),
-            status="loaded_in_ams" if sku else "unknown",
-            opened_at=utc_now() if sku else None,
-            current_printer_id=printer_id,
-            current_ams_id=parsed_slot.ams_id,
-            current_tray_id=parsed_slot.tray_id,
-            config=config,
-        )
-        db.add(spool)
-        db.flush()
-        if sku is not None and not auto_created_sku:
-            _open_one_from_stock_if_available(db, sku, spool=spool, note="AMS official spool identified")
-            _fill_sku_color_from_slot(db, sku, parsed_slot)
-            _ensure_color_mapping_from_sku(db, sku)
-            _record_event(
+        placeholder = _official_uid_placeholder_candidate(db, previous_spool_id)
+        if placeholder is not None:
+            sku, auto_created_sku = _resolve_sku_for_ams_slot(db, parsed_slot)
+            spool = placeholder
+            created = False
+            _complete_placeholder_from_official_slot(
                 db,
                 spool=spool,
-                sku_id=sku.id,
-                event_type="opened_from_stock",
-                message="AMS official spool opened from matched SKU",
-                current=_spool_snapshot(spool),
-            )
-        elif sku is not None:
-            _record_event(
-                db,
-                spool=spool,
-                sku_id=sku.id,
-                event_type="needs_location",
-                message="Replacement AMS spool created with an auto-created SKU that needs review"
-                if previous_spool_id is not None
-                else "AMS spool created with an auto-created SKU that needs review",
-                current=_spool_snapshot(spool),
-                data=_slot_match_context(parsed_slot),
+                official_uid=official_uid,
+                parsed_slot=parsed_slot,
+                sku=sku,
+                auto_created_sku=auto_created_sku,
             )
         else:
-            _record_event(
-                db,
-                spool=spool,
-                event_type="needs_location",
-                message="AMS spool requires SKU confirmation",
-                current=_spool_snapshot(spool),
-                data=_slot_match_context(parsed_slot),
+            sku, auto_created_sku = _resolve_sku_for_ams_slot(db, parsed_slot)
+            config = {"last_ams_remain_percent": _ams_remain_percent_or_none(parsed_slot.remain), "ams_raw": parsed_slot.raw}
+            if auto_created_sku:
+                config["needs_sku_review"] = True
+                config["auto_created_sku_id"] = sku.id if sku else None
+                if previous_spool_id is not None:
+                    config["sku_review_reason"] = "ams_filament_change"
+            spool = FilamentSpool(
+                sku_id=sku.id if sku else None,
+                official_spool_uid=official_uid,
+                identity_source="ams_official_id",
+                nominal_weight_g=(sku.nominal_weight_g if sku else _slot_nominal_weight_g(parsed_slot)),
+                status="loaded_in_ams" if sku else "unknown",
+                opened_at=utc_now() if sku else None,
+                current_printer_id=printer_id,
+                current_ams_id=parsed_slot.ams_id,
+                current_tray_id=parsed_slot.tray_id,
+                config=config,
             )
+            db.add(spool)
+            db.flush()
+            if sku is not None and not auto_created_sku:
+                _open_one_from_stock_if_available(db, sku, spool=spool, note="AMS official spool identified")
+                _fill_sku_color_from_slot(db, sku, parsed_slot)
+                _ensure_color_mapping_from_sku(db, sku)
+                _record_event(
+                    db,
+                    spool=spool,
+                    sku_id=sku.id,
+                    event_type="opened_from_stock",
+                    message="AMS official spool opened from matched SKU",
+                    current=_spool_snapshot(spool),
+                )
+            elif sku is not None:
+                _record_event(
+                    db,
+                    spool=spool,
+                    sku_id=sku.id,
+                    event_type="needs_location",
+                    message="Replacement AMS spool created with an auto-created SKU that needs review"
+                    if previous_spool_id is not None
+                    else "AMS spool created with an auto-created SKU that needs review",
+                    current=_spool_snapshot(spool),
+                    data=_slot_match_context(parsed_slot),
+                )
+            else:
+                _record_event(
+                    db,
+                    spool=spool,
+                    event_type="needs_location",
+                    message="AMS spool requires SKU confirmation",
+                    current=_spool_snapshot(spool),
+                    data=_slot_match_context(parsed_slot),
+                )
     elif spool.sku_id is None:
         matched, auto_created_sku = _resolve_sku_for_ams_slot(db, parsed_slot)
         if matched is not None:
@@ -1077,6 +1091,12 @@ def process_ams_slot_filament(
                 config["auto_created_sku_id"] = matched.id
                 if previous_spool_id is not None and previous_spool_id != spool.id:
                     config["sku_review_reason"] = "ams_filament_change"
+                spool.config = config
+            else:
+                config = dict(spool.config or {})
+                config.pop("needs_sku_review", None)
+                config.pop("auto_created_sku_id", None)
+                config.pop("sku_review_reason", None)
                 spool.config = config
 
     if not parsed_slot.is_transitioning:
@@ -1423,6 +1443,56 @@ def _find_spool_by_official_uid(db: Session, uid: str | None) -> FilamentSpool |
     return db.scalars(select(FilamentSpool).where(FilamentSpool.official_spool_uid == uid)).first()
 
 
+def _official_uid_placeholder_candidate(db: Session, previous_spool_id: int | None) -> FilamentSpool | None:
+    if previous_spool_id is None:
+        return None
+    spool = db.get(FilamentSpool, previous_spool_id)
+    if spool is None:
+        return None
+    if spool.official_spool_uid is not None or spool.sku_id is not None:
+        return None
+    if spool.status in HISTORICAL_SPOOL_STATUSES:
+        return None
+    return spool
+
+
+def _complete_placeholder_from_official_slot(
+    db: Session,
+    *,
+    spool: FilamentSpool,
+    official_uid: str,
+    parsed_slot: ParsedAmsSlot,
+    sku: FilamentSku | None,
+    auto_created_sku: bool,
+) -> None:
+    spool.official_spool_uid = official_uid
+    spool.identity_source = "ams_official_id"
+    if sku is not None:
+        spool.sku_id = sku.id
+        spool.nominal_weight_g = spool.nominal_weight_g or sku.nominal_weight_g
+        if spool.opened_at is None:
+            spool.opened_at = utc_now()
+        _fill_sku_color_from_slot(db, sku, parsed_slot)
+        _ensure_color_mapping_from_sku(db, sku)
+        if not auto_created_sku:
+            _open_one_from_stock_if_available(db, sku, spool=spool, note="AMS official spool completed from placeholder")
+    else:
+        spool.nominal_weight_g = spool.nominal_weight_g or _slot_nominal_weight_g(parsed_slot)
+
+    config = dict(spool.config or {})
+    config["last_ams_remain_percent"] = _ams_remain_percent_or_none(parsed_slot.remain)
+    config["ams_raw"] = parsed_slot.raw
+    if auto_created_sku:
+        config["needs_sku_review"] = True
+        config["auto_created_sku_id"] = sku.id if sku else None
+    elif sku is not None:
+        config.pop("needs_sku_review", None)
+        config.pop("auto_created_sku_id", None)
+        config.pop("sku_review_reason", None)
+    spool.config = config
+    db.add(spool)
+
+
 def _find_color_mapping(
     db: Session,
     *,
@@ -1523,7 +1593,7 @@ def _handle_historical_uid_reappeared(
             "reappeared_official_spool_uid": historical_spool.official_spool_uid,
             "archived_spool_id": historical_spool.id,
             "archived_spool_status": historical_spool.status,
-            "last_ams_remain_percent": parsed_slot.remain,
+            "last_ams_remain_percent": _ams_remain_percent_or_none(parsed_slot.remain),
             "ams_raw": parsed_slot.raw,
         },
     )
@@ -1555,7 +1625,7 @@ def _is_uid_conflict_placeholder(spool: FilamentSpool, uid: str | None) -> bool:
 
 def _sync_uid_conflict_placeholder(spool: FilamentSpool, slot: ParsedAmsSlot) -> None:
     config = dict(spool.config or {})
-    config["last_ams_remain_percent"] = slot.remain
+    config["last_ams_remain_percent"] = _ams_remain_percent_or_none(slot.remain)
     config["ams_raw"] = slot.raw
     spool.config = config
 
@@ -1570,7 +1640,7 @@ def _create_unknown_ams_spool(
     identity_source: str = "ams_official_id",
     review_reason: str | None = None,
 ) -> FilamentSpool:
-    config = {"last_ams_remain_percent": parsed_slot.remain, "ams_raw": parsed_slot.raw}
+    config = {"last_ams_remain_percent": _ams_remain_percent_or_none(parsed_slot.remain), "ams_raw": parsed_slot.raw}
     if auto_created_sku:
         config["needs_sku_review"] = True
         config["auto_created_sku_id"] = sku.id if sku else None
@@ -1765,7 +1835,7 @@ def _set_filament_loaded_location(
 
 def _sync_ams_context(spool: FilamentSpool, slot: ParsedAmsSlot) -> None:
     config = dict(spool.config or {})
-    config["last_ams_remain_percent"] = slot.remain
+    config["last_ams_remain_percent"] = _ams_remain_percent_or_none(slot.remain)
     config["ams_raw"] = slot.raw
     spool.config = config
 
@@ -2130,6 +2200,16 @@ def _slot_state_text(slot: ParsedAmsSlot) -> str:
         or _clean_text(raw.get("state"))
     )
     return (value or "").lower()
+
+
+def _ams_remain_percent_or_none(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if 0 <= parsed <= 100 else None
 
 
 def _slot_nominal_weight_g(slot: ParsedAmsSlot) -> float | None:

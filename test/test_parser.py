@@ -41,12 +41,35 @@ def test_missing_identity_requires_manual_binding() -> None:
     assert identity.identity_confidence == 0.0
 
 
-def test_remain_minus_one_marks_transition_without_inventory_signal(fixture_dir) -> None:
+def test_loaded_remain_minus_one_with_rfid_payload_is_not_transition(fixture_dir) -> None:
     payload = json.loads((fixture_dir / "push_status_remain_unavailable.json").read_text())
 
     units = parse_ams_units(payload)
     slot = units[0].slots[0]
 
+    assert slot.remain == -1
+    assert slot.is_transitioning is False
+    assert slot.identity.identity_source == "tray_uuid"
+    assert "remain_unavailable" in (slot.identity.identity_warning or "")
+
+
+def test_loading_remain_minus_one_without_filament_payload_is_transition() -> None:
+    units = parse_ams_units(
+        {
+            "print": {
+                "ams": {
+                    "ams": [
+                        {
+                            "id": "0",
+                            "tray": [{"id": "1", "remain": -1, "tray_state": "loading"}],
+                        }
+                    ]
+                }
+            }
+        }
+    )
+
+    slot = units[0].slots[0]
     assert slot.remain == -1
     assert slot.is_transitioning is True
     assert "remain_unavailable" in (slot.identity.identity_warning or "")
@@ -94,8 +117,8 @@ def test_state_eleven_without_filament_payload_is_transition() -> None:
     assert slot.identity.identity_source == "manual_required"
 
 
-def test_ams_ht_state_eight_twenty_three_and_twenty_six_without_filament_payload_are_transitions() -> None:
-    for state in (8, 23, 26):
+def test_ams_ht_state_seven_eight_twenty_three_and_twenty_six_without_filament_payload_are_transitions() -> None:
+    for state in (7, 8, 23, 26):
         units = parse_ams_units(
             {
                 "print": {
@@ -118,6 +141,65 @@ def test_ams_ht_state_eight_twenty_three_and_twenty_six_without_filament_payload
         model_slot = AmsSlot(printer_id=1, ams_id="128", tray_id="0", slot_state=str(state), raw={"state": state})
         assert model_slot.state_name == "transitioning"
         assert not model_slot.state_name.startswith("unknown:")
+
+
+def test_state_seven_with_filament_payload_is_not_transition() -> None:
+    units = parse_ams_units(
+        {
+            "print": {
+                "ams": {
+                    "ams": [
+                        {
+                            "id": "128",
+                            "tray": [{"id": "0", "state": 7, "tray_type": "PETG", "tray_color": "FFFFFFFF"}],
+                        }
+                    ]
+                }
+            }
+        }
+    )
+
+    assert units[0].slots[0].is_transitioning is False
+
+
+def test_ams_ht_tray_reading_bits_use_high_slot_index() -> None:
+    units = parse_ams_units(
+        {
+            "print": {
+                "ams": {
+                    "tray_reading_bits": "10000",
+                    "ams": [
+                        {
+                            "id": "128",
+                            "tray": [{"id": "0"}],
+                        }
+                    ],
+                }
+            }
+        }
+    )
+
+    assert units[0].slots[0].is_transitioning is True
+
+
+def test_standard_ams_tray_reading_bits_use_four_slot_stride() -> None:
+    units = parse_ams_units(
+        {
+            "print": {
+                "ams": {
+                    "tray_reading_bits": "40",
+                    "ams": [
+                        {
+                            "id": "1",
+                            "tray": [{"id": "2"}],
+                        }
+                    ],
+                }
+            }
+        }
+    )
+
+    assert units[0].slots[0].is_transitioning is True
 
 
 def test_state_ten_with_only_identity_is_transition() -> None:

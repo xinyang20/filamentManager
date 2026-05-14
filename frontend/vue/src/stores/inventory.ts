@@ -244,28 +244,42 @@ export const useInventoryStore = defineStore("inventory", () => {
 
   const filamentBrandOptions = computed(() => [
     { label: t("inventory.noBrand"), value: null },
-    ...filamentBrands.value.map((brand) => ({ label: brand.name, value: brand.id })),
+    ...sortSelectOptions(filamentBrands.value.map((brand) => ({ label: brand.name, value: brand.id }))),
   ]);
 
   const filamentRequiredBrandOptions = computed(() =>
-    filamentBrands.value.map((brand) => ({ label: brand.name, value: brand.id })),
+    sortSelectOptions(filamentBrands.value.map((brand) => ({ label: brand.name, value: brand.id }))),
   );
 
   const filamentTypeSeriesOptions = computed(() =>
-    filamentTypeSeries.value.map((row) => ({
-      label: [row.brand_name, filamentTypeSeriesLabel(row)].filter(Boolean).join(" · "),
-      value: row.id,
-    })),
-  );
-
-  const filamentColorMappingTypeSeriesOptions = computed(() =>
-    filamentTypeSeries.value
-      .filter((row) => !filamentColorMappingForm.brand_id || row.brand_id === filamentColorMappingForm.brand_id)
-      .map((row) => ({
+    sortSelectOptions(
+      filamentTypeSeries.value.map((row) => ({
         label: [row.brand_name, filamentTypeSeriesLabel(row)].filter(Boolean).join(" · "),
         value: row.id,
       })),
+    ),
   );
+
+  const filamentColorMappingTypeSeriesOptions = computed(() =>
+    sortSelectOptions(
+      filamentTypeSeries.value
+        .filter((row) => !filamentColorMappingForm.brand_id || row.brand_id === filamentColorMappingForm.brand_id)
+        .map((row) => ({
+          label: filamentColorMappingForm.brand_id ? filamentTypeSeriesLabel(row) : [row.brand_name, filamentTypeSeriesLabel(row)].filter(Boolean).join(" · "),
+          value: row.id,
+        })),
+    ),
+  );
+
+  const filamentSkuTypeSeriesOptions = computed(() => {
+    if (!filamentSkuForm.brand_id) return [{ label: t("inventory.selectBrandFirst"), value: null, disabled: true }];
+    const options = sortSelectOptions(
+      filamentTypeSeries.value
+        .filter((row) => row.brand_id === filamentSkuForm.brand_id)
+        .map((row) => ({ label: filamentTypeSeriesLabel(row), value: row.id })),
+    );
+    return options.length ? options : [{ label: t("inventory.noTypeSeries"), value: null, disabled: true }];
+  });
 
   const filamentSkuOptions = computed(() => [
     { label: t("inventory.noSku"), value: null },
@@ -274,17 +288,19 @@ export const useInventoryStore = defineStore("inventory", () => {
 
   const filamentSkuFilterBrandOptions = computed(() => [
     { label: t("inventory.allBrands"), value: null },
-    ...filamentBrands.value.map((brand) => ({ label: brand.name, value: brand.id })),
+    ...sortSelectOptions(filamentBrands.value.map((brand) => ({ label: brand.name, value: brand.id }))),
   ]);
 
   const filamentSkuFilterTypeSeriesOptions = computed(() => [
     { label: t("inventory.allTypeSeries"), value: null },
-    ...filamentTypeSeries.value
-      .filter((row) => !filamentSkuFilters.brand_id || row.brand_id === filamentSkuFilters.brand_id)
-      .map((row) => ({
-        label: [row.brand_name, filamentTypeSeriesLabel(row)].filter(Boolean).join(" · "),
-        value: row.id,
-      })),
+    ...sortSelectOptions(
+      filamentTypeSeries.value
+        .filter((row) => !filamentSkuFilters.brand_id || row.brand_id === filamentSkuFilters.brand_id)
+        .map((row) => ({
+          label: filamentSkuFilters.brand_id ? filamentTypeSeriesLabel(row) : [row.brand_name, filamentTypeSeriesLabel(row)].filter(Boolean).join(" · "),
+          value: row.id,
+        })),
+    ),
   ]);
 
   const filamentSkuWeightOptions = computed(() => {
@@ -326,16 +342,18 @@ export const useInventoryStore = defineStore("inventory", () => {
 
   const filamentSpoolBrandOptions = computed(() => [
     { label: t("inventory.noBrand"), value: null },
-    ...filamentBrands.value.map((brand) => ({ label: brand.name, value: brand.id })),
+    ...sortSelectOptions(filamentBrands.value.map((brand) => ({ label: brand.name, value: brand.id }))),
   ]);
 
   const filamentSpoolTypeSeriesOptions = computed(() => {
     if (!filamentSpoolForm.brand_id) return [{ label: t("inventory.selectBrandFirst"), value: null, disabled: true }];
     return [
       { label: t("inventory.noTypeSeries"), value: null },
-      ...filamentTypeSeries.value
-        .filter((row) => row.brand_id === filamentSpoolForm.brand_id)
-        .map((row) => ({ label: filamentTypeSeriesLabel(row), value: row.id })),
+      ...sortSelectOptions(
+        filamentTypeSeries.value
+          .filter((row) => row.brand_id === filamentSpoolForm.brand_id)
+          .map((row) => ({ label: filamentTypeSeriesLabel(row), value: row.id })),
+      ),
     ];
   });
 
@@ -355,6 +373,15 @@ export const useInventoryStore = defineStore("inventory", () => {
       if (!brandId || !filamentColorMappingForm.type_series_id) return;
       const selected = filamentTypeSeries.value.find((row) => row.id === filamentColorMappingForm.type_series_id);
       if (selected && selected.brand_id !== brandId) filamentColorMappingForm.type_series_id = null;
+    },
+  );
+
+  watch(
+    () => filamentSkuForm.brand_id,
+    (brandId) => {
+      if (!brandId || !filamentSkuForm.type_series_id) return;
+      const selected = filamentTypeSeries.value.find((row) => row.id === filamentSkuForm.type_series_id);
+      if (selected && selected.brand_id !== brandId) filamentSkuForm.type_series_id = null;
     },
   );
 
@@ -917,9 +944,11 @@ export const useInventoryStore = defineStore("inventory", () => {
   function editFilamentSku(sku: FilamentSku, options: { reviewSpoolId?: number | null } = {}) {
     editingFilamentSkuId.value = sku.id;
     skuReviewSourceSpoolId.value = options.reviewSpoolId ?? null;
+    const typeSeriesId = sku.type_series_id ?? sku.type_series_ids?.[0] ?? null;
+    const typeSeries = typeSeriesId ? filamentTypeSeries.value.find((row) => row.id === typeSeriesId) : null;
     Object.assign(filamentSkuForm, {
-      brand_id: sku.brand_id ?? null,
-      type_series_id: sku.type_series_id ?? sku.type_series_ids?.[0] ?? null,
+      brand_id: sku.brand_id ?? typeSeries?.brand_id ?? null,
+      type_series_id: typeSeriesId,
       material: sku.material || "PLA",
       series: sku.series || "",
       color_name: sku.color_name || "",
@@ -1077,10 +1106,12 @@ export const useInventoryStore = defineStore("inventory", () => {
     const firstBrand = presentationStore().arrayOfRecord(spool?.brands)[0] || null;
     const material = presentationStore().firstText(spool?.material, raw.tray_type, raw.filament_type, firstTypeSeries?.material_type, "PLA");
     const series = presentationStore().firstText(spool?.series, raw.tray_sub_brands, raw.tray_info_idx, raw.filament_name, firstTypeSeries?.series_name);
-    const brandId = numeric(spool?.brand_id ?? firstBrand?.id ?? firstTypeSeries?.brand_id);
+    let brandId = numeric(spool?.brand_id ?? firstBrand?.id ?? firstTypeSeries?.brand_id);
     const typeSeriesId =
       numeric(spool?.type_series_id ?? firstTypeSeries?.id) ??
       (material && series ? findTypeSeriesId(material, series, brandId) : null);
+    const selectedTypeSeries = typeSeriesId ? filamentTypeSeries.value.find((row) => row.id === typeSeriesId) : null;
+    brandId = brandId ?? selectedTypeSeries?.brand_id ?? null;
     const nominalWeight = numeric(
       spool?.nominal_weight_g ??
         spool?.initial_net_weight_g ??
@@ -1420,6 +1451,16 @@ export const useInventoryStore = defineStore("inventory", () => {
     const color = colorValue || sku.color_name ? filamentColorDisplay(colorValue, sku.color_name, sku) : null;
     const weight = numeric(sku.nominal_weight_g);
     return [color || `SKU ${sku.id}`, weight !== null ? `${Math.round(weight)} g` : null].filter(Boolean).join(" · ");
+  }
+
+
+  function sortSelectOptions<T extends { label: string }>(options: T[]): T[] {
+    return [...options].sort((left, right) =>
+      left.label.localeCompare(right.label, "zh-Hans-CN", {
+        numeric: true,
+        sensitivity: "base",
+      }),
+    );
   }
 
 
@@ -1885,6 +1926,7 @@ export const useInventoryStore = defineStore("inventory", () => {
     filamentRequiredBrandOptions,
     filamentTypeSeriesOptions,
     filamentColorMappingTypeSeriesOptions,
+    filamentSkuTypeSeriesOptions,
     filamentSkuOptions,
     filamentSkuFilterBrandOptions,
     filamentSkuFilterTypeSeriesOptions,

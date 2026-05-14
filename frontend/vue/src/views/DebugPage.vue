@@ -46,6 +46,7 @@ const {
   displayCell,
   downloadExport,
   downloadSupportBundle,
+  enforceDatabaseRetention,
   eventMessage,
   eventTypeLabel,
   events,
@@ -63,8 +64,13 @@ const {
   importResult,
   message,
   network,
+  databaseRetention,
+  databaseRetentionLastCleanupLabel,
+  pendingRawMqttDbLimit,
   rawMqtt,
+  rawMqttDbLimitOptions,
   recentEvents,
+  saveRawMqttDbLimit,
   switchView,
   systemInfo,
   t,
@@ -78,6 +84,12 @@ const {
           <div class="panel-header">
             <h3>{{ t("debug.systemInfo") }}</h3>
             <div class="widget-tools">
+              <span class="retention-toolbar-label">{{ t("debug.databaseLimit") }}</span>
+              <AppSelect v-model="pendingRawMqttDbLimit" class="retention-select" :options="rawMqttDbLimitOptions" @change="saveRawMqttDbLimit" />
+              <button class="secondary retention-check-button" type="button" :disabled="databaseRetention?.retention_running" @click="enforceDatabaseRetention">
+                <RefreshCw :size="17" />
+                {{ t("debug.retentionEnforce") }}
+              </button>
               <button v-if="experimentalFeatures.notifications" class="secondary" type="button" @click="switchView('notifications')">
                 <Bell :size="17" />
                 {{ t("nav.notifications") }}
@@ -89,7 +101,7 @@ const {
               <Database :size="18" />
             </div>
           </div>
-          <div class="network-info-grid">
+          <div class="network-info-grid system-info-grid">
             <div class="network-info-item"><span>{{ t("debug.appVersion") }}</span><strong>{{ systemInfo?.app_version || "--" }}</strong></div>
             <div class="network-info-item"><span>{{ t("debug.uptime") }}</span><strong>{{ formatDurationSeconds(systemInfo?.uptime_seconds) }}</strong></div>
             <div class="network-info-item"><span>{{ t("debug.databaseSize") }}</span><strong>{{ formatBytes(systemInfo?.database_size_bytes || 0) }}</strong></div>
@@ -98,6 +110,25 @@ const {
             <div class="network-info-item"><span>{{ t("debug.memory") }}</span><strong>{{ formatBytes(Number(systemInfo?.memory?.project_rss_bytes || systemInfo?.memory?.rss_bytes || 0)) }}</strong></div>
             <div class="network-info-item"><span>{{ t("debug.configuredPrinters") }}</span><strong>{{ systemInfo?.configured_printers || 0 }}</strong></div>
             <div class="network-info-item"><span>{{ t("debug.onlinePrinters") }}</span><strong>{{ systemInfo?.online_printers || 0 }}</strong></div>
+          </div>
+          <div class="network-info-grid retention-info-grid">
+            <div class="network-info-item">
+              <span>{{ t("debug.retentionLimit") }}</span>
+              <strong>{{ databaseRetention?.limit_bytes ? formatBytes(databaseRetention.limit_bytes) : t("debug.retentionLimitUnlimited") }}</strong>
+            </div>
+            <div class="network-info-item">
+              <span>{{ t("debug.retentionThreshold") }}</span>
+              <strong>{{ databaseRetention?.trigger_threshold_bytes ? formatBytes(databaseRetention.trigger_threshold_bytes) : "—" }}</strong>
+            </div>
+            <div class="network-info-item"><span>{{ t("debug.rawMqttRows") }}</span><strong>{{ databaseRetention?.raw_mqtt_row_count || 0 }}</strong></div>
+            <div class="network-info-item"><span>{{ t("debug.rawPayloadSize") }}</span><strong>{{ formatBytes(databaseRetention?.raw_mqtt_payload_bytes_estimate || 0) }}</strong></div>
+            <div class="network-info-item"><span>{{ t("debug.rawMqttOldest") }}</span><strong>{{ formatCell(databaseRetention?.raw_mqtt_oldest_received_at) }}</strong></div>
+            <div class="network-info-item"><span>{{ t("debug.rawMqttNewest") }}</span><strong>{{ formatCell(databaseRetention?.raw_mqtt_newest_received_at) }}</strong></div>
+            <div class="network-info-item"><span>{{ t("debug.retentionSupported") }}</span><strong>{{ databaseRetention?.enforcement_supported ? t("common.yes") : t("common.no") }}</strong></div>
+            <div class="network-info-item">
+              <span>{{ t("debug.retentionLastCleanup") }}</span>
+              <strong>{{ databaseRetention?.retention_running ? t("debug.retentionRunning") : databaseRetentionLastCleanupLabel }}</strong>
+            </div>
           </div>
         </section>
         <section class="panel experimental-panel">

@@ -61,7 +61,7 @@ def test_unidentified_slot_requires_manual_binding(api_client, printer_payload, 
     assert any(item["event_type"] == "spool.unidentified" for item in api_client.get("/api/debug/events").json())
 
 
-def test_remain_minus_one_does_not_attach_or_move_spool(api_client, printer_payload, fixture_dir) -> None:
+def test_remain_minus_one_with_rfid_payload_attaches_spool(api_client, printer_payload, fixture_dir) -> None:
     printer_id = _create_printer(api_client, printer_payload)
     payload = json.loads((fixture_dir / "push_status_remain_unavailable.json").read_text())
 
@@ -69,11 +69,19 @@ def test_remain_minus_one_does_not_attach_or_move_spool(api_client, printer_payl
 
     slots = api_client.get(f"/api/printers/{printer_id}/ams/slots").json()
     assert slots[0]["remain"] == -1
-    assert slots[0]["is_transitioning"] is True
-    assert slots[0]["filament_spool_id"] is None
+    assert slots[0]["is_transitioning"] is False
+    assert slots[0]["filament_spool_id"] is not None
 
     spools = api_client.get("/api/filament/spools").json()
-    assert spools == []
+    assert len(spools) == 1
+    assert spools[0]["id"] == slots[0]["filament_spool_id"]
+    assert spools[0]["official_spool_uid"] == "C27BF5A592BD43898492BD61E354E427"
+    assert spools[0]["current_ams_id"] == "128"
+    assert spools[0]["current_tray_id"] == "0"
+    assert spools[0]["last_ams_remain_percent"] is None
+    assert spools[0]["config"]["ams_raw"]["remain"] == -1
+    assert spools[0]["config"]["needs_sku_review"] is True
+    assert any(item["event_type"] == "filament.spool.pending_confirmation" for item in api_client.get("/api/debug/events").json())
 
 
 def test_state_machine_deduplicates_repeated_push_status(api_client, printer_payload, fixture_dir) -> None:

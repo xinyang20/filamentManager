@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+RawMqttDbLimit = Literal["1gb", "5gb", "10gb", "20gb", "unlimited"]
 
 
 class PrinterCreate(BaseModel):
@@ -569,6 +571,44 @@ class RawMqttMessageRead(BaseModel):
     received_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class DatabaseRetentionCleanupRead(BaseModel):
+    started_at: datetime
+    finished_at: datetime
+    raw_mqtt_db_limit: str | None = None
+    limit_bytes: int | None = None
+    trigger_threshold_bytes: int | None = None
+    database_size_before_bytes: int | None = None
+    database_size_after_bytes: int | None = None
+    deleted_rows: int = 0
+    nullified_device_metric_samples: int = 0
+    nullified_ams_slot_history_samples: int = 0
+    vacuumed: bool = False
+    blocked_non_raw_size: bool = False
+    skipped_reason: str | None = None
+    error: str | None = None
+
+
+class DatabaseRetentionStatusRead(BaseModel):
+    raw_mqtt_db_limit: RawMqttDbLimit
+    limit_bytes: int | None = None
+    trigger_threshold_bytes: int | None = None
+    database_size_bytes: int
+    sqlite: bool
+    enforcement_supported: bool
+    is_over_threshold: bool
+    raw_mqtt_row_count: int
+    raw_mqtt_payload_bytes_estimate: int
+    raw_mqtt_oldest_received_at: datetime | None = None
+    raw_mqtt_newest_received_at: datetime | None = None
+    retention_running: bool
+    retention_running_since: datetime | None = None
+    last_cleanup: DatabaseRetentionCleanupRead | None = None
+
+
+class DatabaseRetentionUpdate(BaseModel):
+    raw_mqtt_db_limit: RawMqttDbLimit
 
 
 class PrinterEventRead(BaseModel):

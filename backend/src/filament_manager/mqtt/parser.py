@@ -25,6 +25,7 @@ INVALID_IDENTITY_VALUES = {
 AMS_TRANSITION_WITHOUT_PAYLOAD_STATES = {
     "4",
     "5",
+    "7",
     "8",
     "9",
     "10",
@@ -46,6 +47,21 @@ AMS_TRANSITION_WITHOUT_PAYLOAD_STATES = {
 }
 
 AMS_TRANSITION_STATE_MARKERS = {"LOADING", "UNLOADING", "READING", "BUSY", "CHANGE", "TRANSITION"}
+
+AMS_STATUS_IDLE = 0x00
+AMS_STATUS_FILAMENT_CHANGE = 0x01
+AMS_STATUS_RFID_IDENTIFYING = 0x02
+AMS_STATUS_ASSIST = 0x03
+AMS_STATUS_CALIBRATION = 0x04
+AMS_STATUS_COLD_PULL = 0x07
+AMS_STATUS_SELF_CHECK = 0x10
+AMS_STATUS_DEBUG = 0x20
+AMS_STATUS_UNKNOWN = 0xFF
+
+AMS_STATUS_TRANSITION_WITHOUT_PAYLOAD = {
+    AMS_STATUS_FILAMENT_CHANGE,
+    AMS_STATUS_RFID_IDENTIFYING,
+}
 
 
 @dataclass(frozen=True)
@@ -170,8 +186,26 @@ def identify_tray(tray: dict[str, Any]) -> SpoolIdentity:
     )
 
 
-def is_transitioning_tray(tray: dict[str, Any], remain: int | None) -> bool:
-    if remain == -1:
+def is_transitioning_tray(
+    tray: dict[str, Any],
+    remain: int | None,
+    *,
+    ams_id: Any = None,
+    tray_id: Any = None,
+    ams_status: int | None = None,
+    tray_reading_bits: int | None = None,
+    tray_read_done_bits: int | None = None,
+) -> bool:
+    if _tray_has_filament_payload(tray):
+        return False
+    if _slot_is_reading(
+        ams_id=ams_id,
+        tray_id=tray_id,
+        tray_reading_bits=tray_reading_bits,
+        tray_read_done_bits=tray_read_done_bits,
+    ):
+        return True
+    if _ams_status_code(ams_status) in AMS_STATUS_TRANSITION_WITHOUT_PAYLOAD:
         return True
     state = normalize_state(
         tray.get("tray_state")
@@ -181,9 +215,82 @@ def is_transitioning_tray(tray: dict[str, Any], remain: int | None) -> bool:
     )
     if state is None:
         return False
-    if is_transition_state_without_payload(state) and not _tray_has_filament_payload(tray):
-        return True
-    return any(marker in state for marker in AMS_TRANSITION_STATE_MARKERS)
+    return is_transition_state_without_payload(state)
+
+
+def _parse_ams_status(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, int):
+        return value
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    try:
+        return int(text, 0)
+    except ValueError:
+        try:
+            return int(text, 16)
+        except ValueError:
+            return None
+
+
+def _ams_status_code(value: Any) -> int | None:
+    parsed = _parse_ams_status(value)
+    if parsed is None:
+        return None
+    return parsed & 0xFF
+
+
+def parse_tray_bitfield(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    if text.startswith("0x"):
+        text = text[2:]
+    if any(char not in "0123456789abcdef" for char in text):
+        return None
+    try:
+        return int(text, 16)
+    except ValueError:
+        return None
+
+
+def tray_bit_index(ams_id: Any, tray_id: Any) -> int | None:
+    ams_num = as_int(ams_id)
+    tray_num = as_int(tray_id)
+    if ams_num is None or tray_num is None:
+        return None
+    if ams_num >= 128:
+        return 16 + (ams_num - 128)
+    return ams_num * 4 + tray_num
+
+
+def tray_bit_is_set(bits: int | None, *, ams_id: Any, tray_id: Any) -> bool | None:
+    if bits is None:
+        return None
+    index = tray_bit_index(ams_id, tray_id)
+    if index is None:
+        return None
+    return bool(bits & (1 << index))
+
+
+def _slot_is_reading(
+    *,
+    ams_id: Any,
+    tray_id: Any,
+    tray_reading_bits: int | None,
+    tray_read_done_bits: int | None,
+) -> bool:
+    reading = tray_bit_is_set(tray_reading_bits, ams_id=ams_id, tray_id=tray_id)
+    if not reading:
+        return False
+    read_done = tray_bit_is_set(tray_read_done_bits, ams_id=ams_id, tray_id=tray_id)
+    return read_done is not True
 
 
 def _tray_has_filament_payload(tray: dict[str, Any]) -> bool:
@@ -213,6 +320,27 @@ def _slot_state(tray: dict[str, Any]) -> str | None:
         or tray.get("slot_state")
         or tray.get("tray_status")
     )
+
+
+def _first_value(key: str, *sources: dict[str, Any]) -> Any:
+    for source in sources:
+        if key in source and source.get(key) not in (None, ""):
+            return source.get(key)
+    return None
+
+
+def _slot_state_with_bitfields(
+    tray: dict[str, Any],
+    *,
+    ams_id: Any,
+    tray_id: Any,
+    tray_exist_bits: int | None,
+) -> str | None:
+    state = _slot_state(tray)
+    exists = tray_bit_is_set(tray_exist_bits, ams_id=ams_id, tray_id=tray_id)
+    if state is None and exists is False and not _tray_has_filament_payload(tray):
+        return "empty"
+    return state
 
 
 def _find_token_sequence(parts: list[str], needle: str | None) -> int | None:
@@ -270,6 +398,10 @@ def parse_ams_units(payload: dict[str, Any]) -> list[ParsedAmsUnit]:
         ams_id = clean_text(unit.get("id") or unit.get("ams_id") or unit.get("idx"))
         if ams_id is None:
             continue
+        ams_status = _parse_ams_status(_first_value("ams_status", unit, ams_section, print_section))
+        tray_reading_bits = parse_tray_bitfield(_first_value("tray_reading_bits", unit, ams_section, print_section))
+        tray_read_done_bits = parse_tray_bitfield(_first_value("tray_read_done_bits", unit, ams_section, print_section))
+        tray_exist_bits = parse_tray_bitfield(_first_value("tray_exist_bits", unit, ams_section, print_section))
         raw_trays = unit.get("tray")
         trays = raw_trays if isinstance(raw_trays, list) else []
         parsed_slots: list[ParsedAmsSlot] = []
@@ -289,6 +421,12 @@ def parse_ams_units(payload: dict[str, Any]) -> list[ParsedAmsUnit]:
             color = clean_text(tray.get("tray_color") or tray.get("color"))
             identity = identify_tray(tray)
             warning = identity.identity_warning
+            slot_state = _slot_state_with_bitfields(
+                tray,
+                ams_id=ams_id,
+                tray_id=tray_id,
+                tray_exist_bits=tray_exist_bits,
+            )
             if remain == -1 and warning:
                 warning = f"{warning};remain_unavailable"
                 identity = SpoolIdentity(
@@ -308,7 +446,7 @@ def parse_ams_units(payload: dict[str, Any]) -> list[ParsedAmsUnit]:
                 ParsedAmsSlot(
                     ams_id=ams_id,
                     tray_id=tray_id,
-                    slot_state=_slot_state(tray),
+                    slot_state=slot_state,
                     material=material,
                     series=series,
                     color=color,
@@ -317,7 +455,15 @@ def parse_ams_units(payload: dict[str, Any]) -> list[ParsedAmsUnit]:
                     tray_uuid=clean_text(tray.get("tray_uuid")),
                     tag_uid=clean_text(tray.get("tag_uid")),
                     identity=identity,
-                    is_transitioning=is_transitioning_tray(tray, remain),
+                    is_transitioning=is_transitioning_tray(
+                        tray,
+                        remain,
+                        ams_id=ams_id,
+                        tray_id=tray_id,
+                        ams_status=ams_status,
+                        tray_reading_bits=tray_reading_bits,
+                        tray_read_done_bits=tray_read_done_bits,
+                    ),
                     raw=tray,
                 )
             )

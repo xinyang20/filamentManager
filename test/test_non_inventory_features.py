@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import io
 import struct
 import ssl
+import zipfile
 from types import SimpleNamespace
 
 from filament_manager.services import camera as camera_service
@@ -486,6 +488,22 @@ def test_print_log_analytics_timelapse_notes_and_export(api_client, printer_payl
     assert printer_payload["access_code"] not in export.text
     assert printer_payload["host"] not in export.text
     assert api_client.get("/api/export?type=json&sections=projects").json()["sections"] == []
+
+    telemetry_export = api_client.get("/api/export?type=json&sections=telemetry")
+    assert telemetry_export.status_code == 200
+    telemetry_body = telemetry_export.json()
+    assert "raw_mqtt_messages" not in telemetry_body["telemetry"]
+    assert telemetry_body["excluded_tables"]["telemetry"] == ["raw_mqtt_messages"]
+    assert telemetry_body["telemetry"]["printer_state_snapshots"]
+
+    csv_export = api_client.get("/api/export?type=csv&sections=telemetry")
+    assert csv_export.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(csv_export.content)) as archive:
+        manifest = archive.read("manifest.json").decode()
+        telemetry_csv = archive.read("telemetry.csv").decode()
+    assert "raw_mqtt_messages" in manifest
+    assert "raw_mqtt_messages" not in telemetry_csv
+    assert "printer_state_snapshots" in telemetry_csv
 
 
 def test_device_capabilities_are_conservative_for_p2s(api_client, printer_payload) -> None:

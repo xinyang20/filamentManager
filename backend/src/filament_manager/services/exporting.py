@@ -86,11 +86,22 @@ SECTION_MODELS: dict[str, dict[str, Any]] = {
     },
     "storage": {"printer_storage_files": PrinterStorageFile, "timelapse_notes": TimelapseNote},
     "telemetry": {
-        "raw_mqtt_messages": RawMqttMessage,
         "printer_state_snapshots": PrinterStateSnapshot,
         "device_status_snapshots": DeviceStatusSnapshot,
         "device_metric_samples": DeviceMetricSample,
     },
+}
+
+IMPORT_SECTION_MODELS: dict[str, dict[str, Any]] = {
+    **SECTION_MODELS,
+    "telemetry": {
+        "raw_mqtt_messages": RawMqttMessage,
+        **SECTION_MODELS["telemetry"],
+    },
+}
+
+EXCLUDED_EXPORT_TABLES: dict[str, list[str]] = {
+    "telemetry": ["raw_mqtt_messages"],
 }
 
 RESTORE_ORDER = (
@@ -138,6 +149,7 @@ def export_json_payload(
         "version": BACKUP_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "sections": selected,
+        "excluded_tables": _excluded_export_tables(selected),
     }
     for section in selected:
         payload[section] = _section_payload(db, section, redact=not include_sensitive)
@@ -173,6 +185,7 @@ def export_csv_zip_bytes(db: Session, sections: list[str] | None = None) -> byte
                     "version": BACKUP_VERSION,
                     "generated_at": datetime.now(timezone.utc).isoformat(),
                     "sections": selected,
+                    "excluded_tables": _excluded_export_tables(selected),
                     "restorable": False,
                 },
                 ensure_ascii=False,
@@ -197,7 +210,7 @@ def import_json_payload(db: Session, payload: dict[str, Any], mode: str = "merge
         section_payload = payload.get(section)
         if section_payload is None:
             continue
-        section_models = SECTION_MODELS[section]
+        section_models = IMPORT_SECTION_MODELS[section]
         for key, model in section_models.items():
             if isinstance(section_payload, list) and len(section_models) > 1:
                 continue
@@ -227,6 +240,10 @@ def _payload_sections(payload: dict[str, Any]) -> list[str] | None:
     if not isinstance(value, list):
         return None
     return [str(item) for item in value]
+
+
+def _excluded_export_tables(sections: list[str]) -> dict[str, list[str]]:
+    return {section: EXCLUDED_EXPORT_TABLES[section] for section in sections if section in EXCLUDED_EXPORT_TABLES}
 
 
 def _section_payload(db: Session, section: str, *, redact: bool) -> Any:
