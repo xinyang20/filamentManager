@@ -2,8 +2,9 @@ from collections.abc import Generator
 from datetime import datetime
 from pathlib import Path
 import shutil
+import threading
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session, sessionmaker
@@ -13,14 +14,22 @@ from filament_manager.db.models import Base
 
 engine: Engine | None = None
 SessionLocal: sessionmaker[Session] | None = None
+sqlite_write_lock = threading.RLock()
 
 
 def configure_database(database_url: str | None = None) -> Engine:
     global engine, SessionLocal
 
     url = database_url or get_settings().database_url
-    connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
+    connect_args = {"check_same_thread": False, "timeout": 30.0} if url.startswith("sqlite") else {}
     engine = create_engine(url, connect_args=connect_args, future=True)
+    if url.startswith("sqlite"):
+        @event.listens_for(engine, "connect")
+        def _set_sqlite_busy_timeout(dbapi_connection, _connection_record) -> None:
+            dbapi_connection.execute("PRAGMA busy_timeout=30000")
+            dbapi_connection.execute("PRAGMA journal_mode=WAL")
+            dbapi_connection.execute("PRAGMA synchronous=NORMAL")
+
     SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
     return engine
 
@@ -32,6 +41,7 @@ def create_schema() -> None:
     _reset_sqlite_inventory_schema_if_needed(engine)
     Base.metadata.create_all(bind=engine)
     _apply_sqlite_additive_migrations(engine)
+    _repair_print_log_printer_ids()
 
 
 def reset_database_for_tests(database_url: str) -> None:
@@ -48,6 +58,19 @@ def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()
     try:
         yield db
+    finally:
+        db.close()
+
+
+def _repair_print_log_printer_ids() -> None:
+    if SessionLocal is None:
+        return
+    from filament_manager.services.print_log import repair_print_log_printer_ids_from_raw_topics
+
+    db = SessionLocal()
+    try:
+        with sqlite_write_lock:
+            repair_print_log_printer_ids_from_raw_topics(db)
     finally:
         db.close()
 

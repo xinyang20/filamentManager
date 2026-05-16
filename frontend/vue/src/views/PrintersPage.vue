@@ -1,55 +1,30 @@
 <script setup lang="ts">
 import { appViewRefs, type AppViewContext } from "../app/viewContext";
 import {
-  Activity,
-  AlertCircle,
-  Archive,
-  Bell,
-  Boxes,
-  Camera,
-  ChevronDown,
-  ChevronUp,
-  CheckCircle2,
-  ClipboardList,
-  Database,
-  Download,
   Eye,
   EyeOff,
-  FileDown,
-  Gauge,
-  LineChart,
   Loader2,
   Network,
   PencilLine,
   Plus,
   PlugZap,
-  RefreshCw,
   Save,
   Search,
-  Send,
-  Settings,
-  ShieldAlert,
-  Star,
-  Thermometer,
   Trash2,
   Unplug,
-  Upload,
-  Wrench,
-  X,
 } from "lucide-vue-next";
-import AppSelect from "../components/AppSelect.vue";
-import MetricChart from "../components/MetricChart.vue";
 
 const props = defineProps<{ ctx: AppViewContext }>();
 const {
   accessCodeRevealLoading,
   accessCodeVisible,
-  activeView,
   connectPrinter,
   deletePrinterConfig,
   disconnectPrinter,
   discovery,
   displayCell,
+  editPrinter,
+  editingPrinterId,
   formatCell,
   printerForm,
   printers,
@@ -60,6 +35,7 @@ const {
   scanProgressWidth,
   scanning,
   selectedPrinterId,
+  startCreatePrinter,
   t,
   toggleAccessCodeVisibility,
 } = appViewRefs(props.ctx);
@@ -69,7 +45,10 @@ const {
 <section class="view">
         <div class="grid two wide">
           <section class="panel">
-            <div class="panel-header"><h3>{{ t("printers.config") }}</h3><Settings :size="18" /></div>
+            <div class="panel-header">
+              <h3>{{ editingPrinterId ? t("printers.editConfig") : t("printers.newConfig") }}</h3>
+              <button class="icon-button compact" type="button" :title="t('printers.newPrinter')" @click="startCreatePrinter()"><Plus :size="16" /></button>
+            </div>
             <div class="form-grid">
               <label>{{ t("form.name") }}<input v-model="printerForm.name" /></label>
               <label>{{ t("form.host") }}<input v-model="printerForm.host" /></label>
@@ -99,8 +78,8 @@ const {
             </div>
             <div class="toolbar printer-config-actions">
               <button class="primary" type="button" @click="savePrinter"><Save :size="17" />{{ t("common.save") }}</button>
-              <button class="secondary" type="button" @click="connectPrinter"><PlugZap :size="17" />{{ t("common.connect") }}</button>
-              <button class="secondary" type="button" @click="disconnectPrinter"><Unplug :size="17" />{{ t("common.disconnect") }}</button>
+              <button class="secondary" type="button" @click="connectPrinter(editingPrinterId || selectedPrinterId)"><PlugZap :size="17" />{{ t("common.connect") }}</button>
+              <button class="secondary" type="button" @click="disconnectPrinter(editingPrinterId || selectedPrinterId)"><Unplug :size="17" />{{ t("common.disconnect") }}</button>
               <button class="secondary" type="button" :disabled="scanning" @click="scanDevices">
                 <Loader2 v-if="scanning" class="spin" :size="17" />
                 <Search v-else :size="17" />
@@ -129,8 +108,17 @@ const {
                     <td>{{ printer.host }}</td>
                     <td>{{ displayCell(printer.connection_status) }}</td>
                     <td>{{ formatCell(printer.last_sync_at) }}</td>
-                    <td>
-                      <button class="icon-button danger" type="button" :title="t('printers.delete')" @click.stop="deletePrinterConfig(printer)">
+                    <td class="row-actions">
+                      <button class="icon-button compact" type="button" :title="t('common.connect')" @click.stop="connectPrinter(printer.id)">
+                        <PlugZap :size="15" />
+                      </button>
+                      <button class="icon-button compact" type="button" :title="t('common.disconnect')" @click.stop="disconnectPrinter(printer.id)">
+                        <Unplug :size="15" />
+                      </button>
+                      <button class="icon-button compact" type="button" :title="t('common.edit')" @click.stop="editPrinter(printer)">
+                        <PencilLine :size="15" />
+                      </button>
+                      <button class="icon-button compact danger" type="button" :title="t('printers.delete')" @click.stop="deletePrinterConfig(printer)">
                         <Trash2 :size="16" />
                       </button>
                     </td>
@@ -144,9 +132,9 @@ const {
           <div class="panel-header"><h3>{{ t("printers.discovery") }}</h3><Search :size="18" /></div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>{{ t("table.host") }}</th><th>{{ t("table.model") }}</th><th>{{ t("table.deviceName") }}</th><th>{{ t("table.serial") }}</th><th>{{ t("table.confidence") }}</th><th>{{ t("table.reason") }}</th></tr></thead>
+              <thead><tr><th>{{ t("table.host") }}</th><th>{{ t("table.model") }}</th><th>{{ t("table.deviceName") }}</th><th>{{ t("table.serial") }}</th><th>{{ t("table.confidence") }}</th><th>{{ t("table.reason") }}</th><th>{{ t("table.actions") }}</th></tr></thead>
               <tbody>
-                <tr v-if="!discovery.length"><td colspan="6" class="empty">{{ t("printers.noDiscovery") }}</td></tr>
+                <tr v-if="!discovery.length"><td colspan="7" class="empty">{{ t("printers.noDiscovery") }}</td></tr>
                 <tr v-for="item in discovery" :key="item.host">
                   <td>{{ item.host }}</td>
                   <td>{{ formatCell(item.model) }}</td>
@@ -154,6 +142,11 @@ const {
                   <td>{{ formatCell(item.serial) }}</td>
                   <td>{{ item.confidence }}</td>
                   <td>{{ item.reason }}</td>
+                  <td>
+                    <button class="icon-button compact" type="button" :title="t('printers.useCandidate')" @click="startCreatePrinter(item)">
+                      <Plus :size="15" />
+                    </button>
+                  </td>
                 </tr>
               </tbody>
             </table>

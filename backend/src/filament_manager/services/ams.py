@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import logging
+import time
 from typing import Any
 
 from sqlalchemy import delete, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from filament_manager.core.security import redact_sensitive
-from filament_manager.db.models import AmsLabel, AmsSlot, AmsSlotHistorySample, AmsUnit, DeviceMetricSample, DeviceStatusSnapshot, utc_now
+from filament_manager.db import session as db_session
+from filament_manager.db.models import AmsLabel, AmsSlot, AmsSlotHistorySample, AmsUnit, DeviceMetricSample, DeviceStatusSnapshot, _slot_state_name, utc_now
 
 HISTORY_DEDUPLICATION_WINDOW = timedelta(seconds=60)
 HISTORY_RETENTION_PERIOD = timedelta(days=30)
+SQLITE_LOCK_RETRY_DELAYS = (0.1, 0.25, 0.5, 1.0)
+LOGGER = logging.getLogger(__name__)
 
 
 def build_ams_overview(db: Session, printer_id: int) -> dict[str, Any]:
@@ -59,30 +65,55 @@ def build_ams_overview(db: Session, printer_id: int) -> dict[str, Any]:
 
 
 def set_ams_label(db: Session, *, printer_id: int, ams_id: str, display_name: str) -> AmsLabel:
-    label = db.scalars(
-        select(AmsLabel).where(AmsLabel.printer_id == printer_id, AmsLabel.ams_id == ams_id)
-    ).first()
-    if label is None:
-        label = AmsLabel(printer_id=printer_id, ams_id=ams_id, display_name=display_name.strip())
-        db.add(label)
-    else:
-        label.display_name = display_name.strip()
-        label.updated_at = utc_now()
-        db.add(label)
-    db.commit()
-    db.refresh(label)
-    return label
+    clean_name = display_name.strip()
+    for attempt in range(len(SQLITE_LOCK_RETRY_DELAYS) + 1):
+        try:
+            with db_session.sqlite_write_lock:
+                label = db.scalars(
+                    select(AmsLabel).where(AmsLabel.printer_id == printer_id, AmsLabel.ams_id == ams_id)
+                ).first()
+                if label is None:
+                    label = AmsLabel(printer_id=printer_id, ams_id=ams_id, display_name=clean_name)
+                    db.add(label)
+                else:
+                    label.display_name = clean_name
+                    label.updated_at = utc_now()
+                    db.add(label)
+                db.commit()
+            db.refresh(label)
+            return label
+        except OperationalError as exc:
+            db.rollback()
+            if _is_sqlite_database_locked(exc) and attempt < len(SQLITE_LOCK_RETRY_DELAYS):
+                delay = SQLITE_LOCK_RETRY_DELAYS[attempt]
+                LOGGER.warning("SQLite write lock while saving AMS label; retrying in %.2fs", delay)
+                time.sleep(delay)
+                continue
+            raise
+    raise RuntimeError("Failed to save AMS label")
 
 
 def delete_ams_label(db: Session, *, printer_id: int, ams_id: str) -> bool:
-    label = db.scalars(
-        select(AmsLabel).where(AmsLabel.printer_id == printer_id, AmsLabel.ams_id == ams_id)
-    ).first()
-    if label is None:
-        return False
-    db.delete(label)
-    db.commit()
-    return True
+    for attempt in range(len(SQLITE_LOCK_RETRY_DELAYS) + 1):
+        try:
+            with db_session.sqlite_write_lock:
+                label = db.scalars(
+                    select(AmsLabel).where(AmsLabel.printer_id == printer_id, AmsLabel.ams_id == ams_id)
+                ).first()
+                if label is None:
+                    return False
+                db.delete(label)
+                db.commit()
+            return True
+        except OperationalError as exc:
+            db.rollback()
+            if _is_sqlite_database_locked(exc) and attempt < len(SQLITE_LOCK_RETRY_DELAYS):
+                delay = SQLITE_LOCK_RETRY_DELAYS[attempt]
+                LOGGER.warning("SQLite write lock while deleting AMS label; retrying in %.2fs", delay)
+                time.sleep(delay)
+                continue
+            raise
+    raise RuntimeError("Failed to delete AMS label")
 
 
 def build_ams_sensor_history(db: Session, *, printer_id: int, ams_id: str, hours: int) -> dict[str, Any]:
@@ -124,7 +155,7 @@ def record_ams_slot_history_sample(
     raw_message_id: int | None,
 ) -> AmsSlotHistorySample | None:
     sample_values = {
-        "state_name": slot.state_name or slot.slot_state,
+        "state_name": _slot_state(slot),
         "material": slot.material,
         "color": slot.color,
         "remain": slot.remain,
@@ -256,7 +287,7 @@ def _slot_payload(slot: AmsSlot, *, display_name: str | None = None, active: Ams
         "cali_idx": slot.cali_idx,
         "k": slot.k,
         "state_code": slot.state_code,
-        "state_name": slot.state_name,
+        "state_name": _slot_state(slot),
         "tray_state_name": slot.tray_state_name,
         "raw": redact_sensitive(slot.raw),
         "updated_at": slot.updated_at,
@@ -389,6 +420,11 @@ def _stats(values: Any) -> dict[str, float | None]:
     return {"min": min(numeric), "max": max(numeric), "avg": sum(numeric) / len(numeric)}
 
 
+def _is_sqlite_database_locked(value: object) -> bool:
+    text = str(value).lower()
+    return "database is locked" in text or "database is busy" in text
+
+
 def _int(value: Any) -> int | None:
     if value is None or value == "":
         return None
@@ -399,6 +435,10 @@ def _int(value: Any) -> int | None:
 
 
 def _slot_state(slot: AmsSlot) -> str | None:
+    if slot.slot_state:
+        normalized = _slot_state_name(slot.slot_state)
+        if normalized is not None and not normalized.startswith("unknown:"):
+            return normalized
     return slot.state_name or slot.tray_state_name or slot.slot_state
 
 

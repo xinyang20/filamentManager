@@ -616,11 +616,61 @@ export const useInventoryStore = defineStore("inventory", () => {
     filamentColorMappings.value = colorMappingResult;
     filamentColorMappingGaps.value = gapResult;
     filamentSkus.value = skuResult;
-    filamentSpools.value = spoolResult;
     filamentInventorySummary.value = summaryResult;
+    applyFilamentSpools(spoolResult);
     amsStore().amsSlots = inventoryAmsResult.slots;
     inventoryAmsOverviews.value = inventoryAmsResult.overviews;
     inventoryPrinterStates.value = inventoryAmsResult.states;
+    if (selectedFilamentSpoolId.value) {
+      await loadFilamentSpoolEvents(selectedFilamentSpoolId.value);
+    }
+  }
+
+
+  async function refreshInventorySkuData() {
+    const [colorMappingResult, gapResult, skuResult, spoolResult, summaryResult] = await Promise.all([
+      apiRequest<FilamentColorMapping[]>("/filament/color-mappings"),
+      apiRequest<FilamentColorMappingGap[]>("/filament/color-mapping-gaps"),
+      apiRequest<FilamentSku[]>("/filament/skus"),
+      apiRequest<FilamentSpool[]>("/filament/spools"),
+      apiRequest<FilamentInventorySummary>("/filament/inventory/summary"),
+    ]);
+    filamentColorMappings.value = colorMappingResult;
+    filamentColorMappingGaps.value = gapResult;
+    filamentSkus.value = skuResult;
+    filamentInventorySummary.value = summaryResult;
+    applyFilamentSpools(spoolResult);
+    if (selectedFilamentSpoolId.value) {
+      await loadFilamentSpoolEvents(selectedFilamentSpoolId.value);
+    }
+  }
+
+
+  async function refreshInventoryCatalogData() {
+    const [brandResult, typeSeriesResult, colorMappingResult, gapResult, skuResult, spoolResult, summaryResult] = await Promise.all([
+      apiRequest<FilamentBrand[]>("/filament/brands"),
+      apiRequest<FilamentTypeSeries[]>("/filament/type-series"),
+      apiRequest<FilamentColorMapping[]>("/filament/color-mappings"),
+      apiRequest<FilamentColorMappingGap[]>("/filament/color-mapping-gaps"),
+      apiRequest<FilamentSku[]>("/filament/skus"),
+      apiRequest<FilamentSpool[]>("/filament/spools"),
+      apiRequest<FilamentInventorySummary>("/filament/inventory/summary"),
+    ]);
+    filamentBrands.value = brandResult;
+    filamentTypeSeries.value = typeSeriesResult;
+    filamentColorMappings.value = colorMappingResult;
+    filamentColorMappingGaps.value = gapResult;
+    filamentSkus.value = skuResult;
+    filamentInventorySummary.value = summaryResult;
+    applyFilamentSpools(spoolResult);
+    if (selectedFilamentSpoolId.value) {
+      await loadFilamentSpoolEvents(selectedFilamentSpoolId.value);
+    }
+  }
+
+
+  function applyFilamentSpools(spoolResult: FilamentSpool[]) {
+    filamentSpools.value = spoolResult;
     spools.value = spoolResult.map((spool) => ({
       id: spool.legacy_spool_id || spool.id,
       display_name: spool.sku_label || `${t("table.spool")} ${spool.id}`,
@@ -635,9 +685,6 @@ export const useInventoryStore = defineStore("inventory", () => {
     }));
     if (!selectedFilamentSpoolId.value && spoolResult.length) {
       selectedFilamentSpoolId.value = spoolResult[0].id;
-    }
-    if (selectedFilamentSpoolId.value) {
-      await loadFilamentSpoolEvents(selectedFilamentSpoolId.value);
     }
   }
 
@@ -799,7 +846,7 @@ export const useInventoryStore = defineStore("inventory", () => {
       });
       resetFilamentTypeSeriesForm();
       closeInventoryDialog();
-      await loadInventory();
+      await refreshInventoryCatalogData();
       message.value = t(editingId ? "inventory.typeSeriesUpdated" : "inventory.typeSeriesCreated");
     });
   }
@@ -811,7 +858,7 @@ export const useInventoryStore = defineStore("inventory", () => {
     await withLoading(async () => {
       await apiRequest(`/filament/type-series/${row.id}`, { method: "DELETE" });
       if (editingFilamentTypeSeriesId.value === row.id) resetFilamentTypeSeriesForm();
-      await loadInventory();
+      await refreshInventoryCatalogData();
       message.value = t("inventory.typeSeriesDeleted");
     });
   }
@@ -915,6 +962,32 @@ export const useInventoryStore = defineStore("inventory", () => {
   }
 
 
+  function filamentSkuDetailsChanged(sku: FilamentSku, payload: ReturnType<typeof filamentSkuPayload>) {
+    const previousTypeSeriesId = numeric(sku.type_series_id ?? sku.type_series_ids?.[0]);
+    const nextTypeSeriesId = numeric(payload.type_series_id);
+    return (
+      previousTypeSeriesId !== nextTypeSeriesId ||
+      normalizedSkuText(sku.color_name) !== normalizedSkuText(payload.color_name) ||
+      normalizeFilamentHex(sku.color_hex || sku.color_value) !== normalizeFilamentHex(payload.color_hex) ||
+      skuNumber(sku.nominal_weight_g) !== skuNumber(payload.nominal_weight_g) ||
+      skuNumber(sku.filament_diameter_mm, 1.75) !== skuNumber(payload.filament_diameter_mm, 1.75) ||
+      normalizedSkuText(sku.tray_info_idx) !== normalizedSkuText(payload.tray_info_idx) ||
+      normalizedSkuText(sku.note) !== normalizedSkuText(payload.note)
+    );
+  }
+
+
+  function normalizedSkuText(value: unknown) {
+    const text = String(value ?? "").trim();
+    return text || null;
+  }
+
+
+  function skuNumber(value: unknown, fallback: number | null = null) {
+    return numeric(value) ?? fallback;
+  }
+
+
   function openFilamentSkuCreate() {
     skuReviewSourceSpoolId.value = null;
     resetFilamentSkuForm();
@@ -989,14 +1062,21 @@ export const useInventoryStore = defineStore("inventory", () => {
       const reviewSpoolId = skuReviewSourceSpoolId.value;
       const previousSku = editingId ? filamentSkus.value.find((sku) => sku.id === editingId) : null;
       const targetSealedQuantity = Math.max(0, Math.round(presentationStore().optionalNumber(filamentSkuForm.sealed_quantity) ?? 0));
-      const savedSku = await apiRequest<FilamentSku>(editingId ? `/filament/skus/${editingId}` : "/filament/skus", {
-        method: editingId ? "PATCH" : "POST",
-        body: JSON.stringify(filamentSkuPayload()),
-      });
+      const payload = filamentSkuPayload();
+      const shouldSaveSkuDetails = !editingId || !previousSku || filamentSkuDetailsChanged(previousSku, payload);
+      let shouldRefreshInventory = shouldSaveSkuDetails;
+      let savedSku: FilamentSku | null = previousSku ?? null;
+      if (shouldSaveSkuDetails) {
+        savedSku = await apiRequest<FilamentSku>(editingId ? `/filament/skus/${editingId}` : "/filament/skus", {
+          method: editingId ? "PATCH" : "POST",
+          body: JSON.stringify(payload),
+        });
+      }
       if (editingId && previousSku) {
         const delta = targetSealedQuantity - Number(previousSku.sealed_quantity || 0);
         if (delta !== 0) {
-          await apiRequest<FilamentSku>(`/filament/skus/${editingId}/sealed-stock-adjust`, {
+          shouldRefreshInventory = true;
+          savedSku = await apiRequest<FilamentSku>(`/filament/skus/${editingId}/sealed-stock-adjust`, {
             method: "POST",
             body: JSON.stringify({ delta, reason: "sku edit" }),
           });
@@ -1012,7 +1092,8 @@ export const useInventoryStore = defineStore("inventory", () => {
       skuReviewSourceSpoolId.value = null;
       resetFilamentSkuForm();
       closeInventoryDialog();
-      await loadInventory();
+      if (reviewSpoolId) await loadInventory();
+      else if (shouldRefreshInventory) await refreshInventorySkuData();
       message.value = t(reviewSpoolId ? "inventory.skuConfirmed" : editingId ? "inventory.skuUpdated" : "inventory.skuCreated");
     });
   }
@@ -1060,7 +1141,7 @@ export const useInventoryStore = defineStore("inventory", () => {
         });
       }
       closeInventoryDialog();
-      await loadInventory();
+      if (delta !== 0) await refreshInventorySkuData();
       message.value = t("inventory.stockAdjusted");
     });
   }
@@ -1072,7 +1153,7 @@ export const useInventoryStore = defineStore("inventory", () => {
         method: "POST",
         body: JSON.stringify({ delta, reason: "manual" }),
       });
-      await loadInventory();
+      await refreshInventorySkuData();
       message.value = t("inventory.stockAdjusted");
     });
   }

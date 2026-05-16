@@ -680,6 +680,14 @@ td {
   vertical-align: middle;
 }
 
+td.row-actions {
+  white-space: nowrap;
+}
+
+.row-actions .icon-button + .icon-button {
+  margin-left: 6px;
+}
+
 th {
   position: sticky;
   top: 0;

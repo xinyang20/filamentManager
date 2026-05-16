@@ -21,6 +21,7 @@ from filament_manager.db.models import (
     PrinterStateSnapshot,
     PrintLogEntry,
     RawMqttMessage,
+    _slot_state_name,
 )
 from filament_manager.mqtt.client import is_certificate_verify_error, mqtt_manager
 from filament_manager.schemas import (
@@ -179,6 +180,7 @@ def ams_slot_read(slot: AmsSlot) -> AmsSlotRead:
     return read.model_copy(
         update={
             "raw": redact_sensitive(read.raw),
+            "state_name": ams_slot_state_name(slot),
             "user_tray_id": user_tray_id,
             "slot_label": slot_label,
             "global_tray_id": slot_global_tray_id(slot),
@@ -189,6 +191,14 @@ def ams_slot_read(slot: AmsSlot) -> AmsSlotRead:
             "filament_series": context["series"],
         }
     )
+
+
+def ams_slot_state_name(slot: AmsSlot) -> str | None:
+    if slot.slot_state:
+        normalized = _slot_state_name(slot.slot_state)
+        if normalized is not None and not normalized.startswith("unknown:"):
+            return normalized
+    return slot.state_name or slot.tray_state_name or slot.slot_state
 
 
 def filament_context_from_slot(slot: AmsSlot) -> dict[str, Any]:
@@ -432,12 +442,14 @@ def reconnect_for_refresh(db: Session, printer: Any) -> None:
     try:
         mqtt_manager.connect(db, printer)
     except ValueError as exc:
+        db.rollback()
         printer.connection_status = "error"
         printer.last_error = str(exc)
         db.add(printer)
         db.commit()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ConnectionError as exc:
+        db.rollback()
         printer.connection_status = "error"
         printer.last_error = str(exc)
         db.add(printer)
@@ -446,6 +458,7 @@ def reconnect_for_refresh(db: Session, printer: Any) -> None:
         detail = str(exc) if status_code == 400 else f"Failed to reconnect printer MQTT: {exc}"
         raise HTTPException(status_code=status_code, detail=detail) from exc
     except Exception as exc:
+        db.rollback()
         printer.connection_status = "error"
         printer.last_error = str(exc)
         db.add(printer)

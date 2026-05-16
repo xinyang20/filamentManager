@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.orm import Session
 
 from filament_manager.db.models import AmsSlot
+from filament_manager.db import session as db_session
 from filament_manager.db.session import get_db
 from filament_manager.schemas import (
     AmsSlotRead,
@@ -139,7 +140,8 @@ def api_create_filament_type_series(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     try:
-        row = create_type_series(db, data)
+        with db_session.sqlite_write_lock:
+            row = create_type_series(db, data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return filament_type_series_to_read(db, row)
@@ -151,11 +153,12 @@ def api_update_filament_type_series(
     data: FilamentTypeSeriesUpdate,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    row = get_type_series(db, type_series_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="Filament type series not found")
     try:
-        updated = update_type_series(db, row, data)
+        with db_session.sqlite_write_lock:
+            row = get_type_series(db, type_series_id)
+            if row is None:
+                raise HTTPException(status_code=404, detail="Filament type series not found")
+            updated = update_type_series(db, row, data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return filament_type_series_to_read(db, updated)
@@ -163,11 +166,12 @@ def api_update_filament_type_series(
 
 @router.delete("/filament/type-series/{type_series_id}", status_code=status.HTTP_204_NO_CONTENT)
 def api_delete_filament_type_series(type_series_id: int, db: Session = Depends(get_db)) -> Response:
-    row = get_type_series(db, type_series_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="Filament type series not found")
     try:
-        delete_type_series(db, row)
+        with db_session.sqlite_write_lock:
+            row = get_type_series(db, type_series_id)
+            if row is None:
+                raise HTTPException(status_code=404, detail="Filament type series not found")
+            delete_type_series(db, row)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -179,11 +183,12 @@ def api_set_filament_type_series_brands(
     data: FilamentTypeSeriesBrandSet,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    row = get_type_series(db, type_series_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="Filament type series not found")
     try:
-        updated = set_type_series_brands(db, row, data)
+        with db_session.sqlite_write_lock:
+            row = get_type_series(db, type_series_id)
+            if row is None:
+                raise HTTPException(status_code=404, detail="Filament type series not found")
+            updated = set_type_series_brands(db, row, data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return filament_type_series_to_read(db, updated)
@@ -278,7 +283,8 @@ def _filament_sku_label(sku: dict[str, Any]) -> str:
 @router.post("/filament/skus", response_model=FilamentSkuRead, status_code=status.HTTP_201_CREATED)
 def api_create_filament_sku(data: FilamentSkuCreate, db: Session = Depends(get_db)) -> dict[str, Any]:
     try:
-        sku = create_sku(db, data)
+        with db_session.sqlite_write_lock:
+            sku = create_sku(db, data)
     except DuplicateFilamentSkuError as exc:
         raise _duplicate_sku_http_exception(exc) from exc
     except ValueError as exc:
@@ -292,11 +298,12 @@ def api_update_filament_sku(
     data: FilamentSkuUpdate,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    sku = get_sku(db, sku_id)
-    if sku is None:
-        raise HTTPException(status_code=404, detail="Filament SKU not found")
     try:
-        updated = update_sku(db, sku, data)
+        with db_session.sqlite_write_lock:
+            sku = get_sku(db, sku_id)
+            if sku is None:
+                raise HTTPException(status_code=404, detail="Filament SKU not found")
+            updated = update_sku(db, sku, data)
     except DuplicateFilamentSkuError as exc:
         raise _duplicate_sku_http_exception(exc) from exc
     except ValueError as exc:
@@ -310,11 +317,12 @@ def api_delete_filament_sku(
     force: bool = Query(False),
     db: Session = Depends(get_db),
 ) -> Response:
-    sku = get_sku(db, sku_id)
-    if sku is None:
-        raise HTTPException(status_code=404, detail="Filament SKU not found")
     try:
-        delete_sku(db, sku, force=force)
+        with db_session.sqlite_write_lock:
+            sku = get_sku(db, sku_id)
+            if sku is None:
+                raise HTTPException(status_code=404, detail="Filament SKU not found")
+            delete_sku(db, sku, force=force)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -326,11 +334,12 @@ def api_set_filament_sku_type_series(
     data: FilamentSkuTypeSeriesSet,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    sku = get_sku(db, sku_id)
-    if sku is None:
-        raise HTTPException(status_code=404, detail="Filament SKU not found")
     try:
-        updated = set_sku_type_series(db, sku, data)
+        with db_session.sqlite_write_lock:
+            sku = get_sku(db, sku_id)
+            if sku is None:
+                raise HTTPException(status_code=404, detail="Filament SKU not found")
+            updated = set_sku_type_series(db, sku, data)
     except DuplicateFilamentSkuError as exc:
         raise _duplicate_sku_http_exception(exc) from exc
     except ValueError as exc:
@@ -344,11 +353,12 @@ def api_adjust_filament_sku_stock(
     data: FilamentSkuStockAdjust,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    sku = get_sku(db, sku_id)
-    if sku is None:
-        raise HTTPException(status_code=404, detail="Filament SKU not found")
     try:
-        updated = adjust_sku_stock(db, sku, data)
+        with db_session.sqlite_write_lock:
+            sku = get_sku(db, sku_id)
+            if sku is None:
+                raise HTTPException(status_code=404, detail="Filament SKU not found")
+            updated = adjust_sku_stock(db, sku, data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return filament_sku_to_read(updated)
@@ -503,4 +513,3 @@ def api_bind_slot(slot_id: int, data: SlotBindRequest, db: Session = Depends(get
 @router.api_route("/spools/{path:path}", methods=["GET", "POST", "PATCH", "DELETE"])
 def api_legacy_spools_removed(path: str | None = None) -> None:
     raise HTTPException(status_code=410, detail="Legacy /api/spools has been removed; use /api/filament/spools")
-

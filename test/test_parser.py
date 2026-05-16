@@ -96,6 +96,55 @@ def test_state_ten_without_filament_payload_is_transition() -> None:
     assert slot.identity.identity_source == "manual_required"
 
 
+def test_empty_tray_exist_bit_overrides_transition_signals() -> None:
+    units = parse_ams_units(
+        {
+            "print": {
+                "ams_status": 258,
+                "ams": {
+                    "tray_exist_bits": "0",
+                    "tray_reading_bits": "1",
+                    "ams": [
+                        {
+                            "id": "0",
+                            "tray": [{"id": "0", "state": 26}],
+                        }
+                    ],
+                },
+            }
+        }
+    )
+
+    slot = units[0].slots[0]
+    assert slot.slot_state == "empty"
+    assert slot.is_transitioning is False
+    assert slot.identity.identity_source == "manual_required"
+
+
+def test_ams_ht_empty_tray_exist_bit_overrides_transition_signals() -> None:
+    units = parse_ams_units(
+        {
+            "print": {
+                "ams": {
+                    "tray_exist_bits": "0",
+                    "tray_reading_bits": "10000",
+                    "ams_status": 258,
+                    "ams": [
+                        {
+                            "id": "128",
+                            "tray": [{"id": "0", "state": 26}],
+                        }
+                    ],
+                }
+            }
+        }
+    )
+
+    slot = units[0].slots[0]
+    assert slot.slot_state == "empty"
+    assert slot.is_transitioning is False
+
+
 def test_state_eleven_without_filament_payload_is_transition() -> None:
     units = parse_ams_units(
         {

@@ -16,9 +16,22 @@ const props = defineProps<{
 }>();
 
 const width = 720;
-const height = 240;
+const baseHeight = 240;
 const padding = { top: 16, right: 20, bottom: 40, left: 42 };
-const colors = ["#00AE42", "#0033FF", "#00B1B7", "#C37A00", "#C53333", "#5E43B7"];
+const colors = [
+  "#00AE42",
+  "#0033FF",
+  "#00B1B7",
+  "#C37A00",
+  "#C53333",
+  "#5E43B7",
+  "#FF6A13",
+  "#0077B6",
+  "#7A8A3A",
+  "#8B4E2F",
+  "#D43F8D",
+  "#4D7CFE",
+];
 const hovered = ref<{
   x: number;
   time: number;
@@ -46,17 +59,21 @@ const series = computed(() => {
     list.push(item);
     grouped.set(item.metric, list);
   }
-  return Array.from(grouped.entries()).slice(0, 6).map(([metric, points], index) => ({
-    metric,
-    label: props.metricLabel(metric),
-    points,
-    color: colors[index % colors.length],
-    latest: points[points.length - 1],
-  }));
+  return Array.from(grouped.entries())
+    .map(([metric, points], index) => ({ metric, points, index }))
+    .sort((left, right) => compareMetricOrder(left.metric, right.metric, left.index, right.index))
+    .map(({ metric, points }, index) => ({
+      metric,
+      label: props.metricLabel(metric),
+      points,
+      color: colors[index % colors.length],
+      latest: points[points.length - 1],
+    }));
 });
 
 const visibleSeries = computed(() => series.value.filter((item) => !hiddenMetrics.value.has(item.metric)));
 const visibleItems = computed(() => visibleSeries.value.flatMap((item) => item.points));
+const height = computed(() => Math.max(baseHeight, 62 + visibleSeries.value.length * 30));
 
 const domain = computed(() => {
   const values = visibleItems.value.map((item) => item.value_float as number);
@@ -116,7 +133,7 @@ function xAtTime(time: number) {
 
 function y(value: number) {
   const span = domain.value.max - domain.value.min;
-  return padding.top + (1 - (value - domain.value.min) / span) * (height - padding.top - padding.bottom);
+  return padding.top + (1 - (value - domain.value.min) / span) * (height.value - padding.top - padding.bottom);
 }
 
 function linePath(points: MetricSample[]) {
@@ -130,7 +147,7 @@ function linePath(points: MetricSample[]) {
 
 function areaPath(points: MetricSample[]) {
   if (!points.length) return "";
-  const baseline = height - padding.bottom;
+  const baseline = height.value - padding.bottom;
   const line = linePath(points);
   const first = points[0];
   const last = points[points.length - 1];
@@ -146,6 +163,34 @@ function formatNumber(value: number | undefined) {
 
 function sampleTime(sample: MetricSample) {
   return parseApiDateTime(sample.sampled_at)?.getTime() ?? new Date(sample.sampled_at).getTime();
+}
+
+function compareMetricOrder(leftMetric: string, rightMetric: string, leftIndex: number, rightIndex: number) {
+  const leftAms = parseAmsMetric(leftMetric);
+  const rightAms = parseAmsMetric(rightMetric);
+  if (leftAms && rightAms) {
+    return (
+      leftAms.unitOrder - rightAms.unitOrder ||
+      leftAms.unitLabel.localeCompare(rightAms.unitLabel) ||
+      leftAms.kindOrder - rightAms.kindOrder ||
+      leftAms.kind.localeCompare(rightAms.kind) ||
+      leftIndex - rightIndex
+    );
+  }
+  return leftIndex - rightIndex;
+}
+
+function parseAmsMetric(metric: string) {
+  const match = /^ams\.([^.]+)\.(.+)$/.exec(metric);
+  if (!match) return null;
+  const unitNumber = Number(match[1]);
+  const kind = match[2];
+  return {
+    unitLabel: match[1],
+    unitOrder: Number.isFinite(unitNumber) ? unitNumber : Number.MAX_SAFE_INTEGER,
+    kind,
+    kindOrder: kind === "temperature" ? 0 : kind === "humidity" ? 1 : 2,
+  };
 }
 
 function unitLabel(value: string) {
@@ -191,7 +236,7 @@ function tooltipX(value: number) {
 
 function tooltipY() {
   const margin = 4;
-  const maxY = Math.max(0, height - tooltipHeight.value - margin);
+  const maxY = Math.max(0, height.value - tooltipHeight.value - margin);
   return Math.min(padding.top + 8, maxY);
 }
 
@@ -310,7 +355,7 @@ const tooltipWidth = computed(() => {
         </button>
       </div>
 
-      <svg class="metric-chart" :viewBox="`0 0 ${width} ${height}`" role="img">
+      <svg class="metric-chart" :style="{ height: `${height}px` }" :viewBox="`0 0 ${width} ${height}`" role="img">
         <line :x1="padding.left" :x2="width - padding.right" :y1="height - padding.bottom" :y2="height - padding.bottom" class="axis-line" />
         <line :x1="padding.left" :x2="padding.left" :y1="padding.top" :y2="height - padding.bottom" class="axis-line" />
         <text :x="padding.left - 8" :y="padding.top + 4" class="axis-label" text-anchor="end">{{ formatNumber(domain.max) }}</text>

@@ -1,4 +1,4 @@
-import { computed, reactive, ref } from "vue";
+import { computed, reactive, ref, watch } from "vue";
 import { acceptHMRUpdate, defineStore } from "pinia";
 import { apiRequest } from "../api";
 import type { PrintLogAnalytics, PrintLogEntry, PrintLogList, PrintLogSummary } from "../types";
@@ -47,7 +47,10 @@ export const usePrintLogStore = defineStore("printLog", () => {
 
   const printLogTotalPages = computed(() => Math.max(1, Math.ceil(printLogTotal.value / printLogFilters.limit)));
 
+  let printLogRequestSeq = 0;
+
   async function loadPrintLog() {
+    const requestSeq = ++printLogRequestSeq;
     const params = new URLSearchParams({
       limit: String(printLogFilters.limit),
       offset: String(printLogFilters.offset),
@@ -66,6 +69,7 @@ export const usePrintLogStore = defineStore("printLog", () => {
       apiRequest<PrintLogSummary>("/print-log/summary"),
       apiRequest<PrintLogAnalytics>(`/print-log/analytics?${analyticsParams.toString()}`),
     ]);
+    if (requestSeq !== printLogRequestSeq) return;
     printLogs.value = listResult.items;
     printLogTotal.value = listResult.total;
     printLogSummary.value = summaryResult;
@@ -93,6 +97,12 @@ export const usePrintLogStore = defineStore("printLog", () => {
     return "muted";
   }
 
+  watch(
+    () => [printLogFilters.printer_id, printLogFilters.status, printLogFilters.search, printLogFilters.date_from, printLogFilters.date_to],
+    () => {
+      void applyPrintLogFilters();
+    },
+  );
 
   return {
     printLogs,

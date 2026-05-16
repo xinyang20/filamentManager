@@ -172,6 +172,35 @@ const {
             </div>
           </div>
         </section>
+        <section class="panel">
+          <div class="panel-header"><h3>{{ t("inventory.sealedStock") }}</h3><Archive :size="18" /></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('sealedStock', 'id')">{{ t("table.id") }} <span>{{ inventorySortIndicator("sealedStock", "id") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('sealedStock', 'filament')">{{ t("table.filament") }} <span>{{ inventorySortIndicator("sealedStock", "filament") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('sealedStock', 'sealed')">{{ t("form.sealedQty") }} <span>{{ inventorySortIndicator("sealedStock", "sealed") }}</span></button></th>
+                <th>{{ t("inventory.sealedWeight") }}</th>
+                <th>{{ t("inventory.openedWeight") }}</th>
+                <th>{{ t("table.actions") }}</th>
+              </tr></thead>
+              <tbody>
+                <tr v-if="!sortedFilamentStockSkus.length"><td colspan="6" class="empty">{{ t("inventory.noSealedStock") }}</td></tr>
+                <tr v-for="sku in sortedFilamentStockSkus" :key="sku.id">
+                  <td>{{ sku.id }}</td>
+                  <td><span class="swatch" :style="{ background: filamentColor(sku.color_hex || sku.color_value) }"></span>{{ filamentSkuLabel(sku) }}</td>
+                  <td>{{ sku.sealed_quantity }}</td>
+                  <td>{{ filamentWeight(skuSealedWeight(sku)) }}</td>
+                  <td>{{ filamentWeight(skuOpenedWeight(sku)) }}</td>
+                  <td class="inventory-inline-action">
+                    <button class="icon-button compact" type="button" :title="t('inventory.adjustStock')" @click="openSealedStockAdjust(sku)"><PencilLine :size="15" /></button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+        </div>
         <section id="inventory-ams-loaded" class="panel">
           <div class="panel-header"><h3>{{ t("inventory.amsLoaded") }}</h3><Boxes :size="18" /></div>
           <div class="table-wrap">
@@ -212,36 +241,6 @@ const {
             </table>
           </div>
         </section>
-        </div>
-        <div class="inventory-split-grid">
-        <section class="panel">
-          <div class="panel-header"><h3>{{ t("inventory.sealedStock") }}</h3><Archive :size="18" /></div>
-          <div class="table-wrap">
-            <table>
-              <thead><tr>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('sealedStock', 'id')">{{ t("table.id") }} <span>{{ inventorySortIndicator("sealedStock", "id") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('sealedStock', 'filament')">{{ t("table.filament") }} <span>{{ inventorySortIndicator("sealedStock", "filament") }}</span></button></th>
-                <th><button class="sort-header" type="button" @click="toggleInventorySort('sealedStock', 'sealed')">{{ t("form.sealedQty") }} <span>{{ inventorySortIndicator("sealedStock", "sealed") }}</span></button></th>
-                <th>{{ t("inventory.sealedWeight") }}</th>
-                <th>{{ t("inventory.openedWeight") }}</th>
-                <th>{{ t("table.actions") }}</th>
-              </tr></thead>
-              <tbody>
-                <tr v-if="!sortedFilamentStockSkus.length"><td colspan="6" class="empty">{{ t("inventory.noSealedStock") }}</td></tr>
-                <tr v-for="sku in sortedFilamentStockSkus" :key="sku.id">
-                  <td>{{ sku.id }}</td>
-                  <td><span class="swatch" :style="{ background: filamentColor(sku.color_hex || sku.color_value) }"></span>{{ filamentSkuLabel(sku) }}</td>
-                  <td>{{ sku.sealed_quantity }}</td>
-                  <td>{{ filamentWeight(skuSealedWeight(sku)) }}</td>
-                  <td>{{ filamentWeight(skuOpenedWeight(sku)) }}</td>
-                  <td class="inventory-inline-action">
-                    <button class="icon-button compact" type="button" :title="t('inventory.adjustStock')" @click="openSealedStockAdjust(sku)"><PencilLine :size="15" /></button>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
         <section class="panel">
           <div class="panel-header"><h3>{{ t("inventory.openedUnused") }}</h3><Archive :size="18" /></div>
           <div class="table-wrap">
@@ -270,7 +269,6 @@ const {
             </table>
           </div>
         </section>
-        </div>
         <section v-if="inventoryPendingConfirmCount" id="inventory-pending-confirm" class="panel">
           <div class="panel-header"><h3>{{ t("inventory.pendingConfirm") }}</h3><AlertCircle :size="18" /></div>
           <div class="table-wrap">

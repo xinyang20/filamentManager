@@ -542,6 +542,20 @@ select:focus {
   background: var(--surface-soft);
 }
 
+.icon-button:focus:not(:focus-visible),
+.primary:focus:not(:focus-visible),
+.secondary:focus:not(:focus-visible) {
+  outline: none;
+}
+
+.icon-button:focus-visible,
+.primary:focus-visible,
+.secondary:focus-visible {
+  outline: none;
+  border-color: rgba(0, 174, 66, 0.58);
+  box-shadow: 0 0 0 3px rgba(0, 174, 66, 0.14);
+}
+
 .icon-button.danger {
   border-color: rgba(197, 51, 51, 0.22);
   color: var(--red);

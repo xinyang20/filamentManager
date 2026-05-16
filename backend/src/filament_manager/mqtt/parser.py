@@ -193,9 +193,17 @@ def is_transitioning_tray(
     ams_id: Any = None,
     tray_id: Any = None,
     ams_status: int | None = None,
+    tray_exist_bits: int | None = None,
     tray_reading_bits: int | None = None,
     tray_read_done_bits: int | None = None,
 ) -> bool:
+    if _slot_is_empty_by_exist_bits(
+        tray,
+        ams_id=ams_id,
+        tray_id=tray_id,
+        tray_exist_bits=tray_exist_bits,
+    ):
+        return False
     if _tray_has_filament_payload(tray):
         return False
     if _slot_is_reading(
@@ -337,10 +345,25 @@ def _slot_state_with_bitfields(
     tray_exist_bits: int | None,
 ) -> str | None:
     state = _slot_state(tray)
-    exists = tray_bit_is_set(tray_exist_bits, ams_id=ams_id, tray_id=tray_id)
-    if state is None and exists is False and not _tray_has_filament_payload(tray):
+    if _slot_is_empty_by_exist_bits(
+        tray,
+        ams_id=ams_id,
+        tray_id=tray_id,
+        tray_exist_bits=tray_exist_bits,
+    ):
         return "empty"
     return state
+
+
+def _slot_is_empty_by_exist_bits(
+    tray: dict[str, Any],
+    *,
+    ams_id: Any,
+    tray_id: Any,
+    tray_exist_bits: int | None,
+) -> bool:
+    exists = tray_bit_is_set(tray_exist_bits, ams_id=ams_id, tray_id=tray_id)
+    return exists is False and not _tray_has_filament_payload(tray)
 
 
 def _find_token_sequence(parts: list[str], needle: str | None) -> int | None:
@@ -461,6 +484,7 @@ def parse_ams_units(payload: dict[str, Any]) -> list[ParsedAmsUnit]:
                         ams_id=ams_id,
                         tray_id=tray_id,
                         ams_status=ams_status,
+                        tray_exist_bits=tray_exist_bits,
                         tray_reading_bits=tray_reading_bits,
                         tray_read_done_bits=tray_read_done_bits,
                     ),

@@ -114,8 +114,6 @@ export const useNavigationStore = defineStore("navigation", () => {
       }
       if (activeView.value === "printers") {
         await printersStore().refreshPrinters();
-        const printer = printersStore().selectedPrinter;
-        if (printer) printersStore().populatePrinterForm(printer);
         return;
       }
       await loadCurrent();

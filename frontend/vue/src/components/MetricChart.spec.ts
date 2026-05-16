@@ -91,6 +91,46 @@ describe("MetricChart", () => {
     expect(tooltipY + tooltipHeight).toBeLessThanOrEqual(240);
   });
 
+  it("renders all AMS temperature and humidity series beyond six", async () => {
+    const wrapper = mountChart(
+      Array.from({ length: 10 }, (_, index) => ({
+        id: index + 1,
+        metric: `ams.${index}.temperature`,
+        value_float: 20 + index,
+        unit: "celsius",
+        sampled_at: "2026-04-30T10:00:00Z",
+      })),
+      (metric) => metric.replace(".temperature", " · 温度"),
+    );
+
+    expect(wrapper.findAll(".chart-summary-item")).toHaveLength(10);
+    expect(wrapper.findAll(".series-line")).toHaveLength(10);
+    expect(wrapper.text()).toContain("ams.9 · 温度");
+  });
+
+  it("keeps a ten-series tooltip inside the dynamic SVG viewBox", async () => {
+    const wrapper = mountChart(
+      Array.from({ length: 10 }, (_, index) => ({
+        id: index + 1,
+        metric: `ams.${index}.humidity`,
+        value_float: 20 + index,
+        unit: "percent",
+        sampled_at: "2026-04-30T10:00:00Z",
+      })),
+      (metric) => metric.replace(".humidity", " · 湿度"),
+    );
+    await hoverChart(wrapper);
+
+    const tooltipBackground = wrapper.find(".chart-tooltip-bg");
+    const transform = tooltipBackground.element.parentElement?.getAttribute("transform") || "";
+    const tooltipY = Number(transform.match(/translate\([^,]+,\s*([^)]+)\)/)?.[1]);
+    const tooltipHeight = Number(tooltipBackground.attributes("height"));
+    const viewBox = wrapper.find("svg.metric-chart").attributes("viewBox");
+    const viewBoxHeight = Number(viewBox?.split(" ")[3] || 0);
+    expect(wrapper.findAll(".chart-tooltip-line")).toHaveLength(10);
+    expect(tooltipY + tooltipHeight).toBeLessThanOrEqual(viewBoxHeight);
+  });
+
   it("keeps AMS unit identifiers in tooltip labels", async () => {
     const wrapper = mountChart(
       [
@@ -106,6 +146,28 @@ describe("MetricChart", () => {
     expect(tooltipLines).toEqual(
       expect.arrayContaining([expect.stringContaining("AMS 0 · 湿度"), expect.stringContaining("AMS 1 · 湿度")]),
     );
+  });
+
+  it("groups AMS temperature and humidity pairs by unit in the legend", () => {
+    const wrapper = mountChart(
+      [
+        { id: 1, metric: "ams.1.temperature", value_float: 44, unit: "celsius", sampled_at: "2026-04-30T10:00:00Z" },
+        { id: 2, metric: "ams.128.humidity", value_float: 9, unit: "percent", sampled_at: "2026-04-30T10:00:00Z" },
+        { id: 3, metric: "ams.0.humidity", value_float: 22, unit: "percent", sampled_at: "2026-04-30T10:00:00Z" },
+        { id: 4, metric: "ams.1.humidity", value_float: 20, unit: "percent", sampled_at: "2026-04-30T10:00:00Z" },
+        { id: 5, metric: "ams.0.temperature", value_float: 45, unit: "celsius", sampled_at: "2026-04-30T10:00:00Z" },
+        { id: 6, metric: "ams.128.temperature", value_float: 67, unit: "celsius", sampled_at: "2026-04-30T10:00:00Z" },
+      ],
+      (metric) => metric.replace(/^ams\.(\d+)\.temperature$/, "AMS $1 · 温度").replace(/^ams\.(\d+)\.humidity$/, "AMS $1 · 湿度"),
+    );
+
+    const labels = wrapper.findAll(".chart-summary-item").map((item) => item.text());
+    expect(labels[0]).toContain("AMS 0 · 温度");
+    expect(labels[1]).toContain("AMS 0 · 湿度");
+    expect(labels[2]).toContain("AMS 1 · 温度");
+    expect(labels[3]).toContain("AMS 1 · 湿度");
+    expect(labels[4]).toContain("AMS 128 · 温度");
+    expect(labels[5]).toContain("AMS 128 · 湿度");
   });
 
   it("shows the tooltip time once without repeating sample times in rows", async () => {

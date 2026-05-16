@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 
 def _create_printer(api_client, printer_payload) -> int:
@@ -173,3 +174,47 @@ def test_access_code_is_masked_in_api_responses(api_client, printer_payload) -> 
     revealed = api_client.get(f"/api/printers/{printer_id}/access-code")
     assert revealed.status_code == 200, revealed.text
     assert revealed.json()["access_code"] == "new-access-1234"
+
+
+def test_mqtt_ingestion_keeps_two_printers_isolated(api_client, printer_payload, fixture_dir) -> None:
+    first_printer_id = _create_printer(api_client, {**printer_payload, "name": "First", "serial": "SERIAL-ONE"})
+    second_printer_id = _create_printer(
+        api_client,
+        {**printer_payload, "name": "Second", "host": "printer-2.local", "serial": "SERIAL-TWO"},
+    )
+    first_payload = json.loads((fixture_dir / "push_status_valid_tray_uuid.json").read_text())
+    second_payload = copy.deepcopy(first_payload)
+    second_payload["print"]["task_id"] = "synthetic-task-2"
+    second_payload["print"]["gcode_file"] = "second-printer.gcode.3mf"
+    second_payload["print"]["mc_percent"] = 67
+    second_tray = second_payload["print"]["ams"]["ams"][0]["tray"][0]
+    second_tray["id"] = "2"
+    second_tray["tray_uuid"] = "22222222-3333-4444-5555-666666666666"
+    second_tray["tag_uid"] = "SECOND012345678"
+    second_tray["tray_color"] = "00AAFF"
+
+    _ingest(api_client, first_printer_id, first_payload)
+    _ingest(api_client, second_printer_id, second_payload)
+
+    first_state = api_client.get(f"/api/printers/{first_printer_id}/state").json()
+    second_state = api_client.get(f"/api/printers/{second_printer_id}/state").json()
+    assert first_state["task_id"] == "synthetic-task-1"
+    assert second_state["task_id"] == "synthetic-task-2"
+    assert second_state["mc_percent"] == 67
+
+    first_dashboard = api_client.get(f"/api/printers/{first_printer_id}/dashboard").json()
+    second_dashboard = api_client.get(f"/api/printers/{second_printer_id}/dashboard").json()
+    assert first_dashboard["state"]["task_id"] == "synthetic-task-1"
+    assert second_dashboard["state"]["gcode_file"] == "second-printer.gcode.3mf"
+
+    first_slots = api_client.get(f"/api/printers/{first_printer_id}/ams/slots").json()
+    second_slots = api_client.get(f"/api/printers/{second_printer_id}/ams/slots").json()
+    assert first_slots[0]["printer_id"] == first_printer_id
+    assert first_slots[0]["tray_id"] == "0"
+    assert first_slots[0]["identity_key"] == "bambu:tray_uuid:11111111-2222-3333-4444-555555555555"
+    assert second_slots[0]["printer_id"] == second_printer_id
+    assert second_slots[0]["tray_id"] == "2"
+    assert second_slots[0]["identity_key"] == "bambu:tray_uuid:22222222-3333-4444-5555-666666666666"
+
+    raw_messages = api_client.get("/api/debug/raw-mqtt?limit=10").json()
+    assert {item["printer_id"] for item in raw_messages[:2]} == {first_printer_id, second_printer_id}

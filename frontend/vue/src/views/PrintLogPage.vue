@@ -26,7 +26,6 @@ import {
   PlugZap,
   RefreshCw,
   Save,
-  Search,
   Send,
   Settings,
   ShieldAlert,
@@ -44,7 +43,6 @@ import MetricChart from "../components/MetricChart.vue";
 const props = defineProps<{ ctx: AppViewContext }>();
 const {
   activeView,
-  applyPrintLogFilters,
   changePrintLogPage,
   dashboard,
   displayCell,
@@ -95,10 +93,6 @@ function printLogDailyBarWidth(bucket: Record<string, any>) {
           <input v-model="printLogFilters.search" :placeholder="t('printLog.search')" />
           <input v-model="printLogFilters.date_from" type="date" />
           <input v-model="printLogFilters.date_to" type="date" />
-          <button class="primary" type="button" @click="applyPrintLogFilters">
-            <Search :size="17" />
-            {{ t("printLog.applyFilters") }}
-          </button>
         </div>
 
         <div class="metric-grid overview-metrics print-log-summary-grid">

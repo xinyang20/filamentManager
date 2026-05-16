@@ -20,6 +20,7 @@ from filament_manager.db.models import (
     AmsUnit,
     DeviceStatusSnapshot,
     DeviceMetricSample,
+    Printer,
     PrinterEvent,
     PrinterStorageFile,
     PrinterStateSnapshot,
@@ -308,10 +309,33 @@ def api_get_printer_access_code(printer_id: int, db: Session = Depends(get_db)) 
     return PrinterAccessCodeRead(access_code=printer.access_code)
 
 
+def _printer_connection_settings(printer: Printer) -> tuple[Any, ...]:
+    return (
+        printer.host,
+        printer.port,
+        printer.serial,
+        printer.access_code,
+        printer.tls_enabled,
+        printer.certificate_verify,
+    )
+
+
 @router.patch("/printers/{printer_id}", response_model=PrinterRead)
 def api_update_printer(printer_id: int, data: PrinterUpdate, db: Session = Depends(get_db)) -> PrinterRead:
     printer = _printer_or_404(db, printer_id)
-    return printer_to_read(update_printer(db, printer, data))
+    connection_settings_before = _printer_connection_settings(printer)
+    runtime_connected = mqtt_manager.is_connected(printer.id)
+    was_active_connection = runtime_connected or printer.connection_status in {"connected", "connecting"}
+    updated = update_printer(db, printer, data)
+    connection_settings_changed = _printer_connection_settings(updated) != connection_settings_before
+    if connection_settings_changed and was_active_connection:
+        mqtt_manager.disconnect(updated.id)
+        updated.connection_status = "disconnected"
+        updated.last_error = "Connection settings changed; reconnect required"
+        db.add(updated)
+        db.commit()
+        db.refresh(updated)
+    return printer_to_read(updated)
 
 
 @router.delete("/printers/{printer_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -328,12 +352,14 @@ def api_connect_printer(printer_id: int, db: Session = Depends(get_db)) -> Print
     try:
         mqtt_manager.connect(db, printer)
     except ValueError as exc:
+        db.rollback()
         printer.connection_status = "error"
         printer.last_error = str(exc)
         db.add(printer)
         db.commit()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ConnectionError as exc:
+        db.rollback()
         printer.connection_status = "error"
         printer.last_error = str(exc)
         db.add(printer)
@@ -342,6 +368,7 @@ def api_connect_printer(printer_id: int, db: Session = Depends(get_db)) -> Print
         detail = str(exc) if status_code == 400 else f"Failed to connect to printer MQTT: {exc}"
         raise HTTPException(status_code=status_code, detail=detail) from exc
     except Exception as exc:
+        db.rollback()
         printer.connection_status = "error"
         printer.last_error = str(exc)
         db.add(printer)
@@ -759,6 +786,7 @@ def api_set_ams_label(
     db: Session = Depends(get_db),
 ) -> AmsLabel:
     _printer_or_404(db, printer_id)
+    db.rollback()
     return set_ams_label(db, printer_id=printer_id, ams_id=ams_id, display_name=data.display_name)
 
 
@@ -769,6 +797,7 @@ def api_delete_ams_label(
     db: Session = Depends(get_db),
 ) -> Response:
     _printer_or_404(db, printer_id)
+    db.rollback()
     delete_ams_label(db, printer_id=printer_id, ams_id=ams_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

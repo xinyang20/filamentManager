@@ -747,6 +747,35 @@ def test_ams_transition_frame_without_payload_does_not_create_phantom_spool(api_
     assert not any(item["event_type"] == "spool.unidentified" for item in debug_events)
 
 
+def test_ams_empty_exist_bit_unloads_slot_instead_of_staying_transitioning(api_client, printer_payload, fixture_dir) -> None:
+    printer = _printer(api_client, printer_payload)
+    _inventory_tree(api_client)
+    payload = json.loads((fixture_dir / "push_status_valid_tray_uuid.json").read_text())
+    payload["print"]["ams"]["ams"][0]["tray"][0]["tray_id_name"] = "PLA Basic Orange"
+
+    _ingest(api_client, printer["id"], payload)
+    first_spool = api_client.get("/api/filament/spools").json()[0]
+
+    empty_payload = deepcopy(payload)
+    empty_payload["print"]["ams"]["tray_exist_bits"] = "0"
+    empty_payload["print"]["ams"]["tray_reading_bits"] = "1"
+    empty_payload["print"]["ams"]["ams_status"] = 258
+    empty_payload["print"]["ams"]["ams"][0]["tray"][0] = {"id": "0", "state": 26}
+    _ingest(api_client, printer["id"], empty_payload)
+
+    slots = api_client.get(f"/api/printers/{printer['id']}/ams/slots").json()
+    assert slots[0]["slot_state"] == "empty"
+    assert slots[0]["state_name"] == "empty"
+    assert slots[0]["is_transitioning"] is False
+    assert slots[0]["filament_spool_id"] is None
+
+    spools = api_client.get("/api/filament/spools").json()
+    unloaded = next(item for item in spools if item["id"] == first_spool["id"])
+    assert unloaded["status"] == "needs_location"
+    assert unloaded["current_ams_id"] is None
+    assert unloaded["current_tray_id"] is None
+
+
 def test_ams_ht_transition_states_without_payload_do_not_create_phantom_spool(api_client, printer_payload, fixture_dir) -> None:
     printer = _printer(api_client, printer_payload)
 

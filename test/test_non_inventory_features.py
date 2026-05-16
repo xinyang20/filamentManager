@@ -4,10 +4,17 @@ import io
 import struct
 import ssl
 import zipfile
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
+from sqlalchemy.exc import OperationalError
+
+from filament_manager.db import session as db_session
+from filament_manager.db.models import PrintLogEntry, Printer, RawMqttMessage
+from filament_manager.services import ams as ams_service
 from filament_manager.services import camera as camera_service
 from filament_manager.services import observability as observability_service
+from filament_manager.services.print_log import repair_print_log_printer_ids_from_raw_topics
 
 
 def _create_printer(api_client, printer_payload) -> int:
@@ -269,6 +276,45 @@ def test_ams_label_and_sensor_history_are_local_read_only_features(api_client, p
     assert overview["units"][0]["display_name"] is None
 
 
+def test_ams_label_save_retries_sqlite_write_lock(monkeypatch) -> None:
+    class EmptyScalarResult:
+        def first(self):
+            return None
+
+    class FakeDb:
+        def __init__(self) -> None:
+            self.commits = 0
+            self.rollbacks = 0
+            self.added = []
+
+        def scalars(self, _statement):
+            return EmptyScalarResult()
+
+        def add(self, value) -> None:
+            self.added.append(value)
+
+        def commit(self) -> None:
+            self.commits += 1
+            if self.commits == 1:
+                raise OperationalError("INSERT INTO ams_labels", {}, Exception("database is locked"))
+
+        def rollback(self) -> None:
+            self.rollbacks += 1
+
+        def refresh(self, _value) -> None:
+            pass
+
+    monkeypatch.setattr(ams_service.time, "sleep", lambda _seconds: None)
+    db = FakeDb()
+
+    label = ams_service.set_ams_label(db, printer_id=2, ams_id="128", display_name=" P2S HT ")
+
+    assert label.display_name == "P2S HT"
+    assert db.commits == 2
+    assert db.rollbacks == 1
+    assert [item.display_name for item in db.added] == ["P2S HT", "P2S HT"]
+
+
 def test_active_slot_prefers_hall_out_bits_for_ams_ht(api_client, printer_payload) -> None:
     printer_id = _create_printer(api_client, printer_payload)
     payload = _push_status()
@@ -373,6 +419,43 @@ def test_print_log_lifecycle_and_maintenance_perform(api_client, printer_payload
     assert performed.json()["history_count"] == 1
     history = api_client.get(f"/api/maintenance/items/{item_id}/history").json()
     assert history[0]["note"] == "cleaned"
+
+
+def test_print_log_repair_uses_raw_topic_serial_when_printer_id_was_reused(api_client, printer_payload) -> None:
+    _create_printer(api_client, {**printer_payload, "name": "H2C", "serial": "H2C-SERIAL"})
+    _create_printer(api_client, {**printer_payload, "name": "P2S", "serial": "P2S-SERIAL", "host": "p2s.local"})
+    assert db_session.SessionLocal is not None
+    db = db_session.SessionLocal()
+    try:
+        first_raw = RawMqttMessage(
+            printer_id=1,
+            topic="device/P2S-SERIAL/report",
+            payload={"print": {"task_id": "old-p2s-task"}},
+            received_at=datetime(2026, 5, 14, 10, 0, tzinfo=timezone.utc),
+        )
+        db.add(first_raw)
+        db.flush()
+        db.add(
+            PrintLogEntry(
+                printer_id=1,
+                printer_name_snapshot="P2S",
+                task_id="old-p2s-task",
+                print_name="Old P2S job",
+                status="succeeded",
+                started_at=datetime(2026, 5, 14, 10, 0, tzinfo=timezone.utc),
+                raw_refs={"first_raw_mqtt_id": first_raw.id},
+            )
+        )
+        db.commit()
+
+        repaired = repair_print_log_printer_ids_from_raw_topics(db)
+        entry = db.query(PrintLogEntry).filter_by(task_id="old-p2s-task").one()
+
+        assert repaired == 1
+        assert entry.printer_id == 2
+        assert entry.printer_name_snapshot == "P2S"
+    finally:
+        db.close()
 
 
 def test_maintenance_mapping_uses_p2s_motion_parts_and_separate_ams_object(api_client, printer_payload) -> None:

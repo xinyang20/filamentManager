@@ -114,8 +114,7 @@
 
 @media (max-width: 640px) {
   .print-log-filters .app-select,
-  .print-log-filters input,
-  .print-log-filters button {
+  .print-log-filters input {
     width: 100%;
   }
 

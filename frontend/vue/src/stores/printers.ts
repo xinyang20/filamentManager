@@ -19,6 +19,8 @@ export const usePrintersStore = defineStore("printers", () => {
 
   const selectedPrinterId = ref<number | null>(null);
 
+  const editingPrinterId = ref<number | null>(null);
+
   const discovery = ref<DiscoveryCandidate[]>([]);
 
   const scanning = ref(false);
@@ -42,6 +44,8 @@ export const usePrintersStore = defineStore("printers", () => {
   const accessCodeRevealLoading = ref(false);
 
   const selectedPrinter = computed(() => printers.value.find((item) => item.id === selectedPrinterId.value) || null);
+
+  const editingPrinter = computed(() => printers.value.find((item) => item.id === editingPrinterId.value) || null);
 
   const printerSelectOptions = computed(() =>
     printers.value.length
@@ -67,8 +71,7 @@ export const usePrintersStore = defineStore("printers", () => {
     return "muted";
   });
 
-  watch(selectedPrinter, (printer) => {
-    if (printer) populatePrinterForm(printer);
+  watch(selectedPrinter, () => {
     dashboardStore().cameraCapabilities = null;
     dashboardStore().cameraLightboxOpen = false;
     dashboardStore().restartCameraStream();
@@ -80,13 +83,19 @@ export const usePrintersStore = defineStore("printers", () => {
     if (!selectedPrinterId.value && printers.value.length) {
       selectedPrinterId.value = printers.value[0].id;
     }
-    if (selectedPrinter.value) populatePrinterForm(selectedPrinter.value);
+    if (selectedPrinterId.value && !printers.value.some((printer) => printer.id === selectedPrinterId.value)) {
+      selectedPrinterId.value = printers.value[0]?.id ?? null;
+    }
+    if (editingPrinterId.value && !printers.value.some((printer) => printer.id === editingPrinterId.value)) {
+      editingPrinterId.value = null;
+      resetPrinterForm();
+    }
   }
 
 
   async function savePrinter() {
     await withLoading(async () => {
-      const updatingExisting = Boolean(selectedPrinterId.value);
+      const editingId = editingPrinterId.value;
       const payload: Record<string, unknown> = {
         name: printerForm.name,
         host: printerForm.host,
@@ -96,8 +105,8 @@ export const usePrintersStore = defineStore("printers", () => {
         tls_enabled: printerForm.tls_enabled,
         certificate_verify: printerForm.certificate_verify,
       };
-      const printer = updatingExisting
-        ? await apiRequest<Printer>(`/printers/${selectedPrinterId.value}`, {
+      const printer = editingId
+        ? await apiRequest<Printer>(`/printers/${editingId}`, {
           method: "PATCH",
           body: JSON.stringify(payload),
         })
@@ -105,15 +114,16 @@ export const usePrintersStore = defineStore("printers", () => {
           method: "POST",
           body: JSON.stringify(payload),
         });
-      selectedPrinterId.value = printer.id;
+      editingPrinterId.value = printer.id;
+      if (!selectedPrinterId.value) selectedPrinterId.value = printer.id;
       await refreshPrinters();
-      message.value = updatingExisting ? t("message.printerUpdated") : t("message.printerSaved");
+      populatePrinterForm(printer);
+      message.value = editingId ? t("message.printerUpdated") : t("message.printerSaved");
     });
   }
 
 
   async function handlePrinterSelectionChanged() {
-    if (selectedPrinter.value) populatePrinterForm(selectedPrinter.value);
     await navigationStore().loadCurrent();
   }
 
@@ -144,6 +154,23 @@ export const usePrintersStore = defineStore("printers", () => {
   }
 
 
+  function startCreatePrinter(candidate?: DiscoveryCandidate | null) {
+    editingPrinterId.value = null;
+    resetPrinterForm();
+    if (!candidate) return;
+    printerForm.name = candidate.device_name || "Bambu Printer";
+    printerForm.host = candidate.host;
+    printerForm.serial = candidate.serial || "";
+    printerForm.port = 8883;
+  }
+
+
+  function editPrinter(printer: Printer) {
+    editingPrinterId.value = printer.id;
+    populatePrinterForm(printer);
+  }
+
+
   function isMaskedAccessCode(value: string) {
     return value.startsWith("****");
   }
@@ -154,11 +181,11 @@ export const usePrintersStore = defineStore("printers", () => {
       accessCodeVisible.value = false;
       return;
     }
-    if (selectedPrinterId.value && isMaskedAccessCode(printerForm.access_code)) {
+    if (editingPrinterId.value && isMaskedAccessCode(printerForm.access_code)) {
       accessCodeRevealLoading.value = true;
       error.value = "";
       try {
-        const result = await apiRequest<{ access_code: string }>(`/printers/${selectedPrinterId.value}/access-code`);
+        const result = await apiRequest<{ access_code: string }>(`/printers/${editingPrinterId.value}/access-code`);
         printerForm.access_code = result.access_code || "";
       } catch (err) {
         error.value = err instanceof Error ? err.message : String(err);
@@ -203,11 +230,7 @@ export const usePrintersStore = defineStore("printers", () => {
           ? t("scan.found", { count: discovery.value.length })
           : t("scan.notFound");
         if (discovery.value.length) {
-          const first = discovery.value[0];
-          printerForm.name = first.device_name || "Bambu Printer";
-          printerForm.host = first.host;
-          printerForm.serial = first.serial || "";
-          printerForm.port = 8883;
+          startCreatePrinter(discovery.value[0]);
         }
       } finally {
         animating = false;
@@ -220,23 +243,25 @@ export const usePrintersStore = defineStore("printers", () => {
   }
 
 
-  async function connectPrinter() {
-    if (!selectedPrinterId.value) return;
+  async function connectPrinter(printerId?: number | null) {
+    const targetPrinterId = printerId ?? selectedPrinterId.value;
+    if (!targetPrinterId) return;
     await withLoading(async () => {
-      await apiRequest<Printer>(`/printers/${selectedPrinterId.value}/connect`, { method: "POST" });
+      await apiRequest<Printer>(`/printers/${targetPrinterId}/connect`, { method: "POST" });
       await refreshPrinters();
-      await navigationStore().loadCurrent();
+      if (targetPrinterId === selectedPrinterId.value) await navigationStore().loadCurrent();
       message.value = t("message.connectSent");
     });
   }
 
 
-  async function disconnectPrinter() {
-    if (!selectedPrinterId.value) return;
+  async function disconnectPrinter(printerId?: number | null) {
+    const targetPrinterId = printerId ?? selectedPrinterId.value;
+    if (!targetPrinterId) return;
     await withLoading(async () => {
-      await apiRequest<Printer>(`/printers/${selectedPrinterId.value}/disconnect`, { method: "POST" });
+      await apiRequest<Printer>(`/printers/${targetPrinterId}/disconnect`, { method: "POST" });
       await refreshPrinters();
-      await navigationStore().loadCurrent();
+      if (targetPrinterId === selectedPrinterId.value) await navigationStore().loadCurrent();
       message.value = t("message.disconnected");
     });
   }
@@ -250,13 +275,16 @@ export const usePrintersStore = defineStore("printers", () => {
       if (selectedPrinterId.value === printer.id) {
         selectedPrinterId.value = null;
       }
+      if (editingPrinterId.value === printer.id) {
+        editingPrinterId.value = null;
+      }
       await refreshPrinters();
       if (!selectedPrinterId.value && printers.value.length) {
         selectedPrinterId.value = printers.value[0].id;
       }
-      if (selectedPrinter.value) {
-        populatePrinterForm(selectedPrinter.value);
-      } else {
+      if (editingPrinter.value) {
+        populatePrinterForm(editingPrinter.value);
+      } else if (!editingPrinterId.value) {
         resetPrinterForm();
       }
       await navigationStore().loadCurrent();
@@ -274,6 +302,7 @@ export const usePrintersStore = defineStore("printers", () => {
   return {
     printers,
     selectedPrinterId,
+    editingPrinterId,
     discovery,
     scanning,
     scanProgress,
@@ -282,6 +311,7 @@ export const usePrintersStore = defineStore("printers", () => {
     accessCodeVisible,
     accessCodeRevealLoading,
     selectedPrinter,
+    editingPrinter,
     printerSelectOptions,
     locationPrinterOptions,
     scanProgressLabel,
@@ -292,6 +322,8 @@ export const usePrintersStore = defineStore("printers", () => {
     handlePrinterSelectionChanged,
     populatePrinterForm,
     resetPrinterForm,
+    startCreatePrinter,
+    editPrinter,
     isMaskedAccessCode,
     toggleAccessCodeVisibility,
     scanDevices,

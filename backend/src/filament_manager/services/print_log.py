@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import logging
 from typing import Any
 
 from sqlalchemy import func, or_, select
@@ -11,6 +12,7 @@ from filament_manager.db.models import PrintLogEntry, Printer, PrinterStateSnaps
 
 ACTIVE_STATES = {"RUNNING", "PREPARE", "SLICING", "PAUSE"}
 TERMINAL_STATES = {"FINISH", "FAILED", "IDLE"}
+LOGGER = logging.getLogger(__name__)
 
 
 def upsert_print_log_from_snapshot(
@@ -242,6 +244,58 @@ def completed_print_seconds_by_printer(db: Session) -> dict[int, int]:
     return {int(printer_id): int(seconds or 0) for printer_id, seconds in rows}
 
 
+def repair_print_log_printer_ids_from_raw_topics(db: Session) -> int:
+    printers_by_serial = {
+        _normalize_serial(printer.serial): printer
+        for printer in db.scalars(select(Printer)).all()
+        if _normalize_serial(printer.serial)
+    }
+    if not printers_by_serial:
+        return 0
+
+    entries = list(db.scalars(select(PrintLogEntry)).all())
+    raw_ids: set[int] = set()
+    for entry in entries:
+        for raw_id in _print_log_raw_ref_ids(entry):
+            raw_ids.add(raw_id)
+    if not raw_ids:
+        return 0
+
+    raw_messages = {
+        raw.id: raw
+        for raw in db.scalars(select(RawMqttMessage).where(RawMqttMessage.id.in_(raw_ids))).all()
+    }
+    repaired = 0
+    for entry in entries:
+        serials = {
+            serial
+            for raw_id in _print_log_raw_ref_ids(entry)
+            for serial in [_serial_from_topic(raw_messages.get(raw_id).topic if raw_messages.get(raw_id) else None)]
+            if serial in printers_by_serial
+        }
+        if len(serials) != 1:
+            continue
+        target = printers_by_serial[next(iter(serials))]
+        if entry.printer_id == target.id:
+            continue
+        if entry.task_id and _print_log_task_exists(db, target_printer_id=target.id, task_id=entry.task_id, exclude_id=entry.id):
+            LOGGER.warning(
+                "Skipping print log printer repair for entry %s because task %s already exists on printer %s",
+                entry.id,
+                entry.task_id,
+                target.id,
+            )
+            continue
+        entry.printer_id = target.id
+        entry.printer_name_snapshot = entry.printer_name_snapshot or target.name
+        entry.updated_at = utc_now()
+        db.add(entry)
+        repaired += 1
+    if repaired:
+        db.commit()
+    return repaired
+
+
 def _find_log_entry(db: Session, printer_id: int, task_id: str | None) -> PrintLogEntry | None:
     if task_id:
         entry = db.scalars(
@@ -256,6 +310,42 @@ def _find_log_entry(db: Session, printer_id: int, task_id: str | None) -> PrintL
         .where(PrintLogEntry.printer_id == printer_id, PrintLogEntry.finished_at.is_(None))
         .order_by(PrintLogEntry.id.desc())
     ).first()
+
+
+def _print_log_raw_ref_ids(entry: PrintLogEntry) -> list[int]:
+    raw_refs = entry.raw_refs if isinstance(entry.raw_refs, dict) else {}
+    ids: list[int] = []
+    for key in ("first_raw_mqtt_id", "last_raw_mqtt_id"):
+        raw_id = _as_int(raw_refs.get(key))
+        if raw_id is not None:
+            ids.append(raw_id)
+    return ids
+
+
+def _print_log_task_exists(db: Session, *, target_printer_id: int, task_id: str, exclude_id: int) -> bool:
+    return db.scalars(
+        select(PrintLogEntry.id)
+        .where(
+            PrintLogEntry.printer_id == target_printer_id,
+            PrintLogEntry.task_id == task_id,
+            PrintLogEntry.id != exclude_id,
+        )
+        .limit(1)
+    ).first() is not None
+
+
+def _serial_from_topic(topic: str | None) -> str | None:
+    if not topic:
+        return None
+    parts = str(topic).split("/")
+    if len(parts) >= 3 and parts[0] == "device" and parts[2] == "report":
+        return _normalize_serial(parts[1])
+    return None
+
+
+def _normalize_serial(value: Any) -> str | None:
+    text = str(value or "").strip().upper()
+    return text or None
 
 
 def _update_progress(entry: PrintLogEntry, snapshot: PrinterStateSnapshot) -> None:
