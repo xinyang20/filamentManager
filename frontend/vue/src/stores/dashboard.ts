@@ -251,13 +251,13 @@ export const useDashboardStore = defineStore("dashboard", () => {
         available: false,
         detail: error instanceof Error ? error.message : String(error),
       })),
-      apiRequest<FilamentColorMapping[]>("/filament/color-mappings"),
+      apiRequest<FilamentColorMapping[]>("/filament/effective-color-mappings"),
     ]);
     if (result) dashboard.value = result;
     deviceCapabilities.value = capabilities;
     cameraCapabilities.value = cameraCapabilityResult;
     cameraStreamError.value = false;
-    inventoryStore().filamentColorMappings = colorMappingResult;
+    inventoryStore().effectiveFilamentColorMappings = colorMappingResult;
   }
 
 

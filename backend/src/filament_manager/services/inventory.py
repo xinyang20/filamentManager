@@ -17,6 +17,14 @@ from filament_manager.db.models import (
     utc_now,
 )
 from filament_manager.mqtt.parser import ParsedAmsSlot, is_transition_state_without_payload, is_valid_identity_value
+from filament_manager.services.bambu_filament_catalog import (
+    BambuOfficialMatch,
+    official_color_effective_mapping,
+    official_colors_for_type,
+    resolve_bambu_official_color,
+    is_bambu_brand,
+)
+from filament_manager.services.filament_naming import normalize_type_series_identity
 from filament_manager.services.inventory_constants import (
     HISTORICAL_SPOOL_STATUSES,
     MATERIAL_TYPES,
@@ -132,6 +140,7 @@ def type_series_exists(
     series_name: str,
     exclude_id: int | None = None,
 ) -> bool:
+    material_type, series_name = normalize_type_series_identity(material_type, series_name)
     stmt = select(FilamentTypeSeries.id).where(
         FilamentTypeSeries.brand_id == brand_id,
         func.lower(FilamentTypeSeries.material_type) == material_type.lower(),
@@ -171,6 +180,9 @@ def update_type_series(
     next_brand_id = updates.get("brand_id", type_series.brand_id)
     next_material_type = updates.get("material_type", type_series.material_type)
     next_series_name = updates.get("series_name", type_series.series_name)
+    next_material_type, next_series_name = normalize_type_series_identity(next_material_type, next_series_name)
+    updates["material_type"] = next_material_type
+    updates["series_name"] = next_series_name
     if type_series_exists(
         db,
         brand_id=next_brand_id,
@@ -740,6 +752,47 @@ def list_color_mappings(db: Session) -> list[FilamentColorMapping]:
     )
 
 
+def list_effective_color_mappings(db: Session) -> list[dict[str, Any]]:
+    if _ensure_color_mappings_from_skus(db):
+        db.commit()
+    rows: list[dict[str, Any]] = []
+    mappings_by_type_series: dict[int, list[FilamentColorMapping]] = {}
+    for mapping in db.scalars(select(FilamentColorMapping)).all():
+        mappings_by_type_series.setdefault(mapping.type_series_id, []).append(mapping)
+
+    for type_series in list_type_series(db):
+        brand = type_series.brand
+        manual_mappings = sorted(
+            mappings_by_type_series.get(type_series.id, []),
+            key=lambda mapping: ((mapping.color_name or "").lower(), mapping.color_hex, mapping.id),
+        )
+        if brand is not None and is_bambu_brand(brand.name, brand.aliases):
+            official_rows = official_colors_for_type(
+                material=type_series.material_type,
+                series=type_series.series_name,
+            )
+            if official_rows:
+                rows.extend(
+                    official_color_effective_mapping(
+                        row,
+                        brand_id=brand.id,
+                        brand_name=brand.name,
+                        type_series_id=type_series.id,
+                        material_type=type_series.material_type,
+                        series_name=type_series.series_name,
+                    )
+                    for row in official_rows
+                )
+                rows.extend(
+                    filament_color_mapping_to_read(mapping)
+                    for mapping in manual_mappings
+                    if _official_match_for_color_mapping(mapping) is None
+                )
+                continue
+        rows.extend(filament_color_mapping_to_read(mapping) for mapping in manual_mappings)
+    return rows
+
+
 def get_color_mapping(db: Session, mapping_id: int) -> FilamentColorMapping | None:
     return db.get(FilamentColorMapping, mapping_id)
 
@@ -820,6 +873,8 @@ def list_color_mapping_gaps(db: Session) -> list[dict[str, Any]]:
         db.commit()
     gaps: list[dict[str, Any]] = []
     for sku in list_skus(db):
+        if _official_match_for_sku(sku) is not None:
+            continue
         missing: list[str] = []
         if not _clean_text(sku.color_name):
             missing.append("color_name")
@@ -1142,6 +1197,11 @@ def _type_series_payload(values: dict[str, Any], *, partial: bool = False) -> di
         payload["config"] = {}
     if "note" in values:
         payload["note"] = values["note"]
+    if "material_type" in payload and "series_name" in payload:
+        payload["material_type"], payload["series_name"] = normalize_type_series_identity(
+            payload["material_type"],
+            payload["series_name"],
+        )
     return payload
 
 
@@ -1199,7 +1259,7 @@ def _complete_sku_payload_from_color_mapping(db: Session, payload: dict[str, Any
                 func.lower(FilamentColorMapping.color_name) == color_name.lower(),
             )
         ).first()
-        if mapping is not None:
+        if mapping is not None and _official_match_for_color_mapping(mapping) is None:
             payload["color_hex"] = mapping.color_hex
     elif color_hex and not color_name:
         mapping = db.scalars(
@@ -1208,7 +1268,7 @@ def _complete_sku_payload_from_color_mapping(db: Session, payload: dict[str, Any
                 FilamentColorMapping.color_hex == color_hex,
             )
         ).first()
-        if mapping is not None:
+        if mapping is not None and _official_match_for_color_mapping(mapping) is None:
             payload["color_name"] = mapping.color_name
 
 
@@ -1234,7 +1294,29 @@ def _find_duplicate_sku(
     )
     if exclude_id is not None:
         stmt = stmt.where(FilamentSku.id != exclude_id)
-    return db.scalars(stmt.limit(1)).first()
+    exact = db.scalars(stmt.limit(1)).first()
+    if exact is not None:
+        return exact
+
+    official = _official_match_for_payload(db, payload)
+    if official is None or official.ambiguous:
+        return None
+    candidates = list(
+        db.scalars(
+            select(FilamentSku).where(
+                FilamentSku.type_series_id == type_series_id,
+                FilamentSku.nominal_weight_g == nominal_weight_g,
+                FilamentSku.filament_diameter_mm == filament_diameter_mm,
+            )
+        ).all()
+    )
+    for sku in candidates:
+        if exclude_id is not None and sku.id == exclude_id:
+            continue
+        sku_official = _official_match_for_sku(sku)
+        if sku_official is not None and sku_official.color.color_code == official.color.color_code:
+            return sku
+    return None
 
 
 def _nullable_text_equals(column: Any, value: str | None, *, lower: bool = False) -> Any:
@@ -1271,6 +1353,15 @@ def _apply_color_mapping_to_sku_gaps(
     color_hex: str,
     note: str | None = None,
 ) -> int:
+    type_series = get_type_series(db, type_series_id)
+    if type_series is not None:
+        match = _official_match_for_type_series(
+            type_series,
+            color_hex=color_hex,
+            color_name=color_name,
+        )
+        if match is not None:
+            return 0
     updated = 0
     skus = list(db.scalars(select(FilamentSku).where(FilamentSku.type_series_id == type_series_id)).all())
     for sku in skus:
@@ -1330,6 +1421,8 @@ def _apply_color_mappings_to_sku_gaps(db: Session) -> int:
     updated = 0
     mappings = list(db.scalars(select(FilamentColorMapping)).all())
     for mapping in mappings:
+        if _official_match_for_color_mapping(mapping) is not None:
+            continue
         updated += _apply_color_mapping_to_sku_gaps(
             db,
             brand_id=mapping.brand_id,
@@ -1342,6 +1435,8 @@ def _apply_color_mappings_to_sku_gaps(db: Session) -> int:
 
 
 def _ensure_color_mapping_from_sku(db: Session, sku: FilamentSku) -> bool:
+    if _official_match_for_sku(sku) is not None:
+        return False
     color_name = _clean_text(sku.color_name)
     color_hex = _normalize_color_hex_or_none(sku.color_hex)
     if not color_name or not color_hex or sku.type_series_id is None:
@@ -1385,6 +1480,91 @@ def _ensure_color_mappings_from_skus(db: Session) -> int:
         if _ensure_color_mapping_from_sku(db, sku):
             updated += 1
     return updated
+
+
+def _official_match_for_payload(db: Session, payload: dict[str, Any]) -> BambuOfficialMatch | None:
+    type_series_id = payload.get("type_series_id")
+    if type_series_id is None:
+        return None
+    type_series = get_type_series(db, int(type_series_id))
+    if type_series is None:
+        return None
+    return _official_match_for_type_series(
+        type_series,
+        tray_info_idx=payload.get("tray_info_idx"),
+        color_hex=payload.get("color_hex"),
+        color_name=payload.get("color_name"),
+    )
+
+
+def _official_match_for_sku(sku: FilamentSku) -> BambuOfficialMatch | None:
+    type_series = sku.type_series
+    if type_series is None:
+        return None
+    return _official_match_for_type_series(
+        type_series,
+        tray_info_idx=sku.tray_info_idx,
+        color_hex=sku.color_hex,
+        color_name=sku.color_name,
+    )
+
+
+def _official_match_for_color_mapping(mapping: FilamentColorMapping) -> BambuOfficialMatch | None:
+    type_series = mapping.type_series
+    if type_series is None:
+        return None
+    return _official_match_for_type_series(
+        type_series,
+        color_hex=mapping.color_hex,
+        color_name=mapping.color_name,
+    )
+
+
+def _official_match_for_slot_type_series(
+    type_series: FilamentTypeSeries | None,
+    slot: ParsedAmsSlot,
+) -> BambuOfficialMatch | None:
+    if type_series is None:
+        return None
+    return _official_match_for_type_series(
+        type_series,
+        tray_info_idx=_slot_tray_info_idx(slot),
+        color_hex=slot.color,
+        color_name=_slot_color_name(slot),
+        raw=slot.raw if isinstance(slot.raw, dict) else {},
+    )
+
+
+def _official_match_for_type_series(
+    type_series: FilamentTypeSeries,
+    *,
+    tray_info_idx: Any = None,
+    color_hex: Any = None,
+    color_name: Any = None,
+    raw: dict[str, Any] | None = None,
+) -> BambuOfficialMatch | None:
+    brand = type_series.brand
+    if brand is None:
+        return None
+    match = resolve_bambu_official_color(
+        brand_name=brand.name,
+        brand_aliases=brand.aliases,
+        material=type_series.material_type,
+        series=type_series.series_name,
+        tray_info_idx=tray_info_idx,
+        color_hex=color_hex,
+        color_name=color_name,
+        raw=raw,
+    )
+    return None if match is not None and match.ambiguous else match
+
+
+def _slot_and_sku_official_match(sku: FilamentSku, slot: ParsedAmsSlot) -> bool:
+    sku_match = _official_match_for_sku(sku)
+    if sku_match is None:
+        return False
+    slot_match = _official_match_for_slot_type_series(sku.type_series, slot)
+    return slot_match is not None and slot_match.color.color_code == sku_match.color.color_code
 
 
 def _stock_balance(db: Session, sku: FilamentSku, *, create: bool = False) -> FilamentStockBalance:
@@ -1851,6 +2031,9 @@ def _match_sku_for_slot(db: Session, slot: ParsedAmsSlot) -> FilamentSku | None:
     for sku in candidates:
         if not _sku_type_series_matches(sku, material=material, series=series):
             continue
+        if _slot_and_sku_official_match(sku, slot):
+            matches.append(sku)
+            continue
         if color_hex and sku.color_hex and sku.color_hex != color_hex:
             continue
         if color_name and sku.color_name and not _same(sku.color_name, color_name):
@@ -1879,8 +2062,13 @@ def _find_or_create_sku_from_ams_slot(db: Session, slot: ParsedAmsSlot) -> tuple
     series = _clean_text(slot.series) or "Unknown"
     brand = _find_or_create_ams_brand(db, slot)
     type_series = _find_or_create_ams_type_series(db, brand=brand, material=material, series=series, slot=slot)
-    color_hex = _normalize_color_hex_or_none(slot.color)
-    color_name = _slot_color_name(slot)
+    official = _official_match_for_slot_type_series(type_series, slot)
+    if official is not None:
+        color_hex = official.color.primary_color
+        color_name = official.color.names.get("zh") or official.color.names.get("en") or _slot_color_name(slot)
+    else:
+        color_hex = _normalize_color_hex_or_none(slot.color)
+        color_name = _slot_color_name(slot)
     existing = _find_sku_for_type_series_color(
         db,
         type_series_id=type_series.id,
@@ -1898,7 +2086,7 @@ def _find_or_create_sku_from_ams_slot(db: Session, slot: ParsedAmsSlot) -> tuple
         color_hex=color_hex,
         nominal_weight_g=_slot_nominal_weight_g(slot) or 1000.0,
         filament_diameter_mm=1.75,
-        tray_info_idx=_clean_text(slot.raw.get("tray_info_idx")) if isinstance(slot.raw, dict) else None,
+        tray_info_idx=_slot_tray_info_idx(slot) or (official.color.fila_id if official is not None else None),
         note="Auto-created from AMS RFID. Please review SKU details.",
     )
     db.add(sku)
@@ -1926,6 +2114,7 @@ def _find_or_create_ams_type_series(
     series: str,
     slot: ParsedAmsSlot,
 ) -> FilamentTypeSeries:
+    material, series = normalize_type_series_identity(material, series)
     existing = db.scalars(
         select(FilamentTypeSeries).where(
             FilamentTypeSeries.brand_id == brand.id,
@@ -1955,6 +2144,25 @@ def _find_sku_for_type_series_color(
     color_name: str | None,
     slot: ParsedAmsSlot,
 ) -> FilamentSku | None:
+    type_series = get_type_series(db, type_series_id)
+    if type_series is not None:
+        official = _official_match_for_type_series(
+            type_series,
+            tray_info_idx=_slot_tray_info_idx(slot),
+            color_hex=color_hex,
+            color_name=color_name,
+            raw=slot.raw if isinstance(slot.raw, dict) else {},
+        )
+        if official is not None and not official.ambiguous:
+            rows = [
+                sku
+                for sku in db.scalars(select(FilamentSku).where(FilamentSku.type_series_id == type_series_id)).all()
+                if (match := _official_match_for_sku(sku)) is not None
+                and match.color.color_code == official.color.color_code
+            ]
+            selected = _select_sku_match_for_slot(rows, slot)
+            if selected is not None:
+                return selected
     query = select(FilamentSku).where(FilamentSku.type_series_id == type_series_id)
     if color_hex:
         query = query.where(FilamentSku.color_hex == color_hex)
@@ -1968,15 +2176,17 @@ def _find_sku_for_type_series_color(
 
 def _select_sku_match_for_slot(candidates: list[FilamentSku], slot: ParsedAmsSlot) -> FilamentSku | None:
     unique = list({sku.id: sku for sku in candidates}.values())
-    if len(unique) <= 1:
-        return unique[0] if unique else None
-
     pool = unique
     nominal_weight_g = _slot_nominal_weight_g(slot)
     if nominal_weight_g is not None:
         weight_matches = [sku for sku in pool if _same_number(sku.nominal_weight_g, nominal_weight_g)]
         if weight_matches:
             pool = weight_matches
+        else:
+            return None
+
+    if len(pool) <= 1:
+        return pool[0] if pool else None
 
     manual_matches = [sku for sku in pool if not _is_auto_created_sku(sku)]
     if manual_matches:
@@ -2052,11 +2262,20 @@ def _series_matches(type_series: FilamentTypeSeries, *, material: str | None, se
 
 def _fill_sku_color_from_slot(db: Session, sku: FilamentSku, slot: ParsedAmsSlot) -> None:
     changed = False
-    color_name = _slot_color_name(slot)
+    match = _official_match_for_slot_type_series(sku.type_series, slot) if sku.type_series is not None else None
+    if match is not None:
+        color_name = match.color.names.get("zh") or match.color.names.get("en") or _slot_color_name(slot)
+        color_hex = match.color.primary_color
+        tray_info_idx = _slot_tray_info_idx(slot)
+        if tray_info_idx and not sku.tray_info_idx:
+            sku.tray_info_idx = tray_info_idx
+            changed = True
+    else:
+        color_name = _slot_color_name(slot)
+        color_hex = _normalize_color_hex_or_none(slot.color)
     if color_name and not sku.color_name:
         sku.color_name = color_name
         changed = True
-    color_hex = _normalize_color_hex_or_none(slot.color)
     if color_hex and not sku.color_hex:
         sku.color_hex = color_hex
         changed = True
@@ -2239,6 +2458,11 @@ def _slot_color_name(slot: ParsedAmsSlot) -> str | None:
         or slot.raw.get("filament_color_name")
         or slot.raw.get("color_display_name")
     )
+
+
+def _slot_tray_info_idx(slot: ParsedAmsSlot) -> str | None:
+    raw = slot.raw if isinstance(slot.raw, dict) else {}
+    return _clean_text(raw.get("tray_info_idx") or raw.get("fila_id"))
 
 
 def normalize_color_hex(value: Any) -> str:

@@ -30,7 +30,8 @@ import { useUiStore } from "./ui";
 export const useInventoryStore = defineStore("inventory", () => {
   const uiStore = useUiStore();
   const { error, message } = storeToRefs(uiStore);
-  const { t } = useI18nStore();
+  const i18nStore = useI18nStore();
+  const { t } = i18nStore;
   const { withLoading } = uiStore;
   const navigationStore = () => useNavigationStore();
   const printersStore = () => usePrintersStore();
@@ -44,6 +45,10 @@ export const useInventoryStore = defineStore("inventory", () => {
   const filamentTypeSeries = ref<FilamentTypeSeries[]>([]);
 
   const filamentColorMappings = ref<FilamentColorMapping[]>([]);
+
+  const effectiveFilamentColorMappings = ref<FilamentColorMapping[]>([]);
+
+  const bambuOfficialColorMappings = ref<FilamentColorMapping[]>([]);
 
   const filamentColorMappingGaps = ref<FilamentColorMappingGap[]>([]);
 
@@ -82,6 +87,7 @@ export const useInventoryStore = defineStore("inventory", () => {
     typeSeries: { key: "id", direction: "asc" },
     skus: { key: "id", direction: "asc" },
     colorMappings: { key: "id", direction: "asc" },
+    officialColorMappings: { key: "material", direction: "asc" },
     colorGaps: { key: "id", direction: "asc" },
   });
 
@@ -150,6 +156,8 @@ export const useInventoryStore = defineStore("inventory", () => {
     search: "",
     brand_id: null as number | null,
     type_series_id: null as number | null,
+    material_type: null as string | null,
+    series_name: null as string | null,
     nominal_weight_g: null as number | null,
     color_state: "all",
   });
@@ -235,6 +243,7 @@ export const useInventoryStore = defineStore("inventory", () => {
     { key: "types" as const, label: t("inventory.typeSeries") },
     { key: "skus" as const, label: t("inventory.skus") },
     { key: "colors" as const, label: t("inventory.colorMappings") },
+    { key: "officialColors" as const, label: t("inventory.officialColorMappings") },
   ]);
 
   const quantityAdjustSourceOptions = computed(() => [
@@ -303,6 +312,31 @@ export const useInventoryStore = defineStore("inventory", () => {
     ),
   ]);
 
+  const filamentSkuFilterMaterialOptions = computed(() => {
+    const options = uniqueSelectOptions(
+      filamentTypeSeries.value
+        .filter((row) => !filamentSkuFilters.brand_id || row.brand_id === filamentSkuFilters.brand_id)
+        .map((row) => row.material_type),
+    );
+    return [{ label: t("inventory.allMaterials"), value: null }, ...options];
+  });
+
+  const filamentSkuFilterSeriesOptions = computed(() => {
+    const material = normalizedText(filamentSkuFilters.material_type);
+    if (!material) return [{ label: t("inventory.selectTypeFirst"), value: null, disabled: true }];
+    const options = uniqueSelectOptions(
+      filamentTypeSeries.value
+        .filter((row) => {
+          if (filamentSkuFilters.brand_id && row.brand_id !== filamentSkuFilters.brand_id) return false;
+          return normalizedText(row.material_type) === material;
+        })
+        .map((row) => row.series_name),
+    );
+    return options.length
+      ? [{ label: t("inventory.allSeries"), value: null }, ...options]
+      : [{ label: t("inventory.noSeries"), value: null, disabled: true }];
+  });
+
   const filamentSkuWeightOptions = computed(() => {
     const weights = Array.from(
       new Set(
@@ -330,6 +364,8 @@ export const useInventoryStore = defineStore("inventory", () => {
     filamentSkus.value.filter((sku) => {
       if (filamentSkuFilters.brand_id && sku.brand_id !== filamentSkuFilters.brand_id) return false;
       if (filamentSkuFilters.type_series_id && sku.type_series_id !== filamentSkuFilters.type_series_id) return false;
+      if (filamentSkuFilters.material_type && normalizedText(sku.material) !== normalizedText(filamentSkuFilters.material_type)) return false;
+      if (filamentSkuFilters.series_name && normalizedText(sku.series) !== normalizedText(filamentSkuFilters.series_name)) return false;
       if (filamentSkuFilters.nominal_weight_g !== null) {
         const weight = numeric(sku.nominal_weight_g);
         if (weight === null || Math.round(weight) !== filamentSkuFilters.nominal_weight_g) return false;
@@ -390,6 +426,28 @@ export const useInventoryStore = defineStore("inventory", () => {
     (brandId) => {
       const selected = filamentTypeSeries.value.find((row) => row.id === filamentSkuFilters.type_series_id);
       if (!brandId || (selected && selected.brand_id !== brandId)) filamentSkuFilters.type_series_id = null;
+      if (!skuFilterMaterialExists(filamentSkuFilters.material_type, brandId)) {
+        filamentSkuFilters.material_type = null;
+        filamentSkuFilters.series_name = null;
+        return;
+      }
+      if (!skuFilterSeriesExists(filamentSkuFilters.series_name, brandId, filamentSkuFilters.material_type)) {
+        filamentSkuFilters.series_name = null;
+      }
+    },
+  );
+
+  watch(
+    () => filamentSkuFilters.material_type,
+    (material) => {
+      filamentSkuFilters.type_series_id = null;
+      if (!material) {
+        filamentSkuFilters.series_name = null;
+        return;
+      }
+      if (!skuFilterSeriesExists(filamentSkuFilters.series_name, filamentSkuFilters.brand_id, material)) {
+        filamentSkuFilters.series_name = null;
+      }
     },
   );
 
@@ -500,6 +558,8 @@ export const useInventoryStore = defineStore("inventory", () => {
 
   const sortedFilamentColorMappings = computed(() => sortInventoryRows(filamentColorMappings.value, "colorMappings"));
 
+  const sortedBambuOfficialColorMappings = computed(() => sortInventoryRows(bambuOfficialColorMappings.value, "officialColorMappings"));
+
   const sortedFilamentColorMappingGaps = computed(() => sortInventoryRows(filamentColorMappingGaps.value, "colorGaps"));
 
   const inventoryRealSpools = computed(() => filamentSpools.value.filter((spool) => !["empty", "archived"].includes(spool.status)));
@@ -560,7 +620,7 @@ export const useInventoryStore = defineStore("inventory", () => {
 
   const filamentColorMappingByContext = computed(() => {
     const rows = new Map<string, FilamentColorMapping>();
-    for (const mapping of filamentColorMappings.value) {
+    for (const mapping of effectiveFilamentColorMappings.value) {
       const key = filamentColorMappingKey(mapping, mapping.color_hex || mapping.hex_value);
       if (key) rows.set(key, mapping);
     }
@@ -596,6 +656,8 @@ export const useInventoryStore = defineStore("inventory", () => {
       brandResult,
       typeSeriesResult,
       colorMappingResult,
+      effectiveColorMappingResult,
+      officialColorMappingResult,
       gapResult,
       skuResult,
       spoolResult,
@@ -605,6 +667,8 @@ export const useInventoryStore = defineStore("inventory", () => {
       apiRequest<FilamentBrand[]>("/filament/brands"),
       apiRequest<FilamentTypeSeries[]>("/filament/type-series"),
       apiRequest<FilamentColorMapping[]>("/filament/color-mappings"),
+      apiRequest<FilamentColorMapping[]>("/filament/effective-color-mappings"),
+      apiRequest<FilamentColorMapping[]>("/filament/bambu-official-color-mappings"),
       apiRequest<FilamentColorMappingGap[]>("/filament/color-mapping-gaps"),
       apiRequest<FilamentSku[]>("/filament/skus"),
       apiRequest<FilamentSpool[]>("/filament/spools"),
@@ -614,6 +678,8 @@ export const useInventoryStore = defineStore("inventory", () => {
     filamentBrands.value = brandResult;
     filamentTypeSeries.value = typeSeriesResult;
     filamentColorMappings.value = colorMappingResult;
+    effectiveFilamentColorMappings.value = effectiveColorMappingResult;
+    bambuOfficialColorMappings.value = officialColorMappingResult;
     filamentColorMappingGaps.value = gapResult;
     filamentSkus.value = skuResult;
     filamentInventorySummary.value = summaryResult;
@@ -628,14 +694,18 @@ export const useInventoryStore = defineStore("inventory", () => {
 
 
   async function refreshInventorySkuData() {
-    const [colorMappingResult, gapResult, skuResult, spoolResult, summaryResult] = await Promise.all([
+    const [colorMappingResult, effectiveColorMappingResult, officialColorMappingResult, gapResult, skuResult, spoolResult, summaryResult] = await Promise.all([
       apiRequest<FilamentColorMapping[]>("/filament/color-mappings"),
+      apiRequest<FilamentColorMapping[]>("/filament/effective-color-mappings"),
+      apiRequest<FilamentColorMapping[]>("/filament/bambu-official-color-mappings"),
       apiRequest<FilamentColorMappingGap[]>("/filament/color-mapping-gaps"),
       apiRequest<FilamentSku[]>("/filament/skus"),
       apiRequest<FilamentSpool[]>("/filament/spools"),
       apiRequest<FilamentInventorySummary>("/filament/inventory/summary"),
     ]);
     filamentColorMappings.value = colorMappingResult;
+    effectiveFilamentColorMappings.value = effectiveColorMappingResult;
+    bambuOfficialColorMappings.value = officialColorMappingResult;
     filamentColorMappingGaps.value = gapResult;
     filamentSkus.value = skuResult;
     filamentInventorySummary.value = summaryResult;
@@ -647,10 +717,12 @@ export const useInventoryStore = defineStore("inventory", () => {
 
 
   async function refreshInventoryCatalogData() {
-    const [brandResult, typeSeriesResult, colorMappingResult, gapResult, skuResult, spoolResult, summaryResult] = await Promise.all([
+    const [brandResult, typeSeriesResult, colorMappingResult, effectiveColorMappingResult, officialColorMappingResult, gapResult, skuResult, spoolResult, summaryResult] = await Promise.all([
       apiRequest<FilamentBrand[]>("/filament/brands"),
       apiRequest<FilamentTypeSeries[]>("/filament/type-series"),
       apiRequest<FilamentColorMapping[]>("/filament/color-mappings"),
+      apiRequest<FilamentColorMapping[]>("/filament/effective-color-mappings"),
+      apiRequest<FilamentColorMapping[]>("/filament/bambu-official-color-mappings"),
       apiRequest<FilamentColorMappingGap[]>("/filament/color-mapping-gaps"),
       apiRequest<FilamentSku[]>("/filament/skus"),
       apiRequest<FilamentSpool[]>("/filament/spools"),
@@ -659,6 +731,8 @@ export const useInventoryStore = defineStore("inventory", () => {
     filamentBrands.value = brandResult;
     filamentTypeSeries.value = typeSeriesResult;
     filamentColorMappings.value = colorMappingResult;
+    effectiveFilamentColorMappings.value = effectiveColorMappingResult;
+    bambuOfficialColorMappings.value = officialColorMappingResult;
     filamentColorMappingGaps.value = gapResult;
     filamentSkus.value = skuResult;
     filamentInventorySummary.value = summaryResult;
@@ -1049,6 +1123,8 @@ export const useInventoryStore = defineStore("inventory", () => {
       search: "",
       brand_id: null,
       type_series_id: null,
+      material_type: null,
+      series_name: null,
       nominal_weight_g: null,
       color_state: "all",
     });
@@ -1443,13 +1519,17 @@ export const useInventoryStore = defineStore("inventory", () => {
 
 
   function mappedFilamentColorName(value: unknown, context?: Record<string, any> | null): string | null {
+    const official = officialFilamentColorName(context);
+    if (official) return official;
     const key = filamentColorMappingKey(context, value);
     const mapping = key ? filamentColorMappingByContext.value.get(key) : null;
-    return mapping?.color_name || mapping?.official_name || null;
+    return officialFilamentColorName(mapping) || mapping?.color_name || mapping?.official_name || null;
   }
 
 
   function filamentColorDisplay(value: unknown, fallbackName?: unknown, context?: Record<string, any> | null): string {
+    const official = officialFilamentColorName(context);
+    if (official) return official;
     const mapped = mappedFilamentColorName(value, context);
     if (mapped) return mapped;
     if (fallbackName) return String(fallbackName);
@@ -1460,6 +1540,7 @@ export const useInventoryStore = defineStore("inventory", () => {
 
   function colorNeedsMapping(value: unknown, context?: Record<string, any> | null): boolean {
     const hex = normalizeFilamentHex(value);
+    if (officialFilamentColorName(context) || context?.color_source === "bambu_official") return false;
     const ownName = String(
       context?.color_name ||
         context?.official_name ||
@@ -1471,6 +1552,30 @@ export const useInventoryStore = defineStore("inventory", () => {
     if (hex && ownName) return false;
     const key = filamentColorMappingKey(context, value);
     return Boolean(key && !filamentColorMappingByContext.value.has(key));
+  }
+
+
+  function officialFilamentColorName(context?: Record<string, any> | null): string | null {
+    const names = context?.official_color_names;
+    if (!names || typeof names !== "object") return null;
+    const locale = String(i18nStore.locale || "");
+    if (locale.toLowerCase().startsWith("zh") && names.zh) return names.zh;
+    const language = locale.split("-")[0];
+    return String(names[language] || names.en || names.zh || "").trim() || null;
+  }
+
+
+  function officialColorTypeLabel(value: unknown): string {
+    const key = String(value || "single").trim() || "single";
+    return t(`inventory.officialColorType.${key}`);
+  }
+
+
+  function officialColorPalette(row: Record<string, any> | null | undefined): string[] {
+    const values = Array.isArray(row?.official_colors) && row?.official_colors.length
+      ? row.official_colors
+      : [row?.color_hex || row?.hex_value];
+    return values.map((value) => String(value || "").trim()).filter(Boolean);
   }
 
 
@@ -1521,7 +1626,7 @@ export const useInventoryStore = defineStore("inventory", () => {
   function filamentSkuLabel(sku: FilamentSku | Record<string, any>): string {
     const colorValue = sku.color_hex || sku.color_value;
     const color = colorValue || sku.color_name ? filamentColorDisplay(colorValue, sku.color_name, sku) : null;
-    return [sku.brand_name, sku.series, sku.material, color]
+    return [sku.brand_name, sku.material, sku.series, color]
       .filter(Boolean)
       .join(" · ") || `SKU ${sku.id}`;
   }
@@ -1544,12 +1649,46 @@ export const useInventoryStore = defineStore("inventory", () => {
     );
   }
 
+  function uniqueSelectOptions(values: unknown[]): { label: string; value: string }[] {
+    const labels = new Map<string, string>();
+    for (const value of values) {
+      const label = String(value || "").trim();
+      if (!label) continue;
+      labels.set(normalizedText(label), label);
+    }
+    return sortSelectOptions([...labels.values()].map((label) => ({ label, value: label })));
+  }
+
+  function normalizedText(value: unknown): string {
+    return String(value || "").trim().toLowerCase();
+  }
+
+  function skuFilterMaterialExists(value: unknown, brandId: number | null): boolean {
+    const material = normalizedText(value);
+    if (!material) return true;
+    return filamentTypeSeries.value.some((row) => {
+      if (brandId && row.brand_id !== brandId) return false;
+      return normalizedText(row.material_type) === material;
+    });
+  }
+
+  function skuFilterSeriesExists(value: unknown, brandId: number | null, materialValue: unknown): boolean {
+    const series = normalizedText(value);
+    if (!series) return true;
+    const material = normalizedText(materialValue);
+    if (!material) return false;
+    return filamentTypeSeries.value.some((row) => {
+      if (brandId && row.brand_id !== brandId) return false;
+      return normalizedText(row.material_type) === material && normalizedText(row.series_name) === series;
+    });
+  }
+
 
   function filamentSpoolLabel(spool: FilamentSpool | Record<string, any> | null | undefined): string {
     if (!spool) return "—";
     const colorValue = spool.color_hex || spool.color_value;
     const color = colorValue || spool.color_name ? filamentColorDisplay(colorValue, spool.color_name, spool) : null;
-    return [spool.brand_name, spool.series, spool.material, color].filter(Boolean).join(" · ") || spool.sku_label || `#${spool.id}`;
+    return [spool.brand_name, spool.material, spool.series, color].filter(Boolean).join(" · ") || spool.sku_label || `#${spool.id}`;
   }
 
 
@@ -1593,7 +1732,8 @@ export const useInventoryStore = defineStore("inventory", () => {
 
   function filamentTypeSeriesLabel(row: FilamentTypeSeries | Record<string, any> | null | undefined): string {
     if (!row) return "—";
-    return [row.material_type, row.series_name].filter(Boolean).join(" · ") || `#${row.id}`;
+    const data = row as Record<string, any>;
+    return [data.material_type || data.material, data.series_name || data.series].filter(Boolean).join(" · ") || `#${data.id}`;
   }
 
 
@@ -1615,10 +1755,20 @@ export const useInventoryStore = defineStore("inventory", () => {
     const row = filamentTypeSeries.value.find(
       (item) =>
         item.material_type.toLowerCase() === materialText &&
-        item.series_name.toLowerCase() === seriesText &&
+        filamentSeriesMatches(item.material_type, item.series_name, seriesText) &&
         (!brandId || item.brand_id === brandId),
     );
     return row?.id ?? null;
+  }
+
+
+  function filamentSeriesMatches(material: unknown, storedSeries: unknown, observedSeries: unknown): boolean {
+    const stored = String(storedSeries || "").trim().toLowerCase();
+    const observed = String(observedSeries || "").trim().toLowerCase();
+    if (stored === observed) return true;
+    const materialText = String(material || "").trim().toLowerCase();
+    if (!materialText) return false;
+    return `${materialText} ${stored}` === observed || `${materialText}-${stored}` === observed;
   }
 
 
@@ -1836,10 +1986,19 @@ export const useInventoryStore = defineStore("inventory", () => {
     if (table === "colorMappings") {
       if (key === "id") return item.id;
       if (key === "brand") return item.brand_name;
-      if (key === "material") return [item.material_type || item.material, item.series_name || item.series].filter(Boolean).join(" ");
+      if (key === "material") return filamentTypeSeriesLabel(item);
       if (key === "hex") return item.color_hex || item.hex_value;
       if (key === "color") return item.color_name || item.official_name;
       if (key === "note") return item.note;
+    }
+    if (table === "officialColorMappings") {
+      if (key === "id") return item.official_color_code || item.id;
+      if (key === "material") return filamentTypeSeriesLabel(item);
+      if (key === "tray") return item.tray_info_idx;
+      if (key === "type") return officialColorTypeLabel(item.official_color_type);
+      if (key === "hex") return (item.official_colors || [item.color_hex || item.hex_value]).join(" ");
+      if (key === "color") return filamentColorDisplay(item.color_hex || item.hex_value, item.color_name || item.official_name, item);
+      if (key === "en") return item.official_color_names?.en;
     }
     if (table === "colorGaps") {
       if (key === "id") return item.sku_id;
@@ -1969,6 +2128,8 @@ export const useInventoryStore = defineStore("inventory", () => {
     filamentBrands,
     filamentTypeSeries,
     filamentColorMappings,
+    effectiveFilamentColorMappings,
+    bambuOfficialColorMappings,
     filamentColorMappingGaps,
     filamentSkus,
     filamentSpools,
@@ -2011,6 +2172,8 @@ export const useInventoryStore = defineStore("inventory", () => {
     filamentSkuOptions,
     filamentSkuFilterBrandOptions,
     filamentSkuFilterTypeSeriesOptions,
+    filamentSkuFilterMaterialOptions,
+    filamentSkuFilterSeriesOptions,
     filamentSkuWeightOptions,
     filamentSkuColorStateOptions,
     filteredFilamentSkus,
@@ -2035,6 +2198,7 @@ export const useInventoryStore = defineStore("inventory", () => {
     sortedFilamentTypeSeries,
     sortedFilteredFilamentSkus,
     sortedFilamentColorMappings,
+    sortedBambuOfficialColorMappings,
     sortedFilamentColorMappingGaps,
     inventoryRealSpools,
     inventorySealedWeightG,
@@ -2099,6 +2263,8 @@ export const useInventoryStore = defineStore("inventory", () => {
     mappedFilamentColorName,
     filamentColorDisplay,
     colorNeedsMapping,
+    officialColorTypeLabel,
+    officialColorPalette,
     slotFilamentColorContext,
     filamentSkuMatchesColorState,
     filamentSkuSearchText,

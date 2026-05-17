@@ -37,6 +37,7 @@ from filament_manager.schemas import (
     FilamentTypeSeriesUpdate,
     SlotBindRequest,
 )
+from filament_manager.services.bambu_filament_catalog import list_bambu_official_color_mappings
 from filament_manager.services.inventory import (
     DuplicateFilamentSkuError,
     FilamentSpoolUidConflictError,
@@ -64,6 +65,7 @@ from filament_manager.services.inventory import (
     get_filament_spool,
     get_sku,
     get_type_series,
+    list_effective_color_mappings,
     list_brands,
     list_color_mapping_gaps,
     list_color_mappings,
@@ -197,6 +199,16 @@ def api_set_filament_type_series_brands(
 @router.get("/filament/color-mappings", response_model=list[FilamentColorMappingRead])
 def api_list_filament_color_mappings(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
     return [filament_color_mapping_to_read(row) for row in list_color_mappings(db)]
+
+
+@router.get("/filament/effective-color-mappings", response_model=list[FilamentColorMappingRead])
+def api_list_effective_filament_color_mappings(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
+    return list_effective_color_mappings(db)
+
+
+@router.get("/filament/bambu-official-color-mappings", response_model=list[FilamentColorMappingRead])
+def api_list_bambu_official_color_mappings() -> list[dict[str, Any]]:
+    return list_bambu_official_color_mappings()
 
 
 @router.post("/filament/color-mappings", response_model=FilamentColorMappingRead, status_code=status.HTTP_201_CREATED)

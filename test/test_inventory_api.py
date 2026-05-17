@@ -3,11 +3,36 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 
+from filament_manager.db import session as db_session
+from filament_manager.db.models import (
+    FilamentBrand,
+    FilamentColorMapping,
+    FilamentSku,
+    FilamentSpool,
+    FilamentStockBalance,
+    FilamentTypeSeries,
+)
 
-def _brand(api_client, name: str = "Bambu Lab") -> dict:
-    response = api_client.post("/api/filament/brands", json={"name": name, "aliases": ["拓竹"]})
+
+def _brand(api_client, name: str = "Generic", aliases: list[str] | None = None) -> dict:
+    if aliases is None:
+        aliases = ["拓竹"] if name.replace(" ", "").lower() in {"bambulab", "bambu"} else []
+    response = api_client.post("/api/filament/brands", json={"name": name, "aliases": aliases})
     assert response.status_code == 201, response.text
     return response.json()
+
+
+def _bambu_brand(api_client) -> dict:
+    brands = api_client.get("/api/filament/brands").json()
+    for brand in brands:
+        key = brand["name"].replace(" ", "").replace("-", "").replace("_", "").lower()
+        aliases = {
+            alias.replace(" ", "").replace("-", "").replace("_", "").lower()
+            for alias in brand.get("aliases", [])
+        }
+        if key in {"bambulab", "bambu"} or "拓竹" in aliases:
+            return brand
+    raise AssertionError("Bambu brand was not initialized")
 
 
 def _type_series(api_client, brand_id: int, material: str = "PLA", series: str = "Basic") -> dict:
@@ -22,6 +47,22 @@ def _type_series(api_client, brand_id: int, material: str = "PLA", series: str =
     )
     assert response.status_code == 201, response.text
     return response.json()
+
+
+def _existing_type_series(api_client, brand_id: int, material: str, series: str) -> dict:
+    for row in api_client.get("/api/filament/type-series").json():
+        if (
+            row["brand_id"] == brand_id
+            and row["material_type"].lower() == material.lower()
+            and row["series_name"].lower() == series.lower()
+        ):
+            return row
+    raise AssertionError(f"Type series not found: {brand_id} {material} {series}")
+
+
+def _bambu_type_series(api_client, material: str = "PLA", series: str = "Basic") -> dict:
+    brand = _bambu_brand(api_client)
+    return _existing_type_series(api_client, brand["id"], material, series)
 
 
 def _sku(
@@ -44,6 +85,37 @@ def _sku(
         },
     )
     assert response.status_code == 201, response.text
+    return response.json()
+
+
+def _bambu_catalog_sku(
+    api_client,
+    *,
+    official_color_code: str | None = None,
+    material: str | None = None,
+    series: str | None = None,
+    color_hex: str | None = None,
+    tray_info_idx: str | None = None,
+) -> dict:
+    for sku in api_client.get("/api/filament/skus").json():
+        if official_color_code is not None and sku.get("official_color_code") != official_color_code:
+            continue
+        if material is not None and sku.get("material") != material:
+            continue
+        if series is not None and sku.get("series") != series:
+            continue
+        if color_hex is not None and sku.get("color_hex") != color_hex:
+            continue
+        if tray_info_idx is not None and sku.get("tray_info_idx") != tray_info_idx:
+            continue
+        if sku.get("nominal_weight_g") == 1000 and sku.get("filament_diameter_mm") == 1.75:
+            return sku
+    raise AssertionError("Bambu catalog SKU not found")
+
+
+def _adjust_stock(api_client, sku_id: int, delta: int) -> dict:
+    response = api_client.post(f"/api/filament/skus/{sku_id}/sealed-stock-adjust", json={"delta": delta})
+    assert response.status_code == 200, response.text
     return response.json()
 
 
@@ -70,21 +142,21 @@ def _ingest(api_client, printer_id: int, payload: dict) -> None:
 
 def test_brand_type_series_sku_crud_and_stats(api_client) -> None:
     brand = _brand(api_client)
-    assert brand["aliases"] == ["拓竹"]
+    assert brand["aliases"] == []
 
     type_series = _type_series(api_client, brand["id"], series="PLA Basic")
     assert type_series["brand_id"] == brand["id"]
     assert type_series["brand_ids"] == [brand["id"]]
-    assert type_series["brands"][0]["name"] == "Bambu Lab"
+    assert type_series["brands"][0]["name"] == "Generic"
 
     sku = _sku(api_client, type_series["id"], sealed=0)
     assert sku["type_series_id"] == type_series["id"]
     assert sku["type_series_ids"] == [type_series["id"]]
-    assert sku["brands"][0]["name"] == "Bambu Lab"
+    assert sku["brands"][0]["name"] == "Generic"
 
-    brands = api_client.get("/api/filament/brands").json()
-    assert brands[0]["type_series_count"] == 1
-    assert brands[0]["sku_count"] == 1
+    brands = {item["id"]: item for item in api_client.get("/api/filament/brands").json()}
+    assert brands[brand["id"]]["type_series_count"] == 1
+    assert brands[brand["id"]]["sku_count"] == 1
 
     update = api_client.patch(f"/api/filament/skus/{sku['id']}", json={"color_name": "Jade White", "color_hex": "FFFFFF"})
     assert update.status_code == 200
@@ -115,6 +187,63 @@ def test_type_series_duplicate_returns_json_error(api_client) -> None:
     )
     assert rejected_update.status_code == 400
     assert rejected_update.json()["detail"] == "Type series already exists for this brand"
+
+
+def test_type_series_series_name_is_normalized(api_client) -> None:
+    brand = _brand(api_client, "Generic")
+    row = _type_series(api_client, brand["id"], material="PETG", series="PETG Basic")
+    assert row["material_type"] == "PETG"
+    assert row["series_name"] == "Basic"
+
+    duplicate = api_client.post(
+        "/api/filament/type-series",
+        json={
+            "brand_id": brand["id"],
+            "material_type": "PETG",
+            "series_name": "Basic",
+        },
+    )
+    assert duplicate.status_code == 400
+
+
+def test_type_series_startup_normalization_preserves_stock_and_spools(api_client) -> None:
+    assert db_session.SessionLocal is not None
+    db = db_session.SessionLocal()
+    try:
+        brand = FilamentBrand(name="Legacy Generic", aliases=[])
+        db.add(brand)
+        db.flush()
+        canonical = FilamentTypeSeries(brand_id=brand.id, material_type="PLA", series_name="Basic")
+        legacy = FilamentTypeSeries(brand_id=brand.id, material_type="PLA", series_name="PLA Basic")
+        db.add_all([canonical, legacy])
+        db.flush()
+        sku = FilamentSku(type_series_id=legacy.id, color_name="Orange", color_hex="FF6600", nominal_weight_g=1000)
+        db.add(sku)
+        db.flush()
+        db.add(FilamentStockBalance(sku_id=sku.id, sealed_quantity=7))
+        db.add(FilamentSpool(sku_id=sku.id, status="opened_in_storage", actual_weight_g=840))
+        db.add(FilamentColorMapping(brand_id=brand.id, type_series_id=legacy.id, color_name="Orange", color_hex="FF6600"))
+        db.commit()
+        sku_id = sku.id
+        canonical_id = canonical.id
+    finally:
+        db.close()
+
+    db_session.create_schema()
+
+    type_series = api_client.get("/api/filament/type-series").json()
+    legacy_rows = [row for row in type_series if row["brand_name"] == "Legacy Generic"]
+    assert len(legacy_rows) == 1
+    assert legacy_rows[0]["id"] == canonical_id
+    assert legacy_rows[0]["series_name"] == "Basic"
+
+    skus = {item["id"]: item for item in api_client.get("/api/filament/skus").json()}
+    assert skus[sku_id]["type_series_id"] == canonical_id
+    assert skus[sku_id]["sealed_quantity"] == 7
+    spools = api_client.get("/api/filament/spools").json()
+    assert any(item["sku_id"] == sku_id and item["actual_weight_g"] == 840 for item in spools)
+    mappings = api_client.get("/api/filament/color-mappings").json()
+    assert any(item["type_series_id"] == canonical_id and item["color_hex"] == "FF6600" for item in mappings)
 
 
 def test_duplicate_sku_create_and_update_return_conflict(api_client) -> None:
@@ -234,7 +363,7 @@ def test_spool_unique_uid_location_weight_events_and_delete_rule(api_client) -> 
 
 
 def test_color_mapping_crud_and_sku_gaps(api_client) -> None:
-    brand = _brand(api_client)
+    brand = _brand(api_client, "Generic")
     type_series = _type_series(api_client, brand["id"])
     _type_series(api_client, brand["id"], material="PETG", series="HF")
     _type_series(api_client, brand["id"], material="PLA", series="Matte")
@@ -317,7 +446,9 @@ def test_color_mapping_crud_and_sku_gaps(api_client) -> None:
 
 
 def test_color_mapping_update_persists_after_auto_sku_sync(api_client) -> None:
-    _, type_series, sku = _inventory_tree(api_client)
+    brand = _brand(api_client, "Generic")
+    type_series = _type_series(api_client, brand["id"])
+    sku = _sku(api_client, type_series["id"])
     mapping = api_client.get("/api/filament/color-mappings").json()[0]
 
     null_parent_update = api_client.patch(
@@ -341,6 +472,79 @@ def test_color_mapping_update_persists_after_auto_sku_sync(api_client) -> None:
     assert skus[sku["id"]]["type_series_id"] == type_series["id"]
     assert skus[sku["id"]]["color_name"] == "Mandarin Orange"
     assert skus[sku["id"]]["color_hex"] == "FF7711"
+
+
+def test_bambu_official_colors_override_sku_reads_and_effective_mappings(api_client) -> None:
+    petg_translucent = _bambu_type_series(api_client, material="PETG", series="Translucent")
+    petg_hf = _bambu_type_series(api_client, material="PETG", series="HF")
+    asa = _bambu_type_series(api_client, material="ASA", series="Standard")
+    tpu = _bambu_type_series(api_client, material="TPU", series="90A")
+
+    translucent = _sku(api_client, petg_translucent["id"], color_name="Clear", color_hex="FFFFFF", sealed=0, nominal_weight_g=750)
+    cream = _sku(api_client, petg_hf["id"], color_name="Cream", color_hex="FFFFFF", sealed=0, nominal_weight_g=750)
+    asa_white = _sku(api_client, asa["id"], color_name="White", color_hex="FFFFFF", sealed=0, nominal_weight_g=750)
+    frozen = _sku(api_client, tpu["id"], color_name="Frozen", color_hex="FFFFFF", sealed=0, nominal_weight_g=750)
+
+    skus = {item["id"]: item for item in api_client.get("/api/filament/skus").json()}
+    assert skus[translucent["id"]]["color_name"] == "透明"
+    assert skus[cream["id"]]["color_hex"] == "F9DFB9"
+    assert skus[cream["id"]]["official_color_code"] == "33401"
+    assert skus[asa_white["id"]]["color_hex"] == "FFFAF2"
+    assert skus[frozen["id"]]["official_color_type"] == "gradient"
+    assert skus[frozen["id"]]["official_colors"] == ["FFFFFF", "40B6E4"]
+
+    assert api_client.get("/api/filament/color-mappings").json() == []
+    effective = api_client.get("/api/filament/effective-color-mappings").json()
+    assert any(item["color_source"] == "bambu_official" and item["official_color_code"] == "33401" for item in effective)
+
+
+def test_bambu_official_color_mapping_catalog_endpoint(api_client) -> None:
+    rows = api_client.get("/api/filament/bambu-official-color-mappings").json()
+    assert len(rows) == 303
+    assert not any(item["official_color_code"] == "65100" for item in rows)
+    assert any(item["official_color_code"] == "65104" for item in rows)
+    cream = next(item for item in rows if item["official_color_code"] == "33401")
+    assert cream["brand_name"] == "Bambu Lab"
+    assert cream["material_type"] == "PETG"
+    assert cream["series_name"] == "HF"
+    assert cream["tray_info_idx"] == "GFG02"
+    assert cream["color_name"] == "奶油白"
+    assert cream["color_hex"] == "F9DFB9"
+
+
+def test_bambu_manual_mapping_table_is_kept_but_effective_prefers_official(api_client) -> None:
+    brand = _bambu_brand(api_client)
+    petg_hf = _bambu_type_series(api_client, material="PETG", series="HF")
+    created = api_client.post(
+        "/api/filament/color-mappings",
+        json={
+            "brand_id": brand["id"],
+            "type_series_id": petg_hf["id"],
+            "color_name": "Cream",
+            "color_hex": "FFFFFF",
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    manual = api_client.get("/api/filament/color-mappings").json()
+    assert len(manual) == 1
+    assert manual[0]["color_source"] == "manual"
+    effective = api_client.get("/api/filament/effective-color-mappings").json()
+    assert any(item["official_color_code"] == "33401" and item["color_hex"] == "F9DFB9" for item in effective)
+    assert not any(item["id"] == manual[0]["id"] for item in effective)
+
+
+def test_non_bambu_brand_uses_manual_color_mapping_only(api_client) -> None:
+    brand = _brand(api_client, "Generic")
+    petg_hf = _type_series(api_client, brand["id"], material="PETG", series="HF")
+    sku = _sku(api_client, petg_hf["id"], color_name="Cream", color_hex="FFFFFF", sealed=0)
+
+    skus = {item["id"]: item for item in api_client.get("/api/filament/skus").json()}
+    assert skus[sku["id"]]["color_hex"] == "FFFFFF"
+    assert skus[sku["id"]]["color_source"] == "manual"
+    effective = api_client.get("/api/filament/effective-color-mappings").json()
+    assert any(item["brand_name"] == "Generic" and item["color_source"] == "manual" for item in effective)
+    assert not any(item["brand_name"] == "Generic" and item.get("official_color_code") == "33401" for item in effective)
 
 
 def test_inventory_summary_and_legacy_spools_removed(api_client) -> None:
@@ -435,7 +639,8 @@ def test_ams_existing_official_uid_does_not_decrement_stock(api_client, printer_
 
     _ingest(api_client, printer["id"], payload)
 
-    assert api_client.get("/api/filament/skus").json()[0]["sealed_quantity"] == 0
+    skus = {item["id"]: item for item in api_client.get("/api/filament/skus").json()}
+    assert skus[sku["id"]]["sealed_quantity"] == 0
     spools = api_client.get("/api/filament/spools").json()
     assert len(spools) == 1
     assert spools[0]["status"] == "loaded_in_ams"
@@ -474,7 +679,8 @@ def test_ams_archived_official_uid_creates_pending_conflict_instead_of_reusing(a
 
 def test_ams_existing_unknown_uid_matching_sku_decrements_stock(api_client, printer_payload, fixture_dir) -> None:
     printer = _printer(api_client, printer_payload)
-    _, _, sku = _inventory_tree(api_client)
+    sku = _bambu_catalog_sku(api_client, official_color_code="10300")
+    _adjust_stock(api_client, sku["id"], 1)
     created = api_client.post(
         "/api/filament/spools",
         json={
@@ -499,33 +705,27 @@ def test_ams_existing_unknown_uid_matching_sku_decrements_stock(api_client, prin
 
 def test_ams_new_official_uid_matches_sku_and_decrements_once(api_client, printer_payload, fixture_dir) -> None:
     printer = _printer(api_client, printer_payload)
-    _inventory_tree(api_client)
+    sku = _bambu_catalog_sku(api_client, official_color_code="10300")
+    _adjust_stock(api_client, sku["id"], 1)
     payload = json.loads((fixture_dir / "push_status_valid_tray_uuid.json").read_text())
     payload["print"]["ams"]["ams"][0]["tray"][0]["tray_id_name"] = "PLA Basic Orange"
 
     _ingest(api_client, printer["id"], payload)
     _ingest(api_client, printer["id"], payload)
 
-    skus = api_client.get("/api/filament/skus").json()
+    skus = {item["id"]: item for item in api_client.get("/api/filament/skus").json()}
     spools = api_client.get("/api/filament/spools").json()
-    assert skus[0]["sealed_quantity"] == 0
+    assert skus[sku["id"]]["sealed_quantity"] == 0
     assert len(spools) == 1
-    assert spools[0]["sku_id"] == skus[0]["id"]
+    assert spools[0]["sku_id"] == sku["id"]
     assert spools[0]["last_ams_remain_percent"] == 88
 
 
 def test_ams_jade_white_uses_weight_to_match_existing_sku(api_client, printer_payload, fixture_dir) -> None:
     printer = _printer(api_client, printer_payload)
-    brand = _brand(api_client)
-    type_series = _type_series(api_client, brand["id"], material="PLA", series="Basic")
-    full_sku = _sku(
-        api_client,
-        type_series["id"],
-        color_name="玉石白",
-        color_hex="FFFFFF",
-        sealed=1,
-        nominal_weight_g=1000,
-    )
+    type_series = _bambu_type_series(api_client, material="PLA", series="Basic")
+    full_sku = _bambu_catalog_sku(api_client, official_color_code="10100")
+    _adjust_stock(api_client, full_sku["id"], 1)
     small_sku = _sku(
         api_client,
         type_series["id"],
@@ -550,7 +750,6 @@ def test_ams_jade_white_uses_weight_to_match_existing_sku(api_client, printer_pa
 
     skus = {item["id"]: item for item in api_client.get("/api/filament/skus").json()}
     spools = api_client.get("/api/filament/spools").json()
-    assert len(skus) == 2
     assert skus[full_sku["id"]]["sealed_quantity"] == 0
     assert skus[small_sku["id"]]["sealed_quantity"] == 1
     assert len(spools) == 1
@@ -561,16 +760,8 @@ def test_ams_jade_white_uses_weight_to_match_existing_sku(api_client, printer_pa
 
 def test_ams_remain_unavailable_with_rfid_payload_matches_existing_sku(api_client, printer_payload, fixture_dir) -> None:
     printer = _printer(api_client, printer_payload)
-    brand = _brand(api_client)
-    petg_series = _type_series(api_client, brand["id"], material="PETG", series="Basic")
-    petg_sku = _sku(
-        api_client,
-        petg_series["id"],
-        color_name="White",
-        color_hex="FFFFFF",
-        sealed=1,
-        nominal_weight_g=1000,
-    )
+    petg_sku = _bambu_catalog_sku(api_client, material="PETG", series="Basic", color_hex="FFFFFF", tray_info_idx="GFG00")
+    _adjust_stock(api_client, petg_sku["id"], 1)
     payload = json.loads((fixture_dir / "push_status_remain_unavailable.json").read_text())
 
     _ingest(api_client, printer["id"], payload)
@@ -592,16 +783,8 @@ def test_ams_remain_unavailable_with_rfid_payload_matches_existing_sku(api_clien
 
 def test_ams_rfid_payload_reuses_uidless_skuless_placeholder(api_client, printer_payload, fixture_dir) -> None:
     printer = _printer(api_client, printer_payload)
-    brand = _brand(api_client)
-    petg_series = _type_series(api_client, brand["id"], material="PETG", series="Basic")
-    petg_sku = _sku(
-        api_client,
-        petg_series["id"],
-        color_name="White",
-        color_hex="FFFFFF",
-        sealed=1,
-        nominal_weight_g=1000,
-    )
+    petg_sku = _bambu_catalog_sku(api_client, material="PETG", series="Basic", color_hex="FFFFFF", tray_info_idx="GFG00")
+    _adjust_stock(api_client, petg_sku["id"], 1)
     payload = json.loads((fixture_dir / "push_status_remain_unavailable.json").read_text())
     placeholder_payload = deepcopy(payload)
     placeholder_payload["print"]["ams"]["ams"][0]["tray"] = [{"id": "0"}]
@@ -628,12 +811,12 @@ def test_ams_rfid_payload_reuses_uidless_skuless_placeholder(api_client, printer
 
 def test_ams_replacement_with_existing_sku_loads_new_spool_and_decrements_stock(api_client, printer_payload, fixture_dir) -> None:
     printer = _printer(api_client, printer_payload)
-    brand = _brand(api_client)
-    pla_series = _type_series(api_client, brand["id"], material="PLA", series="Basic")
-    petg_series = _type_series(api_client, brand["id"], material="PETG", series="Basic")
-    pla_sku = _sku(api_client, pla_series["id"], color_name="Orange", color_hex="FF6600", sealed=1)
-    petg_sku = _sku(api_client, petg_series["id"], color_name="White", color_hex="FFFFFF", sealed=1)
+    pla_sku = _bambu_catalog_sku(api_client, official_color_code="10300")
+    petg_sku = _bambu_catalog_sku(api_client, material="PETG", series="Basic", color_hex="FFFFFF", tray_info_idx="GFG00")
+    _adjust_stock(api_client, pla_sku["id"], 1)
+    _adjust_stock(api_client, petg_sku["id"], 1)
     first_payload = json.loads((fixture_dir / "push_status_valid_tray_uuid.json").read_text())
+    first_payload["print"]["ams"]["ams"][0]["tray"][0]["tray_id_name"] = "PLA Basic Orange"
     _ingest(api_client, printer["id"], first_payload)
     first_spool = next(item for item in api_client.get("/api/filament/spools").json() if item["official_spool_uid"] == "11111111-2222-3333-4444-555555555555")
 
@@ -644,6 +827,8 @@ def test_ams_replacement_with_existing_sku_loads_new_spool_and_decrements_stock(
     tray["tray_type"] = "PETG"
     tray["tray_sub_brands"] = "Basic"
     tray["tray_color"] = "FFFFFF"
+    tray["tray_info_idx"] = "GFG00"
+    tray["tray_id_name"] = "PETG Basic White"
     tray["remain"] = 73
     _ingest(api_client, printer["id"], second_payload)
 
@@ -675,8 +860,8 @@ def test_ams_replacement_marks_previous_spool_needs_location(api_client, printer
     tray = second_payload["print"]["ams"]["ams"][0]["tray"][0]
     tray["tray_uuid"] = "22222222-3333-4444-5555-666666666666"
     tray["tag_uid"] = "SECOND1234567890"
-    tray["tray_color"] = "00AAFF"
-    tray["tray_id_name"] = "PLA Basic Cyan"
+    tray["tray_color"] = "12AB34"
+    tray["tray_id_name"] = "PLA Basic Unlisted Color"
     _ingest(api_client, printer["id"], second_payload)
 
     unloaded = api_client.get(f"/api/filament/spools/{first_spool['id']}").json()
@@ -692,7 +877,8 @@ def test_ams_replacement_marks_previous_spool_needs_location(api_client, printer
     assert confirmed.status_code == 200
     assert confirmed.json()["config"].get("needs_sku_review") is None
     assert confirmed.json()["config"]["sku_review_confirmed_at"]
-    assert api_client.get("/api/filament/skus").json()[0]["sealed_quantity"] == 0
+    skus = {item["id"]: item for item in api_client.get("/api/filament/skus").json()}
+    assert skus[replacement["sku_id"]]["sealed_quantity"] == 0
     events = api_client.get(f"/api/filament/spools/{first_spool['id']}/events").json()["events"]
     assert any(item["event_type"] == "unloaded_from_ams" for item in events)
     replacement_events = api_client.get(f"/api/filament/spools/{replacement['id']}/events").json()["events"]
@@ -717,11 +903,11 @@ def test_ams_unmatched_spool_creates_incomplete_sku_without_decrement(api_client
     assert spools[0]["sku_id"] is not None
     assert spools[0]["nominal_weight_g"] == 250
     assert spools[0]["config"]["needs_sku_review"] is True
-    skus = api_client.get("/api/filament/skus").json()
-    assert len(skus) == 1
-    assert skus[0]["color_name"] == "Cocoa Brown"
-    assert skus[0]["color_hex"] == "6F5034"
-    assert skus[0]["nominal_weight_g"] == 250
+    skus = {item["id"]: item for item in api_client.get("/api/filament/skus").json()}
+    created_sku = skus[spools[0]["sku_id"]]
+    assert created_sku["color_name"] == "可可棕"
+    assert created_sku["color_hex"] == "6F5034"
+    assert created_sku["nominal_weight_g"] == 250
 
 
 def test_ams_transition_frame_without_payload_does_not_create_phantom_spool(api_client, printer_payload, fixture_dir) -> None:

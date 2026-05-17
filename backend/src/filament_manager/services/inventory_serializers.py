@@ -13,6 +13,10 @@ from filament_manager.db.models import (
     FilamentStockBalance,
     FilamentTypeSeries,
 )
+from filament_manager.services.bambu_filament_catalog import (
+    official_color_read_fields,
+    resolve_bambu_official_color,
+)
 from filament_manager.services.inventory_constants import HISTORICAL_SPOOL_STATUSES
 
 
@@ -84,6 +88,7 @@ def filament_sku_to_read(sku: FilamentSku) -> dict[str, Any]:
     first_series = sku.type_series
     first_brand = first_series.brand if first_series else None
     type_series = [type_series_summary(first_series)] if first_series else []
+    color_fields = _effective_sku_color_fields(sku)
     return {
         "id": sku.id,
         "type_series_id": sku.type_series_id,
@@ -91,9 +96,9 @@ def filament_sku_to_read(sku: FilamentSku) -> dict[str, Any]:
         "brand_name": first_brand.name if first_brand else None,
         "material": first_series.material_type if first_series else None,
         "series": first_series.series_name if first_series else None,
-        "color_name": sku.color_name,
-        "color_hex": sku.color_hex,
-        "color_value": sku.color_hex,
+        "color_name": color_fields["color_name"],
+        "color_hex": color_fields["color_hex"],
+        "color_value": color_fields["color_value"],
         "nominal_weight_g": sku.nominal_weight_g,
         "empty_spool_weight_g": first_series.empty_spool_weight_g if first_series else None,
         "filament_diameter_mm": sku.filament_diameter_mm or 1.75,
@@ -112,6 +117,7 @@ def filament_sku_to_read(sku: FilamentSku) -> dict[str, Any]:
         ),
         "created_at": sku.created_at,
         "updated_at": sku.updated_at,
+        **color_fields["metadata"],
     }
 
 
@@ -121,6 +127,7 @@ def filament_spool_to_read(spool: FilamentSpool) -> dict[str, Any]:
     first_brand = first_series.brand if first_series else None
     config = spool.config or {}
     last_ams_remain_percent = 0 if spool.status == "empty" and spool.actual_weight_g == 0 else config.get("last_ams_remain_percent")
+    color_fields = _effective_sku_color_fields(sku) if sku else _raw_color_fields(None, None)
     return {
         "id": spool.id,
         "sku_id": spool.sku_id,
@@ -132,9 +139,9 @@ def filament_spool_to_read(spool: FilamentSpool) -> dict[str, Any]:
         "series": first_series.series_name if first_series else None,
         "type_series": [type_series_summary(first_series)] if first_series else [],
         "brands": sku_brand_summaries(sku) if sku else [],
-        "color_name": sku.color_name if sku else None,
-        "color_hex": sku.color_hex if sku else None,
-        "color_value": sku.color_hex if sku else None,
+        "color_name": color_fields["color_name"],
+        "color_hex": color_fields["color_hex"],
+        "color_value": color_fields["color_value"],
         "official_spool_uid": spool.official_spool_uid,
         "identity_key": spool.official_spool_uid,
         "tray_uuid": spool.official_spool_uid,
@@ -166,6 +173,7 @@ def filament_spool_to_read(spool: FilamentSpool) -> dict[str, Any]:
         "config": config,
         "created_at": spool.created_at,
         "updated_at": spool.updated_at,
+        **color_fields["metadata"],
     }
 
 
@@ -186,6 +194,7 @@ def filament_color_mapping_to_read(mapping: FilamentColorMapping) -> dict[str, A
         "note": mapping.note,
         "created_at": mapping.created_at,
         "updated_at": mapping.updated_at,
+        "color_source": "manual",
     }
 
 
@@ -217,7 +226,8 @@ def sku_label(sku: FilamentSku | None) -> str | None:
     if sku is None:
         return None
     series = [series_label(sku.type_series)] if sku.type_series else []
-    color = sku.color_name or sku.color_hex
+    color_fields = _effective_sku_color_fields(sku)
+    color = color_fields["color_name"] or color_fields["color_hex"]
     parts = [", ".join(series), color]
     return " / ".join(part for part in parts if part) or f"SKU {sku.id}"
 
@@ -238,3 +248,60 @@ def sealed_quantity(sku: FilamentSku) -> int:
 
 def datetime_from_config(value: Any) -> Any:
     return value
+
+
+def _effective_sku_color_fields(sku: FilamentSku | None) -> dict[str, Any]:
+    if sku is None:
+        return _raw_color_fields(None, None)
+    match = _official_match_for_sku(sku)
+    if match is not None:
+        fields = official_color_read_fields(match)
+        return {
+            "color_name": fields.pop("color_name"),
+            "color_hex": fields.pop("color_hex"),
+            "color_value": fields.pop("color_value"),
+            "metadata": fields,
+        }
+    source = "manual" if _manual_mapping_for_sku(sku) is not None else "raw"
+    return _raw_color_fields(sku.color_name, sku.color_hex, color_source=source)
+
+
+def _raw_color_fields(color_name: Any, color_hex: Any, *, color_source: str = "raw") -> dict[str, Any]:
+    return {
+        "color_name": color_name,
+        "color_hex": color_hex,
+        "color_value": color_hex,
+        "metadata": {"color_source": color_source},
+    }
+
+
+def _official_match_for_sku(sku: FilamentSku):
+    type_series = sku.type_series
+    brand = type_series.brand if type_series else None
+    return resolve_bambu_official_color(
+        brand_name=brand.name if brand else None,
+        brand_aliases=brand.aliases if brand else [],
+        material=type_series.material_type if type_series else None,
+        series=type_series.series_name if type_series else None,
+        tray_info_idx=sku.tray_info_idx,
+        color_hex=sku.color_hex,
+        color_name=sku.color_name,
+    )
+
+
+def _manual_mapping_for_sku(sku: FilamentSku) -> FilamentColorMapping | None:
+    if sku.type_series_id is None:
+        return None
+    session = object_session(sku)
+    if session is None:
+        return None
+    stmt = select(FilamentColorMapping).where(FilamentColorMapping.type_series_id == sku.type_series_id)
+    if sku.color_hex:
+        row = session.scalars(stmt.where(FilamentColorMapping.color_hex == sku.color_hex).limit(1)).first()
+        if row is not None:
+            return row
+    if sku.color_name:
+        return session.scalars(
+            stmt.where(func.lower(FilamentColorMapping.color_name) == str(sku.color_name).lower()).limit(1)
+        ).first()
+    return None

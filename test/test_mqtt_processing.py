@@ -81,8 +81,9 @@ def test_remain_minus_one_with_rfid_payload_attaches_spool(api_client, printer_p
     assert spools[0]["current_tray_id"] == "0"
     assert spools[0]["last_ams_remain_percent"] is None
     assert spools[0]["config"]["ams_raw"]["remain"] == -1
-    assert spools[0]["config"]["needs_sku_review"] is True
-    assert any(item["event_type"] == "filament.spool.pending_confirmation" for item in api_client.get("/api/debug/events").json())
+    assert spools[0]["sku_id"] is not None
+    assert spools[0]["config"].get("needs_sku_review") is None
+    assert not any(item["event_type"] == "filament.spool.pending_confirmation" for item in api_client.get("/api/debug/events").json())
 
 
 def test_state_machine_deduplicates_repeated_push_status(api_client, printer_payload, fixture_dir) -> None:

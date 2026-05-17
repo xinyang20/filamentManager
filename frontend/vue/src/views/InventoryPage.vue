@@ -63,7 +63,8 @@ const {
   filamentInventorySummary,
   filamentSkuColorStateOptions,
   filamentSkuFilterBrandOptions,
-  filamentSkuFilterTypeSeriesOptions,
+  filamentSkuFilterMaterialOptions,
+  filamentSkuFilterSeriesOptions,
   filamentSkuFilters,
   filamentSkuLabel,
   filamentSkuWeightOptions,
@@ -103,6 +104,8 @@ const {
   openFilamentSpoolDialog,
   openFilamentTypeSeriesCreate,
   openSealedStockAdjust,
+  officialColorPalette,
+  officialColorTypeLabel,
   printerDisplayName,
   resetFilamentSkuFilters,
   selectedFilamentSpoolId,
@@ -112,6 +115,7 @@ const {
   sortedFilamentBrands,
   sortedFilamentColorMappingGaps,
   sortedFilamentColorMappings,
+  sortedBambuOfficialColorMappings,
   sortedFilamentOpenedUnusedSpools,
   sortedFilamentStockSkus,
   sortedFilamentTypeSeries,
@@ -452,7 +456,8 @@ const {
               <input v-model="filamentSkuFilters.search" :placeholder="t('inventory.searchSku')" />
             </label>
             <AppSelect v-model="filamentSkuFilters.brand_id" :options="filamentSkuFilterBrandOptions" />
-            <AppSelect v-model="filamentSkuFilters.type_series_id" :options="filamentSkuFilterTypeSeriesOptions" />
+            <AppSelect v-model="filamentSkuFilters.material_type" :options="filamentSkuFilterMaterialOptions" />
+            <AppSelect v-model="filamentSkuFilters.series_name" :options="filamentSkuFilterSeriesOptions" />
             <AppSelect v-model="filamentSkuFilters.nominal_weight_g" :options="filamentSkuWeightOptions" />
             <AppSelect v-model="filamentSkuFilters.color_state" :options="filamentSkuColorStateOptions" />
             <button class="secondary" type="button" @click="resetFilamentSkuFilters">{{ t("common.clear") }}</button>
@@ -510,7 +515,7 @@ const {
                 <tr v-for="mapping in sortedFilamentColorMappings" :key="mapping.id">
                   <td>{{ mapping.id }}</td>
                   <td>{{ formatCell(mapping.brand_name) }}</td>
-                  <td>{{ formatCell(mapping.material_type || mapping.material) }} / {{ formatCell(mapping.series_name || mapping.series) }}</td>
+                  <td>{{ filamentTypeSeriesLabel(mapping) }}</td>
                   <td><span class="swatch" :style="{ background: filamentColor(mapping.color_hex || mapping.hex_value) }"></span><span class="mono">{{ mapping.color_hex || mapping.hex_value }}</span></td>
                   <td>{{ mapping.color_name || mapping.official_name }}</td>
                   <td>{{ formatCell(mapping.note) }}</td>
@@ -544,6 +549,47 @@ const {
                   <td>{{ formatCell(row.color_name) }}</td>
                   <td><span class="swatch" :style="{ background: filamentColor(row.color_hex) }"></span><span class="mono">{{ formatCell(row.color_hex) }}</span></td>
                   <td>{{ row.missing.join(", ") }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+        </template>
+
+        <template v-else-if="inventoryPage === 'officialColors'">
+        <section class="panel">
+          <div class="panel-header"><h3>{{ t("inventory.officialColorMappings") }}</h3><Database :size="18" /></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('officialColorMappings', 'id')">{{ t("inventory.officialColorCode") }} <span>{{ inventorySortIndicator("officialColorMappings", "id") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('officialColorMappings', 'material')">{{ t("table.material") }} <span>{{ inventorySortIndicator("officialColorMappings", "material") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('officialColorMappings', 'tray')">{{ t("inventory.trayInfoIdx") }} <span>{{ inventorySortIndicator("officialColorMappings", "tray") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('officialColorMappings', 'type')">{{ t("inventory.officialColorType") }} <span>{{ inventorySortIndicator("officialColorMappings", "type") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('officialColorMappings', 'color')">{{ t("inventory.officialColorName") }} <span>{{ inventorySortIndicator("officialColorMappings", "color") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('officialColorMappings', 'en')">{{ t("inventory.officialColorNameEn") }} <span>{{ inventorySortIndicator("officialColorMappings", "en") }}</span></button></th>
+                <th><button class="sort-header" type="button" @click="toggleInventorySort('officialColorMappings', 'hex')">{{ t("inventory.hexValue") }} <span>{{ inventorySortIndicator("officialColorMappings", "hex") }}</span></button></th>
+              </tr></thead>
+              <tbody>
+                <tr v-if="!sortedBambuOfficialColorMappings.length"><td colspan="7" class="empty">{{ t("inventory.noOfficialColorMappings") }}</td></tr>
+                <tr v-for="mapping in sortedBambuOfficialColorMappings" :key="mapping.id">
+                  <td class="mono">{{ formatCell(mapping.official_color_code) }}</td>
+                  <td>{{ filamentTypeSeriesLabel(mapping) }}</td>
+                  <td class="mono">{{ formatCell(mapping.tray_info_idx) }}</td>
+                  <td>{{ officialColorTypeLabel(mapping.official_color_type) }}</td>
+                  <td>{{ filamentColorDisplay(mapping.color_hex || mapping.hex_value, mapping.color_name || mapping.official_name, mapping) }}</td>
+                  <td>{{ formatCell(mapping.official_color_names?.en) }}</td>
+                  <td>
+                    <span class="swatch-row">
+                      <span
+                        v-for="color in officialColorPalette(mapping)"
+                        :key="`${mapping.id}-${color}`"
+                        class="swatch"
+                        :style="{ background: filamentColor(color) }"
+                      ></span>
+                    </span>
+                    <span class="mono">{{ officialColorPalette(mapping).join(", ") }}</span>
+                  </td>
                 </tr>
               </tbody>
             </table>

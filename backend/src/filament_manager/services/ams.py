@@ -12,6 +12,12 @@ from sqlalchemy.orm import Session
 from filament_manager.core.security import redact_sensitive
 from filament_manager.db import session as db_session
 from filament_manager.db.models import AmsLabel, AmsSlot, AmsSlotHistorySample, AmsUnit, DeviceMetricSample, DeviceStatusSnapshot, _slot_state_name, utc_now
+from filament_manager.services.bambu_filament_catalog import (
+    official_color_read_fields,
+    is_bambu_brand_name,
+    is_known_bambu_fila_id,
+    resolve_bambu_official_color,
+)
 
 HISTORY_DEDUPLICATION_WINDOW = timedelta(seconds=60)
 HISTORY_RETENTION_PERIOD = timedelta(days=30)
@@ -250,6 +256,7 @@ def _unknown_unit_overview(slots: list[AmsSlot], active: AmsSlot | None) -> dict
 def _slot_payload(slot: AmsSlot, *, display_name: str | None = None, active: AmsSlot | None = None) -> dict[str, Any]:
     location_label = _location_label(slot, display_name)
     context = _filament_context(slot)
+    color_fields = _slot_official_color_fields(slot, context)
     return {
         "id": slot.id,
         "printer_id": slot.printer_id,
@@ -263,7 +270,7 @@ def _slot_payload(slot: AmsSlot, *, display_name: str | None = None, active: Ams
         "slot_state": slot.slot_state,
         "material": slot.material,
         "series": slot.series,
-        "color": slot.color,
+        "color": color_fields.get("color_hex") or slot.color,
         "remain": slot.remain,
         "tray_uuid": slot.tray_uuid,
         "tag_uid": slot.tag_uid,
@@ -291,6 +298,7 @@ def _slot_payload(slot: AmsSlot, *, display_name: str | None = None, active: Ams
         "tray_state_name": slot.tray_state_name,
         "raw": redact_sensitive(slot.raw),
         "updated_at": slot.updated_at,
+        **color_fields.get("metadata", {}),
     }
 
 
@@ -317,6 +325,7 @@ def _active_slot_from_snapshot(snapshot: DeviceStatusSnapshot | None, slots: lis
 
 def _active_slot_payload(slot: AmsSlot) -> dict[str, Any]:
     context = _filament_context(slot)
+    color_fields = _slot_official_color_fields(slot, context)
     return {
         "ams_id": slot.ams_id,
         "tray_id": slot.tray_id,
@@ -325,7 +334,7 @@ def _active_slot_payload(slot: AmsSlot) -> dict[str, Any]:
         "global_tray_id": _global_tray_id(slot),
         "location_label": _location_label(slot, None),
         "material": slot.material,
-        "color": slot.color,
+        "color": color_fields.get("color_hex") or slot.color,
         "filament_brand_id": context["brand_id"],
         "filament_brand_name": context["brand_name"],
         "filament_material": context["material"],
@@ -333,6 +342,7 @@ def _active_slot_payload(slot: AmsSlot) -> dict[str, Any]:
         "tray_id_name": slot.tray_id_name,
         "tray_color_name": slot.tray_color_name,
         "remain": slot.remain,
+        **color_fields.get("metadata", {}),
     }
 
 
@@ -345,8 +355,35 @@ def _filament_context(slot: AmsSlot) -> dict[str, Any]:
     return {
         "brand_id": brand.id if brand else None,
         "brand_name": brand.name if brand else None,
+        "brand_aliases": brand.aliases if brand else [],
         "material": type_series.material_type,
         "series": type_series.series_name,
+    }
+
+
+def _slot_official_color_fields(slot: AmsSlot, context: dict[str, Any]) -> dict[str, Any]:
+    raw = slot.raw if isinstance(slot.raw, dict) else {}
+    brand_name = context.get("brand_name") or raw.get("tray_brand") or raw.get("brand") or raw.get("filament_brand")
+    assume_bambu = is_known_bambu_fila_id(slot.tray_info_idx) or is_bambu_brand_name(brand_name)
+    match = resolve_bambu_official_color(
+        brand_name=brand_name,
+        brand_aliases=context.get("brand_aliases") or [],
+        material=context.get("material") or slot.material,
+        series=context.get("series") or slot.series,
+        tray_info_idx=slot.tray_info_idx,
+        color_hex=slot.color,
+        color_name=slot.tray_color_name,
+        raw=raw,
+        assume_bambu=assume_bambu,
+    )
+    if match is None:
+        return {"metadata": {"color_source": "raw"}}
+    fields = official_color_read_fields(match)
+    return {
+        "color_name": fields.pop("color_name"),
+        "color_hex": fields.pop("color_hex"),
+        "color_value": fields.pop("color_value"),
+        "metadata": fields,
     }
 
 

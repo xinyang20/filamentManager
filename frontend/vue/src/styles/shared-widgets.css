@@ -755,6 +755,18 @@ tbody tr:last-child td {
   vertical-align: -2px;
 }
 
+.swatch-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-right: 7px;
+  vertical-align: -2px;
+}
+
+.swatch-row .swatch {
+  margin-right: 0;
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

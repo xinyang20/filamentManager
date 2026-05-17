@@ -28,7 +28,7 @@ export const viewKeys = [
 ] as const;
 
 export type ViewKey = (typeof viewKeys)[number];
-export type InventoryPageKey = "stock" | "history" | "brands" | "types" | "skus" | "colors";
+export type InventoryPageKey = "stock" | "history" | "brands" | "types" | "skus" | "colors" | "officialColors";
 export type NavGroupKey = "monitoring" | "assets" | "system";
 export type SortDirection = "asc" | "desc";
 export type InventoryDialogKey =

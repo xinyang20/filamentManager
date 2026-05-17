@@ -18,7 +18,7 @@ describe("useDashboardStore", () => {
       }
       if (path === "/printers/1/capabilities") return { model_family: "x1", known: true, recommended_maintenance: [], visible_fields: [], evidence: {} };
       if (path === "/printers/1/camera/capabilities") return { available: true, stream_path: "/camera/mjpeg" };
-      if (path === "/filament/color-mappings") return [];
+      if (path === "/filament/effective-color-mappings") return [];
       throw new Error(`Unexpected request: ${path}`);
     });
     const printers = usePrintersStore();

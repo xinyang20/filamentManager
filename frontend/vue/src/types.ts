@@ -440,13 +440,20 @@ export interface FilamentColorMapping {
   series_name?: string | null;
   material?: string | null;
   series?: string | null;
+  tray_info_idx?: string | null;
   color_name?: string | null;
   color_hex?: string | null;
   hex_value?: string | null;
   official_name?: string | null;
+  color_source?: "bambu_official" | "manual" | "raw" | string | null;
+  official_color_code?: string | null;
+  official_color_type?: "single" | "multi" | "gradient" | string | null;
+  official_color_names?: Record<string, string> | null;
+  official_colors?: string[] | null;
+  official_match_ambiguous?: boolean | null;
   note?: string | null;
-  created_at: string;
-  updated_at: string;
+  created_at?: string | null;
+  updated_at?: string | null;
 }
 
 export interface FilamentSku {
@@ -471,6 +478,12 @@ export interface FilamentSku {
   brands?: Record<string, any>[];
   opened_spool_count?: number;
   ams_spool_count?: number;
+  color_source?: "bambu_official" | "manual" | "raw" | string | null;
+  official_color_code?: string | null;
+  official_color_type?: "single" | "multi" | "gradient" | string | null;
+  official_color_names?: Record<string, string> | null;
+  official_colors?: string[] | null;
+  official_match_ambiguous?: boolean | null;
   created_at: string;
   updated_at: string;
 }
@@ -514,6 +527,12 @@ export interface FilamentSpool {
   manual_quantity_protected: boolean;
   last_weighed_g?: number | null;
   last_ams_remain_percent?: number | null;
+  color_source?: "bambu_official" | "manual" | "raw" | string | null;
+  official_color_code?: string | null;
+  official_color_type?: "single" | "multi" | "gradient" | string | null;
+  official_color_names?: Record<string, string> | null;
+  official_colors?: string[] | null;
+  official_match_ambiguous?: boolean | null;
   note?: string | null;
   config?: Record<string, any>;
   created_at: string;

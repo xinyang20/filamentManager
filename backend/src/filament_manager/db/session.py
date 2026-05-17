@@ -1,5 +1,6 @@
 from collections.abc import Generator
 from datetime import datetime
+import logging
 from pathlib import Path
 import shutil
 import threading
@@ -15,6 +16,7 @@ from filament_manager.db.models import Base
 engine: Engine | None = None
 SessionLocal: sessionmaker[Session] | None = None
 sqlite_write_lock = threading.RLock()
+logger = logging.getLogger(__name__)
 
 
 def configure_database(database_url: str | None = None) -> Engine:
@@ -41,6 +43,8 @@ def create_schema() -> None:
     _reset_sqlite_inventory_schema_if_needed(engine)
     Base.metadata.create_all(bind=engine)
     _apply_sqlite_additive_migrations(engine)
+    _normalize_sqlite_filament_type_series(engine)
+    _ensure_bambu_official_sku_catalog()
     _repair_print_log_printer_ids()
 
 
@@ -71,6 +75,28 @@ def _repair_print_log_printer_ids() -> None:
     try:
         with sqlite_write_lock:
             repair_print_log_printer_ids_from_raw_topics(db)
+    finally:
+        db.close()
+
+
+def _ensure_bambu_official_sku_catalog() -> None:
+    if SessionLocal is None:
+        return
+    from filament_manager.services.bambu_filament_catalog import ensure_bambu_official_sku_catalog
+
+    db = SessionLocal()
+    try:
+        with sqlite_write_lock:
+            summary = ensure_bambu_official_sku_catalog(db)
+        if (
+            summary.created_brand_count
+            or summary.created_type_series_count
+            or summary.filled_empty_spool_weight_count
+            or summary.created_sku_count
+            or summary.updated_sku_count
+            or summary.merged_duplicate_sku_count
+        ):
+            logger.info("Bambu official SKU catalog ensured: %s", summary.to_dict())
     finally:
         db.close()
 
@@ -119,6 +145,109 @@ def _apply_sqlite_additive_migrations(db_engine: Engine) -> None:
     with db_engine.begin() as connection:
         for name, ddl in missing:
             connection.execute(text(f"ALTER TABLE device_status_snapshots ADD COLUMN {name} {ddl}"))
+
+
+def _normalize_sqlite_filament_type_series(db_engine: Engine) -> None:
+    if db_engine.dialect.name != "sqlite":
+        return
+    inspector = inspect(db_engine)
+    table_names = set(inspector.get_table_names())
+    required_tables = {"filament_type_series", "filament_skus", "filament_color_mappings"}
+    if not required_tables.issubset(table_names):
+        return
+    from filament_manager.services.filament_naming import normalize_type_series_identity
+
+    with db_engine.begin() as connection:
+        rows = [
+            dict(row)
+            for row in connection.execute(
+                text("SELECT id, brand_id, material_type, series_name FROM filament_type_series ORDER BY id")
+            ).mappings()
+        ]
+        groups: dict[tuple[int, str, str], list[dict[str, object]]] = {}
+        for row in rows:
+            material, series = normalize_type_series_identity(row["material_type"], row["series_name"])
+            row["normalized_material_type"] = material
+            row["normalized_series_name"] = series
+            groups.setdefault((int(row["brand_id"]), material.lower(), series.lower()), []).append(row)
+
+        for group_rows in groups.values():
+            canonical = _canonical_type_series_row(group_rows)
+            canonical_id = int(canonical["id"])
+            for row in group_rows:
+                source_id = int(row["id"])
+                if source_id == canonical_id:
+                    continue
+                _move_sqlite_color_mappings(connection, source_id=source_id, target_id=canonical_id)
+                connection.execute(
+                    text("UPDATE filament_skus SET type_series_id = :target_id WHERE type_series_id = :source_id"),
+                    {"target_id": canonical_id, "source_id": source_id},
+                )
+                connection.execute(
+                    text("DELETE FROM filament_type_series WHERE id = :source_id"),
+                    {"source_id": source_id},
+                )
+            material = str(canonical["normalized_material_type"])
+            series = str(canonical["normalized_series_name"])
+            if canonical["material_type"] != material or canonical["series_name"] != series:
+                connection.execute(
+                    text(
+                        "UPDATE filament_type_series "
+                        "SET material_type = :material_type, series_name = :series_name "
+                        "WHERE id = :id"
+                    ),
+                    {"id": canonical_id, "material_type": material, "series_name": series},
+                )
+
+
+def _canonical_type_series_row(rows: list[dict[str, object]]) -> dict[str, object]:
+    normalized_rows = [
+        row
+        for row in rows
+        if row["material_type"] == row["normalized_material_type"]
+        and row["series_name"] == row["normalized_series_name"]
+    ]
+    return min(normalized_rows or rows, key=lambda row: int(row["id"]))
+
+
+def _move_sqlite_color_mappings(connection: object, *, source_id: int, target_id: int) -> None:
+    mappings = [
+        dict(row)
+        for row in connection.execute(
+            text(
+                "SELECT id, brand_id, color_name, color_hex "
+                "FROM filament_color_mappings WHERE type_series_id = :source_id ORDER BY id"
+            ),
+            {"source_id": source_id},
+        ).mappings()
+    ]
+    for mapping in mappings:
+        existing = connection.execute(
+            text(
+                "SELECT id FROM filament_color_mappings "
+                "WHERE brand_id = :brand_id "
+                "AND type_series_id = :target_id "
+                "AND lower(color_name) = lower(:color_name) "
+                "AND color_hex = :color_hex "
+                "LIMIT 1"
+            ),
+            {
+                "brand_id": mapping["brand_id"],
+                "target_id": target_id,
+                "color_name": mapping["color_name"],
+                "color_hex": mapping["color_hex"],
+            },
+        ).first()
+        if existing is not None:
+            connection.execute(
+                text("DELETE FROM filament_color_mappings WHERE id = :id"),
+                {"id": mapping["id"]},
+            )
+            continue
+        connection.execute(
+            text("UPDATE filament_color_mappings SET type_series_id = :target_id WHERE id = :id"),
+            {"target_id": target_id, "id": mapping["id"]},
+        )
 
 
 def _reset_sqlite_inventory_schema_if_needed(db_engine: Engine) -> None:

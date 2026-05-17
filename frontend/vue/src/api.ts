@@ -39,7 +39,7 @@ function extractApiError(body: unknown, fallback: string): string {
         const existing = data.existing_sku || {};
         const label = existing.label || [existing.brand_name, existing.material, existing.series, existing.color_name || existing.color_hex]
           .filter(Boolean)
-          .join(" / ");
+          .join(" · ");
         return `重复的耗材 SKU：已存在 SKU #${existing.id || "?"}${label ? `（${label}）` : ""}。请编辑已有 SKU 或调整它的未开封库存，或修改颜色、克重、线径等信息后再保存。`;
       }
       if (typeof data.message === "string") return data.message;

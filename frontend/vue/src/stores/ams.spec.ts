@@ -19,7 +19,7 @@ describe("useAmsStore", () => {
       }
       if (path === "/printers/1/ams/slots") return [{ ams_id: "0", tray_id: "0", material: "PLA" }];
       if (path === "/events?printer_id=1&limit=50") return [{ id: 1, source: "mqtt", type: "ams.slot.updated", event_type: "ams.slot.updated", severity: "info", message: "updated", created_at: "2026-05-06T00:00:00Z" }];
-      if (path === "/filament/color-mappings") return [{ id: 1, color_hex: "#ffffff", created_at: "2026-05-06T00:00:00Z", updated_at: "2026-05-06T00:00:00Z" }];
+      if (path === "/filament/effective-color-mappings") return [{ id: 1, color_hex: "#ffffff", created_at: "2026-05-06T00:00:00Z", updated_at: "2026-05-06T00:00:00Z" }];
       if (path === "/printers/1/ams/0/sensor-history?hours=24") return { printer_id: 1, ams_id: "0", hours: 24, points: [{ sampled_at: "2026-05-06T00:00:00Z", temperature: 30, humidity: 20 }], temperature: {}, humidity: {} };
       throw new Error(`Unexpected request: ${path}`);
     });
@@ -32,7 +32,7 @@ describe("useAmsStore", () => {
     expect(store.amsSlots).toHaveLength(1);
     expect(store.amsSensorHistories["0"].points).toHaveLength(1);
     expect(useEventsStore().events).toHaveLength(1);
-    expect(useInventoryStore().filamentColorMappings).toHaveLength(1);
+    expect(useInventoryStore().effectiveFilamentColorMappings).toHaveLength(1);
     expect(requestPaths(fetchMock)).toContain("/printers/1/ams/overview");
   });
 
@@ -63,7 +63,7 @@ describe("useAmsStore", () => {
       }
       if (path === "/printers/2/ams/slots") return [];
       if (path === "/events?printer_id=2&limit=50") return [];
-      if (path === "/filament/color-mappings") return [];
+      if (path === "/filament/effective-color-mappings") return [];
       if (path === "/printers/2/ams/128/sensor-history?hours=24") return { printer_id: 2, ams_id: "128", hours: 24, points: [], temperature: {}, humidity: {} };
       throw new Error(`Unexpected request: ${path}`);
     });

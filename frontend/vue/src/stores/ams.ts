@@ -62,13 +62,13 @@ export const useAmsStore = defineStore("ams", () => {
       apiRequest<AmsOverview>(`/printers/${printersStore().selectedPrinterId}/ams/overview`),
       apiRequest<Record<string, any>[]>(`/printers/${printersStore().selectedPrinterId}/ams/slots`),
       apiRequest<UnifiedEvent[]>(`/events?printer_id=${printersStore().selectedPrinterId}&limit=50`),
-      apiRequest<FilamentColorMapping[]>("/filament/color-mappings"),
+      apiRequest<FilamentColorMapping[]>("/filament/effective-color-mappings"),
     ]);
     stateSnapshot.value = stateResult;
     amsOverview.value = overviewResult;
     amsSlots.value = slotResult;
     eventsStore().events = eventResult;
-    inventoryStore().filamentColorMappings = colorMappingResult;
+    inventoryStore().effectiveFilamentColorMappings = colorMappingResult;
     for (const unit of overviewResult.units) {
       amsLabelDrafts[unit.ams_id] = unit.display_name || "";
       if (!unit.display_name) amsLabelEditing[unit.ams_id] = false;

@@ -74,7 +74,15 @@ export function resolveInitialInventoryPage(
   if (view === "filamentSkus") return "skus";
   if (view === "filamentSpools") return "stock";
   const stored = storage.getItem("filamentManager.inventoryPage");
-  if (stored === "stock" || stored === "brands" || stored === "types" || stored === "skus" || stored === "colors") return stored;
+  if (
+    stored === "stock" ||
+    stored === "history" ||
+    stored === "brands" ||
+    stored === "types" ||
+    stored === "skus" ||
+    stored === "colors" ||
+    stored === "officialColors"
+  ) return stored;
   return "stock";
 }
 

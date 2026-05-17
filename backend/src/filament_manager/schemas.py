@@ -141,6 +141,12 @@ class AmsSlotRead(BaseModel):
     state_code: Any | None = None
     state_name: str | None = None
     tray_state_name: str | None = None
+    color_source: str | None = None
+    official_color_code: str | None = None
+    official_color_type: str | None = None
+    official_color_names: dict[str, str] | None = None
+    official_colors: list[str] | None = None
+    official_match_ambiguous: bool | None = None
     raw: dict[str, Any]
     updated_at: datetime
 
@@ -362,6 +368,12 @@ class FilamentSkuRead(BaseModel):
     brands: list[dict[str, Any]] = Field(default_factory=list)
     opened_spool_count: int = 0
     ams_spool_count: int = 0
+    color_source: str | None = None
+    official_color_code: str | None = None
+    official_color_type: str | None = None
+    official_color_names: dict[str, str] | None = None
+    official_colors: list[str] | None = None
+    official_match_ambiguous: bool | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -470,6 +482,12 @@ class FilamentSpoolRead(BaseModel):
     manual_quantity_protected: bool = False
     last_weighed_g: float | None = None
     last_ams_remain_percent: int | None = None
+    color_source: str | None = None
+    official_color_code: str | None = None
+    official_color_type: str | None = None
+    official_color_names: dict[str, str] | None = None
+    official_colors: list[str] | None = None
+    official_match_ambiguous: bool | None = None
     note: str | None
     config: dict[str, Any]
     created_at: datetime
@@ -519,20 +537,27 @@ class FilamentColorMappingUpdate(BaseModel):
 
 class FilamentColorMappingRead(BaseModel):
     id: int
-    brand_id: int
+    brand_id: int | None = None
     brand_name: str | None = None
-    type_series_id: int
+    type_series_id: int | None = None
     material_type: str | None = None
     series_name: str | None = None
     material: str | None = None
     series: str | None = None
+    tray_info_idx: str | None = None
     color_name: str
     color_hex: str
     hex_value: str | None = None
     official_name: str | None = None
     note: str | None
-    created_at: datetime
-    updated_at: datetime
+    color_source: str | None = None
+    official_color_code: str | None = None
+    official_color_type: str | None = None
+    official_color_names: dict[str, str] | None = None
+    official_colors: list[str] | None = None
+    official_match_ambiguous: bool | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
