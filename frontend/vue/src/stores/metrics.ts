@@ -24,7 +24,7 @@ export const useMetricsStore = defineStore("metrics", () => {
   ]);
 
   const metricGroups = computed(() => ({
-    temperatures: metrics.value.filter((item) => item.metric.startsWith("temperature.")),
+    temperatures: visibleTemperatureMetrics(metrics.value.filter((item) => item.metric.startsWith("temperature."))),
     fans: metrics.value.filter((item) => item.metric.startsWith("fan.") && item.metric !== "fan.fan_gear.percent"),
     ams: metrics.value.filter((item) => item.metric.startsWith("ams.")),
   }));
@@ -47,7 +47,7 @@ export const useMetricsStore = defineStore("metrics", () => {
         )
       ),
     );
-    metrics.value = results.flat();
+    metrics.value = results.flat().map(canonicalMetricSample);
   }
 
 
@@ -64,6 +64,7 @@ export const useMetricsStore = defineStore("metrics", () => {
 
 
   function metricLabel(metric: string) {
+    metric = canonicalMetricName(metric);
     const [group, ...rest] = metric.split(".");
     if (group === "ams" && rest.length > 1) {
       const field = rest.slice(1).join(".");
@@ -79,11 +80,39 @@ export const useMetricsStore = defineStore("metrics", () => {
   }
 
 
+  function visibleTemperatureMetrics(items: MetricSample[]) {
+    const hasHotendMetrics = items.some((item) =>
+      item.metric.startsWith("temperature.hotend_")
+      || item.metric.startsWith("temperature.right_hotend")
+      || item.metric.startsWith("temperature.left_hotend")
+    );
+    if (!hasHotendMetrics) return items;
+    return items.filter((item) => item.metric !== "temperature.nozzle" && item.metric !== "temperature.nozzle_target");
+  }
+
+
+  function canonicalMetricSample(item: MetricSample): MetricSample {
+    const metric = canonicalMetricName(item.metric);
+    return metric === item.metric ? item : { ...item, metric };
+  }
+
+
+  function canonicalMetricName(metric: string) {
+    const mapping: Record<string, string> = {
+      "temperature.hotend_a": "temperature.right_hotend",
+      "temperature.hotend_a_target": "temperature.right_hotend_target",
+      "temperature.hotend_b": "temperature.left_hotend",
+      "temperature.hotend_b_target": "temperature.left_hotend_target",
+    };
+    return mapping[metric] || metric;
+  }
+
+
   function fanMetricLabel(source: string) {
     const mapping: Record<string, string> = {
       cooling_fan_speed: "toolhead_fan",
       big_fan1_speed: "right_aux_fan",
-      big_fan2_speed: "exhaust_fan",
+      big_fan2_speed: "chamber_fan",
       heatbreak_fan_speed: "heatbreak_fan",
       chamber_fan_speed: "chamber_fan",
       aux_part_fan_speed: "aux_part_fan",
@@ -104,6 +133,9 @@ export const useMetricsStore = defineStore("metrics", () => {
     metricSince,
     metricLabel,
     fanMetricLabel,
+    visibleTemperatureMetrics,
+    canonicalMetricName,
+    canonicalMetricSample,
   };
 });
 

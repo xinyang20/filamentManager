@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 import logging
+from threading import Thread
 
 from fastapi import FastAPI
 from sqlalchemy import select
@@ -21,7 +22,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         configure_database(database_url)
         create_schema()
-        _auto_connect_saved_printers()
+        _schedule_auto_connect_saved_printers()
         try:
             yield
         finally:
@@ -33,6 +34,11 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
 
 app = create_app()
+
+
+def _schedule_auto_connect_saved_printers() -> None:
+    worker = Thread(target=_auto_connect_saved_printers, name="printer-auto-connect", daemon=True)
+    worker.start()
 
 
 def _auto_connect_saved_printers() -> None:

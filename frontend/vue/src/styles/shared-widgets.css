@@ -465,6 +465,11 @@
     linear-gradient(135deg, #eff4f1, #d9e2dd);
 }
 
+.ams-visual-unit.collapsed {
+  gap: 6px;
+  padding: 8px;
+}
+
 .ams-visual-head {
   display: flex;
   align-items: center;
@@ -472,7 +477,7 @@
   gap: 8px;
 }
 
-.ams-visual-head div {
+.ams-visual-head-main {
   min-width: 0;
   display: flex;
   align-items: baseline;
@@ -500,6 +505,85 @@
   text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.ams-visual-head-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.ams-visual-head-actions small {
+  flex: 1 1 auto;
+}
+
+.ams-compact-slots {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.ams-compact-slots .empty {
+  grid-column: 1 / -1;
+}
+
+.ams-compact-slot {
+  --filament-color: #d7dce2;
+  min-width: 0;
+  height: 32px;
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr);
+  align-items: center;
+  gap: 5px;
+  padding: 0 7px;
+  border: 1px solid rgba(97, 112, 105, 0.22);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.ams-compact-slot.active {
+  border-color: rgba(0, 174, 66, 0.68);
+  background: rgba(0, 174, 66, 0.1);
+}
+
+.ams-compact-slot.empty {
+  color: var(--faint);
+  background: rgba(247, 249, 248, 0.62);
+}
+
+.ams-compact-color {
+  width: 10px;
+  height: 10px;
+  border: 1px solid rgba(67, 76, 72, 0.2);
+  border-radius: 999px;
+  background: var(--filament-color);
+}
+
+.ams-compact-material,
+.ams-compact-remain {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ams-compact-material,
+.ams-compact-remain {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 720;
+}
+
+.ams-compact-slot.empty .ams-compact-color {
+  opacity: 0.42;
+  filter: grayscale(0.5);
+}
+
+.ams-compact-slot.empty .ams-compact-material,
+.ams-compact-slot.empty .ams-compact-remain {
+  color: var(--faint);
 }
 
 .ams-visual-slots {
@@ -584,6 +668,12 @@
   border: 2px solid rgba(255, 255, 255, 0.7);
   border-radius: 999px;
   background: rgba(38, 45, 42, 0.22);
+}
+
+@media (max-width: 860px) {
+  .ams-compact-slots {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .coverage-row {

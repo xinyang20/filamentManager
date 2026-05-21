@@ -6,12 +6,14 @@ from typing import Any
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from filament_manager.db.models import DeviceMetricSample, RawMqttMessage, utc_now
+from filament_manager.db.models import AppSetting, DeviceMetricSample, RawMqttMessage, utc_now
 from filament_manager.mqtt.parser import extract_print
 from filament_manager.services.fans import fan_percent
+from filament_manager.services.hotends import hotend_temperature_readings
 
 DEDUPLICATION_WINDOW = timedelta(seconds=60)
 RETENTION_PERIOD = timedelta(days=30)
+DUAL_NOZZLE_METRIC_BACKFILL_SETTING = "dual_nozzle_metric_backfill_v1_completed_at"
 
 
 def record_metric_samples_from_push_status(
@@ -43,12 +45,23 @@ def _samples_from_push_status(payload: dict[str, Any]) -> list[dict[str, Any]]:
     for source, metric, unit in (
         ("bed_temper", "temperature.bed", "celsius"),
         ("bed_target_temper", "temperature.bed_target", "celsius"),
-        ("nozzle_temper", "temperature.nozzle", "celsius"),
-        ("nozzle_target_temper", "temperature.nozzle_target", "celsius"),
         ("chamber_temper", "temperature.chamber", "celsius"),
         ("mc_target_cham", "temperature.chamber_target", "celsius"),
     ):
         _append_numeric_sample(samples, metric, print_section.get(source), unit=unit)
+
+    nozzle_readings = hotend_temperature_readings(print_section)
+    if len(nozzle_readings) >= 2:
+        for item in nozzle_readings:
+            details = {"raw_extruder_id": item.get("raw_extruder_id"), "source": item.get("source")}
+            _append_numeric_sample(samples, f"temperature.{item['key']}", item.get("current"), unit="celsius", details=details)
+            _append_numeric_sample(samples, f"temperature.{item['key']}_target", item.get("target"), unit="celsius", details=details)
+    else:
+        for source, metric, unit in (
+            ("nozzle_temper", "temperature.nozzle", "celsius"),
+            ("nozzle_target_temper", "temperature.nozzle_target", "celsius"),
+        ):
+            _append_numeric_sample(samples, metric, print_section.get(source), unit=unit)
 
     for source in (
         "fan_gear",
@@ -96,6 +109,55 @@ def _samples_from_push_status(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 details=details,
             )
     return samples
+
+
+def backfill_dual_nozzle_metric_samples(db: Session) -> dict[str, Any]:
+    if db.get(AppSetting, DUAL_NOZZLE_METRIC_BACKFILL_SETTING) is not None:
+        return {"skipped": True, "inserted": 0}
+
+    cutoff = utc_now() - RETENTION_PERIOD
+    raw_rows = list(
+        db.scalars(
+            select(RawMqttMessage)
+            .where(RawMqttMessage.command == "push_status", RawMqttMessage.received_at >= cutoff)
+            .order_by(RawMqttMessage.id)
+        ).all()
+    )
+    inserted = 0
+    for raw in raw_rows:
+        samples = [sample for sample in _samples_from_push_status(raw.payload) if _is_dual_hotend_metric(sample["metric"])]
+        if not samples:
+            continue
+        existing_metrics = set(
+            db.scalars(select(DeviceMetricSample.metric).where(DeviceMetricSample.raw_message_id == raw.id)).all()
+        )
+        for sample in samples:
+            if sample["metric"] in existing_metrics:
+                continue
+            db.add(
+                DeviceMetricSample(
+                    printer_id=raw.printer_id,
+                    metric=sample["metric"],
+                    value_float=sample["value_float"],
+                    value_text=sample["value_text"],
+                    unit=sample["unit"],
+                    raw_message_id=raw.id,
+                    details=sample["details"],
+                    sampled_at=raw.received_at,
+                )
+            )
+            inserted += 1
+    db.add(AppSetting(key=DUAL_NOZZLE_METRIC_BACKFILL_SETTING, value=utc_now().isoformat()))
+    db.flush()
+    return {"skipped": False, "inserted": inserted}
+
+
+def _is_dual_hotend_metric(metric: str) -> bool:
+    return (
+        metric.startswith("temperature.hotend_")
+        or metric.startswith("temperature.right_hotend")
+        or metric.startswith("temperature.left_hotend")
+    )
 
 
 def _insert_sample_if_changed(

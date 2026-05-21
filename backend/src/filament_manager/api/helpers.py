@@ -57,7 +57,7 @@ def metric_group_prefix(group: str | None) -> str | None:
 def bucket_metric_samples(rows: list[DeviceMetricSample], bucket: str) -> list[DeviceMetricSampleRead]:
     buckets: dict[tuple[str, datetime], list[DeviceMetricSample]] = {}
     for row in rows:
-        key = (row.metric, bucket_start(row.sampled_at, bucket))
+        key = (canonical_metric_name(row.metric), bucket_start(row.sampled_at, bucket))
         buckets.setdefault(key, []).append(row)
     aggregated: list[DeviceMetricSampleRead] = []
     for (metric, sampled_at), samples in sorted(buckets.items(), key=lambda item: (item[0][1], item[0][0])):
@@ -93,9 +93,26 @@ def bucket_start(value: datetime, bucket: str) -> datetime:
 def metric_sample_read(row: DeviceMetricSample) -> DeviceMetricSampleRead:
     read = DeviceMetricSampleRead.model_validate(row)
     value_float = metric_value_float(row)
-    if value_float == row.value_float:
+    metric = canonical_metric_name(row.metric)
+    if value_float == row.value_float and metric == row.metric:
         return read
-    return read.model_copy(update={"value_float": value_float, "value_text": str(value_float) if value_float is not None else None})
+    return read.model_copy(
+        update={
+            "metric": metric,
+            "value_float": value_float,
+            "value_text": str(value_float) if value_float is not None else None,
+        }
+    )
+
+
+def canonical_metric_name(metric: str) -> str:
+    mapping = {
+        "temperature.hotend_a": "temperature.right_hotend",
+        "temperature.hotend_a_target": "temperature.right_hotend_target",
+        "temperature.hotend_b": "temperature.left_hotend",
+        "temperature.hotend_b_target": "temperature.left_hotend_target",
+    }
+    return mapping.get(metric, metric)
 
 
 def metric_value_float(row: DeviceMetricSample) -> float | None:

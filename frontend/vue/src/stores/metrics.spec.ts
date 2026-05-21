@@ -46,4 +46,30 @@ describe("useMetricsStore", () => {
     expect(store.metricBucket()).toBe("hour");
     expect(requestPaths(fetchMock)[0]).toContain("bucket=hour");
   });
+
+  it("labels dual hotend temperature metrics", () => {
+    const store = useMetricsStore();
+
+    expect(store.metricLabel("temperature.right_hotend")).toBe("温度 · 右热端");
+    expect(store.metricLabel("temperature.right_hotend_target")).toBe("温度 · 右热端目标温度");
+  });
+
+  it("hides legacy nozzle metrics when hotend metrics are present", () => {
+    const store = useMetricsStore();
+    store.metrics = [
+      { id: 1, metric: "temperature.nozzle", value_float: 199, unit: "celsius", sampled_at: "2026-05-06T00:00:00Z" },
+      { id: 2, metric: "temperature.right_hotend", value_float: 220, unit: "celsius", sampled_at: "2026-05-06T00:00:00Z" },
+      { id: 3, metric: "temperature.bed", value_float: 60, unit: "celsius", sampled_at: "2026-05-06T00:00:00Z" },
+    ];
+
+    expect(store.metricGroups.temperatures.map((item) => item.metric)).toEqual(["temperature.right_hotend", "temperature.bed"]);
+  });
+
+  it("normalizes legacy hotend A/B metric names", () => {
+    const store = useMetricsStore();
+
+    expect(store.canonicalMetricName("temperature.hotend_a")).toBe("temperature.right_hotend");
+    expect(store.canonicalMetricSample({ id: 1, metric: "temperature.hotend_b", value_float: 184, sampled_at: "2026-05-06T00:00:00Z" }).metric).toBe("temperature.left_hotend");
+    expect(store.metricLabel("temperature.hotend_b_target")).toBe("温度 · 左热端目标温度");
+  });
 });

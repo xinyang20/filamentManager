@@ -43,6 +43,7 @@ import MetricChart from "../components/MetricChart.vue";
 const props = defineProps<{ ctx: AppViewContext }>();
 const {
   activeView,
+  compactHotendLabel,
   dashboard,
   formatCell,
   metrics,
@@ -57,6 +58,7 @@ const {
   summaryActiveHmsCount,
   summaryCoveragePercent,
   summaryLayerFraction,
+  summaryNozzleTemperatureRows,
   summaryProgress,
   summaryStage,
   summaryStatusLabel,
@@ -134,7 +136,13 @@ const {
             <div v-if="overviewControls.density !== 'compact'" class="fleet-metrics">
               <div>
                 <span>{{ t("dashboard.nozzle") }}</span>
-                <strong>{{ summaryTemperature(item, "nozzle") }}℃</strong>
+                <strong v-if="summaryNozzleTemperatureRows(item).length <= 1">{{ summaryNozzleTemperatureRows(item)[0]?.current !== undefined ? `${formatCell(summaryNozzleTemperatureRows(item)[0]?.current)}℃` : `${summaryTemperature(item, "nozzle")}℃` }}</strong>
+                <strong v-else class="fleet-hotends">
+                  <span v-for="hotend in summaryNozzleTemperatureRows(item)" :key="hotend.key">
+                    <em>{{ compactHotendLabel(hotend.key, hotend.label) }}</em>
+                    {{ formatCell(hotend.current) }}℃
+                  </span>
+                </strong>
               </div>
               <div>
                 <span>{{ t("dashboard.bed") }}</span>

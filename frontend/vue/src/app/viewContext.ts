@@ -7,5 +7,9 @@ export function composeViewContext(...fragments: Array<Record<string, any>>): Ap
 }
 
 export function appViewRefs(ctx: AppViewContext) {
-  return toRefs(ctx) as Record<string, any>;
+  const refs = toRefs(ctx) as Record<string, any>;
+  for (const [key, value] of Object.entries(ctx)) {
+    if (typeof value === "function") refs[key] = value;
+  }
+  return refs;
 }

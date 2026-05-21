@@ -56,8 +56,10 @@ const {
   coverage,
   coverageStatusRows,
   dashboard,
+  dashboardAmsCompactMode,
   dashboardAmsSummaryRows,
   dashboardAmsUnitRows,
+  dashboardAmsUnitCollapsed,
   dashboardHmsRows,
   dashboardPrintStageLabel,
   dashboardPrintStateLabel,
@@ -78,6 +80,7 @@ const {
   isSectionCollapsed,
   layerFraction,
   network,
+  nozzleTemperatureRows,
   openCameraLightbox,
   openHmsDetails,
   readableNetworkHardware,
@@ -89,6 +92,7 @@ const {
   temperaturePercent,
   temperatures,
   toggleSectionCollapsed,
+  toggleDashboardAmsUnitCollapsed,
 } = appViewRefs(props.ctx);
 </script>
 
@@ -142,8 +146,15 @@ const {
           </div>
           <div class="metric-card">
             <div class="metric-label">{{ t("dashboard.nozzle") }}</div>
-            <div class="metric-value">{{ formatCell(temperatures.nozzle) }}℃</div>
-            <div class="metric-foot">{{ t("dashboard.target") }} {{ formatCell(temperatures.nozzle_target) }}℃</div>
+            <div v-if="nozzleTemperatureRows.length <= 1" class="metric-value">{{ formatCell(nozzleTemperatureRows[0]?.current) }}℃</div>
+            <div v-if="nozzleTemperatureRows.length <= 1" class="metric-foot">{{ t("dashboard.target") }} {{ formatCell(nozzleTemperatureRows[0]?.target) }}℃</div>
+            <div v-else class="hotend-stack">
+              <div v-for="item in nozzleTemperatureRows" :key="item.key" class="hotend-line">
+                <span>{{ item.label }}</span>
+                <strong>{{ formatCell(item.current) }}℃</strong>
+                <small>{{ t("dashboard.target") }} {{ formatCell(item.target) }}℃</small>
+              </div>
+            </div>
           </div>
           <div class="metric-card">
             <div class="metric-label">{{ t("dashboard.bed") }}</div>
@@ -175,10 +186,10 @@ const {
               </div>
             </div>
             <div v-show="!isSectionCollapsed('dashboard.thermal')" class="bar-list">
-              <div class="bar-row">
-                <span>{{ fieldLabel("nozzle") }}</span>
-                <div class="bar"><i :style="{ width: `${temperaturePercent(temperatures.nozzle, temperatures.nozzle_target)}%` }"></i></div>
-                <strong>{{ formatCell(temperatures.nozzle) }}℃</strong>
+              <div v-for="item in nozzleTemperatureRows" :key="item.key" class="bar-row">
+                <span>{{ item.label }}</span>
+                <div class="bar"><i :style="{ width: `${temperaturePercent(item.current, item.target)}%` }"></i></div>
+                <strong>{{ formatCell(item.current) }}℃</strong>
               </div>
               <div class="bar-row">
                 <span>{{ fieldLabel("bed") }}</span>
@@ -211,16 +222,42 @@ const {
               </div>
               <div v-if="!dashboardAmsSummaryRows.length" class="empty">{{ t("common.empty") }}</div>
             </div>
-            <div v-show="!isSectionCollapsed('dashboard.ams')" class="ams-visual-list">
-              <article v-for="unit in dashboardAmsUnitRows" :key="unit.key" class="ams-visual-unit">
+            <div v-show="!isSectionCollapsed('dashboard.ams')" class="ams-visual-list" :class="{ compact: dashboardAmsCompactMode }">
+              <article
+                v-for="unit in dashboardAmsUnitRows"
+                :key="unit.key"
+                class="ams-visual-unit"
+                :class="{ collapsed: dashboardAmsUnitCollapsed(unit.key) }"
+              >
                 <div class="ams-visual-head">
-                  <div>
+                  <div class="ams-visual-head-main">
                     <strong>{{ unit.title }}</strong>
                     <span>{{ unit.code }}</span>
                   </div>
-                  <small>{{ unit.meta }}</small>
+                  <div class="ams-visual-head-actions">
+                    <small>{{ unit.meta }}</small>
+                    <button class="icon-button compact" type="button" :title="t('layout.collapse')" @click="toggleDashboardAmsUnitCollapsed(unit.key)">
+                      <ChevronDown v-if="dashboardAmsUnitCollapsed(unit.key)" :size="15" />
+                      <ChevronUp v-else :size="15" />
+                    </button>
+                  </div>
                 </div>
-                <div class="ams-visual-slots">
+                <div v-if="dashboardAmsUnitCollapsed(unit.key)" class="ams-compact-slots">
+                  <div
+                    v-for="slot in unit.slots"
+                    :key="slot.key"
+                    class="ams-compact-slot"
+                    :class="{ active: slot.active, empty: !slot.loaded }"
+                    :style="slot.style"
+                    :title="slot.loaded ? `${slot.material} ${slot.remain}` : t('ams.emptySlot')"
+                  >
+                    <span class="ams-compact-color"></span>
+                    <span v-if="slot.loaded" class="ams-compact-remain">{{ slot.remain }}</span>
+                    <span v-else class="ams-compact-material">{{ t("ams.emptySlot") }}</span>
+                  </div>
+                  <div v-if="!unit.slots.length" class="empty">{{ t("ams.noSlots") }}</div>
+                </div>
+                <div v-else class="ams-visual-slots">
                   <div
                     v-for="slot in unit.slots"
                     :key="slot.key"

@@ -23,7 +23,7 @@ DICT_FIELDS = {
     "data_coverage",
     "raw_refs",
 }
-REPLACE_FIELDS = {"hms_errors", "external_slots", "firmware", "accessories", "camera", "camera_options"}
+REPLACE_FIELDS = {"hms_errors", "external_slots", "firmware", "accessories", "camera", "camera_options", "unsupported_features"}
 AMS_MODULE_PREFIXES = ("ams/", "n1/", "n3/", "n3f/", "n3s/")
 PLATE_RE = re.compile(r"(?:^|/)plate_(\d+)\.gcode(?:$|[/?#])", re.IGNORECASE)
 
@@ -46,10 +46,12 @@ AIRDUCT_MODE_NAMES = {
     1: "chamber_temperature_hold",
 }
 AIRDUCT_PART_NAMES = {
-    16: "toolhead_fan",
-    32: "right_aux_fan",
-    48: "exhaust_fan",
-    160: "left_aux_fan",
+    1: "toolhead_fan",
+    2: "right_aux_fan",
+    3: "chamber_fan",
+    6: "filter_fan",
+    9: "ext_toolhead_fan",
+    10: "left_aux_fan",
 }
 LIGHT_NODE_NAMES = {
     "chamber_light": "chamber_light",

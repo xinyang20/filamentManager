@@ -5,11 +5,14 @@ from types import SimpleNamespace
 
 from filament_manager.api.helpers import (
     bucket_start,
+    bucket_metric_samples,
+    canonical_metric_name,
     metric_group_prefix,
     metric_value_float,
     slot_global_tray_id,
     slot_user_tray_id,
 )
+from filament_manager.services.hotends import hotend_temperature_readings
 
 
 def test_metric_group_prefix_maps_supported_filters() -> None:
@@ -42,6 +45,67 @@ def test_metric_value_float_normalizes_fan_percent_samples() -> None:
     assert metric_value_float(raw) == 53.0
     assert metric_value_float(clamped) == 100.0
     assert metric_value_float(temperature) == 218.0
+
+
+def test_canonical_metric_name_maps_legacy_hotend_metric_names() -> None:
+    assert canonical_metric_name("temperature.hotend_a") == "temperature.right_hotend"
+    assert canonical_metric_name("temperature.hotend_a_target") == "temperature.right_hotend_target"
+    assert canonical_metric_name("temperature.hotend_b") == "temperature.left_hotend"
+    assert canonical_metric_name("temperature.hotend_b_target") == "temperature.left_hotend_target"
+    assert canonical_metric_name("temperature.bed") == "temperature.bed"
+
+
+def test_bucket_metric_samples_merges_legacy_and_canonical_hotend_names() -> None:
+    sampled_at = datetime(2026, 4, 30, 10, 11, 12, tzinfo=timezone.utc)
+    rows = [
+        SimpleNamespace(id=1, printer_id=1, metric="temperature.hotend_a", value_float=220.0, value_text="220", unit="celsius", raw_message_id=1, details={}, sampled_at=sampled_at),
+        SimpleNamespace(id=2, printer_id=1, metric="temperature.right_hotend", value_float=222.0, value_text="222", unit="celsius", raw_message_id=2, details={}, sampled_at=sampled_at),
+    ]
+
+    bucketed = bucket_metric_samples(rows, "minute")
+
+    assert len(bucketed) == 1
+    assert bucketed[0].metric == "temperature.right_hotend"
+    assert bucketed[0].value_float == 221.0
+
+
+def test_hotend_temperature_readings_decode_dual_extruder_packed_temp() -> None:
+    readings = hotend_temperature_readings(
+        {
+            "nozzle_temper": "199",
+            "nozzle_target_temper": "210",
+            "device": {
+                "extruder": {
+                    "info": [
+                        {"id": 1, "temp": 0xC800C3},
+                        {"id": 0, "temp": 0xDC00DC},
+                    ]
+                }
+            },
+        }
+    )
+
+    assert [item["key"] for item in readings] == ["right_hotend", "left_hotend"]
+    assert readings[0]["current"] == 220.0
+    assert readings[0]["target"] == 220.0
+    assert readings[0]["raw_extruder_id"] == 0
+    assert readings[1]["current"] == 195.0
+    assert readings[1]["target"] == 200.0
+
+
+def test_hotend_temperature_readings_falls_back_to_legacy_nozzle_fields() -> None:
+    readings = hotend_temperature_readings({"nozzle_temper": "215", "nozzle_target_temper": "220"})
+
+    assert readings == [
+        {
+            "key": "nozzle",
+            "label_key": "nozzle",
+            "current": 215.0,
+            "target": 220.0,
+            "raw_extruder_id": None,
+            "source": "legacy.nozzle_temper",
+        }
+    ]
 
 
 def test_slot_id_helpers_generate_user_visible_and_global_tray_ids() -> None:

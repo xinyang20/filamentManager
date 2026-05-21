@@ -1,4 +1,4 @@
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { acceptHMRUpdate, defineStore, storeToRefs } from "pinia";
 import { API_BASE, apiRequest, formatCell, numeric } from "../api";
 import { filamentColor } from "../app/filamentMetrics";
@@ -30,6 +30,8 @@ export const useDashboardStore = defineStore("dashboard", () => {
 
   const dashboard = ref<Dashboard | null>(null);
 
+  const dashboardAmsUnitCollapseOverrides = ref<Record<string, boolean>>({});
+
   const deviceCapabilities = ref<DeviceCapabilities | null>(null);
 
   const cameraCapabilities = ref<PrinterCameraCapabilities | null>(null);
@@ -47,6 +49,8 @@ export const useDashboardStore = defineStore("dashboard", () => {
   const derived = computed(() => presentationStore().record(snapshot.value.derived_status));
 
   const temperatures = computed(() => presentationStore().record(snapshot.value.temperatures));
+
+  const nozzleTemperatureRows = computed(() => temperatureNozzleRows(temperatures.value));
 
   const fans = computed(() => presentationStore().record(snapshot.value.fans));
 
@@ -216,6 +220,30 @@ export const useDashboardStore = defineStore("dashboard", () => {
     return rows;
   });
 
+  const dashboardAmsCompactMode = computed(() => dashboardAmsUnitRows.value.length > 2);
+
+  watch(
+    () => printersStore().selectedPrinterId,
+    () => {
+      dashboardAmsUnitCollapseOverrides.value = {};
+    },
+    { flush: "sync" },
+  );
+
+  watch(
+    dashboardAmsUnitRows,
+    (rows) => {
+      const activeKeys = new Set(rows.map((unit) => unit.key));
+      const nextOverrides = Object.fromEntries(
+        Object.entries(dashboardAmsUnitCollapseOverrides.value).filter(([key]) => activeKeys.has(key)),
+      );
+      if (Object.keys(nextOverrides).length !== Object.keys(dashboardAmsUnitCollapseOverrides.value).length) {
+        dashboardAmsUnitCollapseOverrides.value = nextOverrides;
+      }
+    },
+    { flush: "sync" },
+  );
+
   const canRequestFullRefresh = computed(() => printersStore().selectedPrinter?.connection_status === "connected");
 
 
@@ -277,6 +305,24 @@ export const useDashboardStore = defineStore("dashboard", () => {
   }
 
 
+  function dashboardAmsUnitCollapsed(unitKey: string) {
+    const key = String(unitKey);
+    if (Object.prototype.hasOwnProperty.call(dashboardAmsUnitCollapseOverrides.value, key)) {
+      return dashboardAmsUnitCollapseOverrides.value[key];
+    }
+    return dashboardAmsCompactMode.value;
+  }
+
+
+  function toggleDashboardAmsUnitCollapsed(unitKey: string) {
+    const key = String(unitKey);
+    dashboardAmsUnitCollapseOverrides.value = {
+      ...dashboardAmsUnitCollapseOverrides.value,
+      [key]: !dashboardAmsUnitCollapsed(key),
+    };
+  }
+
+
   function handleCameraStreamError() {
     cameraStreamError.value = true;
   }
@@ -313,6 +359,11 @@ export const useDashboardStore = defineStore("dashboard", () => {
 
   function summaryTemperatures(item: DashboardSummaryItem): Record<string, any> {
     return presentationStore().record(summarySnapshot(item).temperatures);
+  }
+
+
+  function summaryNozzleTemperatureRows(item: DashboardSummaryItem) {
+    return temperatureNozzleRows(summaryTemperatures(item));
   }
 
 
@@ -423,6 +474,41 @@ export const useDashboardStore = defineStore("dashboard", () => {
   }
 
 
+  function temperatureNozzleRows(source: Record<string, any>) {
+    const rawRows = Array.isArray(source.nozzles) ? source.nozzles : [];
+    const rows = rawRows
+      .filter((item) => item && typeof item === "object")
+      .map((item) => {
+        const row = item as Record<string, any>;
+        const key = String(row.key || row.label_key || "nozzle");
+        return {
+          key,
+          label: presentationStore().fieldLabel(String(row.label_key || key)),
+          current: row.current,
+          target: row.target,
+        };
+      });
+    if (rows.length) return rows;
+    return [
+      {
+        key: "nozzle",
+        label: presentationStore().fieldLabel("nozzle"),
+        current: source.nozzle,
+        target: source.nozzle_target,
+      },
+    ];
+  }
+
+
+  function compactHotendLabel(key: string, label: string) {
+    if (key === "right_hotend") return "R";
+    if (key === "left_hotend") return "L";
+    if (key === "hotend_a") return "A";
+    if (key === "hotend_b") return "B";
+    return label.replace(t("dashboard.nozzle"), "").replace("热端", "").replace("hotend", "").trim() || label;
+  }
+
+
   function summaryWifi(item: DashboardSummaryItem) {
     return formatCell(summaryNetwork(item).wifi_signal);
   }
@@ -465,8 +551,11 @@ export const useDashboardStore = defineStore("dashboard", () => {
       right_aux_fan: 20,
       left_aux_fan: 30,
       big_fan2_speed: 40,
+      chamber_fan: 40,
       exhaust_fan: 40,
       heatbreak_fan_speed: 50,
+      filter_fan: 60,
+      ext_toolhead_fan: 70,
     };
     return order[key] ?? 100;
   }
@@ -474,11 +563,19 @@ export const useDashboardStore = defineStore("dashboard", () => {
 
   function airductPartKey(part: Record<string, any>) {
     const name = String(part.part_name || "");
-    if (name) return name;
+    if (name && !name.startsWith("unknown:")) return name;
     const id = numeric(part.id);
+    if (id === 1) return "toolhead_fan";
+    if (id === 2) return "right_aux_fan";
+    if (id === 3) return "chamber_fan";
+    if (id === 6) return "filter_fan";
+    if (id === 9) return "ext_toolhead_fan";
+    if (id === 10) return "left_aux_fan";
     if (id === 16) return "toolhead_fan";
     if (id === 32) return "right_aux_fan";
-    if (id === 48) return "exhaust_fan";
+    if (id === 48) return "chamber_fan";
+    if (id === 96) return "filter_fan";
+    if (id === 144) return "ext_toolhead_fan";
     if (id === 160) return "left_aux_fan";
     return "";
   }
@@ -488,6 +585,7 @@ export const useDashboardStore = defineStore("dashboard", () => {
     const mapping: Record<string, string> = {
       toolhead_fan: "cooling_fan_speed",
       right_aux_fan: "big_fan1_speed",
+      chamber_fan: "big_fan2_speed",
       exhaust_fan: "big_fan2_speed",
     };
     return mapping[partKey] || "";
@@ -888,6 +986,7 @@ export const useDashboardStore = defineStore("dashboard", () => {
     state,
     derived,
     temperatures,
+    nozzleTemperatureRows,
     fans,
     network,
     hardware,
@@ -918,6 +1017,8 @@ export const useDashboardStore = defineStore("dashboard", () => {
     overviewStats,
     dashboardAmsSummaryRows,
     dashboardAmsUnitRows,
+    dashboardAmsCompactMode,
+    dashboardAmsUnitCollapseOverrides,
     canRequestFullRefresh,
     requestRefreshFull,
     fetchDashboard,
@@ -925,6 +1026,8 @@ export const useDashboardStore = defineStore("dashboard", () => {
     restartCameraStream,
     openCameraLightbox,
     closeCameraLightbox,
+    dashboardAmsUnitCollapsed,
+    toggleDashboardAmsUnitCollapsed,
     handleCameraStreamError,
     handleCameraStreamLoaded,
     loadOverview,
@@ -932,6 +1035,8 @@ export const useDashboardStore = defineStore("dashboard", () => {
     summaryState,
     summaryDerived,
     summaryTemperatures,
+    summaryNozzleTemperatureRows,
+    compactHotendLabel,
     summaryNetwork,
     summaryCoverage,
     summaryCoveragePercent,

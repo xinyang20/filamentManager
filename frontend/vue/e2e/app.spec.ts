@@ -591,6 +591,7 @@ test("renders overview and navigates to printer configuration", async ({ page })
   await expect(page.getByText("42%")).toBeVisible();
 
   await switchTo(page, "打印机配置");
+  await page.getByRole("row", { name: /Synthetic Printer/ }).getByRole("button", { name: "编辑" }).click();
   await expect(page.getByLabel("名称")).toHaveValue("Synthetic Printer");
   await expect(page.getByLabel("主机")).toHaveValue("192.0.2.10");
   await expect(page.getByLabel("序列号")).toHaveValue("SYNTHETIC123");
@@ -632,6 +633,27 @@ test("renders print log and metric charts", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "AMS 温湿度" })).toBeVisible();
 });
 
+test("reloads metric charts when the range changes", async ({ page }) => {
+  const metricUrls: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("/api/printers/1/metrics")) metricUrls.push(request.url());
+  });
+
+  await openApp(page);
+  await switchTo(page, "历史趋势");
+  await expect(page.getByRole("button", { name: "6 小时" })).toBeVisible();
+
+  metricUrls.length = 0;
+  await page.getByRole("button", { name: "6 小时" }).click();
+  await page.getByRole("option", { name: "24 小时" }).click();
+
+  await expect(page.getByRole("button", { name: "24 小时" })).toBeVisible();
+  await expect(page.getByRole("listbox")).toBeHidden();
+  await expect.poll(() => metricUrls.filter((url) => url.includes("bucket=hour")).length).toBe(3);
+  expect(metricUrls.every((url) => url.includes("bucket=hour"))).toBe(true);
+  expect(metricUrls.some((url) => url.includes("group=temperature"))).toBe(true);
+});
+
 test("renders storage timelapse cards and notes", async ({ page }) => {
   await openApp(page);
   await switchTo(page, "延迟摄影");
@@ -660,11 +682,11 @@ test("renders inventory tabs and opens a create-brand modal", async ({ page }) =
   await switchTo(page, "耗材");
 
   await expect(page.getByRole("heading", { name: "库存分析" })).toBeVisible();
-  await expect(page.getByText("Bambu · Matte · PLA · Bambu Green").first()).toBeVisible();
+  await expect(page.getByText("Bambu · PLA · Matte · Signal Green").first()).toBeVisible();
 
   await page.getByRole("button", { name: "SKU" }).click();
   await expect(page.getByRole("heading", { name: "SKU" })).toBeVisible();
-  await expect(page.getByText("Bambu Green").first()).toBeVisible();
+  await expect(page.getByText("Signal Green").first()).toBeVisible();
 
   await page.getByRole("tablist").getByRole("button", { name: "品牌", exact: true }).click();
   await expect(page.getByText("Synthetic brand")).toBeVisible();

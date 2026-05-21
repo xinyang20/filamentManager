@@ -9,6 +9,7 @@ from filament_manager.db.models import AmsUnit, DeviceStatusSnapshot, Printer, P
 from filament_manager.mqtt.parser import extract_print, identify_tray
 from filament_manager.services.fans import fan_percent, packed_fan_bytes
 from filament_manager.services.hms import enrich_hms_error
+from filament_manager.services.hotends import hotend_temperature_readings
 from filament_manager.services.notifications import dispatch_event_notifications
 from filament_manager.services.device_status_constants import (
     AIRDUCT_MODE_NAMES,
@@ -299,8 +300,7 @@ def _derived_status_payload(print_section: dict[str, Any]) -> dict[str, Any]:
     state = str(print_section.get("gcode_state") or "").strip().upper()
     bed = _as_float(print_section.get("bed_temper"))
     bed_target = _as_float(print_section.get("bed_target_temper"))
-    nozzle = _as_float(print_section.get("nozzle_temper"))
-    nozzle_target = _as_float(print_section.get("nozzle_target_temper"))
+    nozzle_readings = hotend_temperature_readings(print_section)
     stage = _int_from_any(print_section.get("mc_print_stage"))
     sub_stage = _first_int_from_any(
         print_section.get("mc_print_sub_stage"),
@@ -325,7 +325,7 @@ def _derived_status_payload(print_section: dict[str, Any]) -> dict[str, Any]:
     ) or _has_actionable_hms(print_section)
     derived = {
         "heating_bed": _is_heating(bed, bed_target),
-        "heating_nozzle": _is_heating(nozzle, nozzle_target),
+        "heating_nozzle": any(_is_heating(item.get("current"), item.get("target")) for item in nozzle_readings),
         "printing": bool(printing and not paused),
         "preparing": bool(user_state == "preparing"),
         "actual_printing": bool(user_state == "actual_printing"),
@@ -363,6 +363,12 @@ def _temperature_payload(print_section: dict[str, Any]) -> dict[str, Any]:
     for source, target in mapping.items():
         if source in print_section:
             temperatures[target] = _as_float(print_section.get(source))
+    nozzle_readings = hotend_temperature_readings(print_section)
+    if nozzle_readings:
+        temperatures["nozzles"] = nozzle_readings
+        first = nozzle_readings[0]
+        temperatures["nozzle"] = first.get("current")
+        temperatures["nozzle_target"] = first.get("target")
     return _compact(temperatures)
 
 
@@ -744,16 +750,6 @@ def _external_slots_payload(print_section: dict[str, Any]) -> list[dict[str, Any
 
 def _unsupported_features_payload(print_section: dict[str, Any]) -> dict[str, Any]:
     unsupported: dict[str, Any] = {}
-    device = print_section.get("device")
-    if isinstance(device, dict):
-        extruder = device.get("extruder")
-        info = extruder.get("info") if isinstance(extruder, dict) else None
-        if isinstance(info, list) and len(info) >= 2:
-            unsupported["dual_nozzle"] = {
-                "detected": True,
-                "structured_support": False,
-                "raw": {"device.extruder.info": info},
-            }
     vir_slot = print_section.get("vir_slot")
     if isinstance(vir_slot, list) and len(vir_slot) > 1:
         unsupported["multi_external_slot"] = {
@@ -1057,8 +1053,12 @@ def _airduct_payload(value: Any) -> Any:
             if not isinstance(part, dict):
                 continue
             named = dict(part)
-            part_id = _int_from_any(named.get("id"))
-            if part_id is not None:
+            raw_part_id = _int_from_any(named.get("id"))
+            if raw_part_id is not None:
+                part_id = (raw_part_id >> 4) & 0xFF
+                named["raw_id"] = raw_part_id
+                named["id"] = part_id
+                named["part_type"] = raw_part_id & 0xF
                 named["part_name"] = AIRDUCT_PART_NAMES.get(part_id, f"unknown:{part_id}")
             named_parts.append(named)
         payload["parts"] = named_parts

@@ -107,6 +107,28 @@
   white-space: nowrap;
 }
 
+.fleet-metrics .fleet-hotends {
+  display: grid;
+  gap: 2px;
+  overflow: visible;
+  white-space: normal;
+}
+
+.fleet-hotends span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fleet-hotends em {
+  display: inline-block;
+  min-width: 12px;
+  margin-right: 3px;
+  color: var(--muted);
+  font-style: normal;
+}
+
 .fleet-card-footer {
   min-height: 36px;
 }
@@ -290,6 +312,35 @@
   margin-top: 8px;
   color: var(--faint);
   font-size: 12px;
+}
+
+.hotend-stack {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.hotend-line {
+  display: grid;
+  grid-template-columns: minmax(56px, 1fr) auto;
+  gap: 4px 8px;
+  align-items: baseline;
+}
+
+.hotend-line span,
+.hotend-line small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.hotend-line strong {
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1.1;
+}
+
+.hotend-line small {
+  grid-column: 1 / -1;
 }
 
 .grid {

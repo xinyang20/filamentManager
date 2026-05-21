@@ -55,12 +55,18 @@ const {
   temperatures,
   withLoading,
 } = appViewRefs(props.ctx);
+
+function handleMetricRangeChanged(value: string | number | null) {
+  if (typeof value !== "string") return;
+  metricRange.value = value;
+  void withLoading(loadMetrics);
+}
 </script>
 
 <template>
 <section class="view">
         <div class="toolbar filters">
-          <AppSelect v-model="metricRange" :options="metricRangeOptions" @change="withLoading(loadMetrics)" />
+          <AppSelect v-model="metricRange" :options="metricRangeOptions" @change="handleMetricRangeChanged" />
         </div>
         <div class="metrics-chart-grid">
           <MetricChart

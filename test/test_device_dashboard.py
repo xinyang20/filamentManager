@@ -4,8 +4,9 @@ from datetime import datetime, timedelta, timezone
 
 from filament_manager.api import routes as api_routes
 from filament_manager.api.routes import _sanitize_camera_response
-from filament_manager.db.models import AmsSlot, DeviceMetricSample
+from filament_manager.db.models import AmsSlot, AppSetting, DeviceMetricSample, Printer, RawMqttMessage
 from filament_manager.db import session as db_session
+from filament_manager.services.metrics import DUAL_NOZZLE_METRIC_BACKFILL_SETTING, backfill_dual_nozzle_metric_samples
 from filament_manager.services import storage as storage_service
 
 
@@ -110,6 +111,7 @@ def _dashboard_push_status() -> dict:
                     "parts": [
                         {"id": 16, "state": 100},
                         {"id": 32, "state": 0},
+                        {"id": 96, "state": 96},
                     ],
                 },
                 "plate": {"id": "plate_2"},
@@ -192,6 +194,9 @@ def test_push_status_updates_device_dashboard_and_derived_ams_fields(api_client,
     assert snapshot["hardware"]["airduct"]["modeCur_name"] == "cooling_mode"
     assert snapshot["hardware"]["airduct"]["modeFunc_name"] == "chamber_temperature_hold"
     assert snapshot["hardware"]["airduct"]["parts"][0]["part_name"] == "toolhead_fan"
+    assert snapshot["hardware"]["airduct"]["parts"][0]["raw_id"] == 16
+    assert snapshot["hardware"]["airduct"]["parts"][0]["id"] == 1
+    assert snapshot["hardware"]["airduct"]["parts"][2]["part_name"] == "filter_fan"
     assert snapshot["nozzles"]["current_nozzle_id"] == "0"
     assert snapshot["nozzles"]["items"][0]["serial_number"] == "NOZZLE-SYNTH-1"
     assert snapshot["camera_options"]["printing_monitor"] is True
@@ -246,6 +251,93 @@ def test_push_status_updates_device_dashboard_and_derived_ams_fields(api_client,
     assert "fan.fan_gear.percent" in metric_names
     assert "network.wifi_signal" in metric_names
     assert "ams.0.temperature" in metric_names
+
+
+def test_dual_nozzle_push_status_uses_structured_hotend_temperatures(api_client, printer_payload) -> None:
+    printer_id = _create_printer(api_client, printer_payload)
+    payload = _dashboard_push_status()
+    payload["print"]["nozzle_temper"] = "199"
+    payload["print"]["nozzle_target_temper"] = "210"
+    payload["print"]["device"]["extruder"]["info"] = [
+        {"id": 1, "temp": 0xC800C3},
+        {"id": 0, "temp": 0xDC00DC},
+    ]
+
+    _ingest(api_client, printer_id, payload)
+
+    snapshot = api_client.get(f"/api/printers/{printer_id}/device-snapshot").json()
+    assert snapshot["temperatures"]["nozzle"] == 220.0
+    assert snapshot["temperatures"]["nozzle_target"] == 220.0
+    assert snapshot["temperatures"]["nozzles"] == [
+        {
+            "key": "right_hotend",
+            "label_key": "right_hotend",
+            "current": 220.0,
+            "target": 220.0,
+            "raw_extruder_id": 0,
+            "source": "device.extruder.info.temp",
+        },
+        {
+            "key": "left_hotend",
+            "label_key": "left_hotend",
+            "current": 195.0,
+            "target": 200.0,
+            "raw_extruder_id": 1,
+            "source": "device.extruder.info.temp",
+        },
+    ]
+    assert snapshot["derived_status"]["heating_nozzle"] is True
+    assert "dual_nozzle" not in snapshot["unsupported_features"]
+
+    metrics = api_client.get(f"/api/printers/{printer_id}/metrics?group=temperature").json()
+    metric_names = {item["metric"] for item in metrics}
+    assert {"temperature.right_hotend", "temperature.right_hotend_target", "temperature.left_hotend", "temperature.left_hotend_target"} <= metric_names
+    assert "temperature.nozzle" not in metric_names
+    right_hotend = next(item for item in metrics if item["metric"] == "temperature.right_hotend")
+    assert right_hotend["value_float"] == 220.0
+    assert right_hotend["details"]["raw_extruder_id"] == 0
+    assert right_hotend["details"]["source"] == "device.extruder.info.temp"
+
+
+def test_dual_nozzle_metric_backfill_is_idempotent(api_client, printer_payload) -> None:
+    _create_printer(api_client, printer_payload)
+    db = db_session.SessionLocal()
+    assert db is not None
+    try:
+        db.query(AppSetting).filter(AppSetting.key == DUAL_NOZZLE_METRIC_BACKFILL_SETTING).delete()
+        printer = db.query(Printer).one()
+        raw = RawMqttMessage(
+            printer_id=printer.id,
+            topic="device/SYNTHETIC123/report",
+            command="push_status",
+            payload=_dashboard_push_status(),
+            received_at=datetime(2026, 5, 7, 10, 0, tzinfo=timezone.utc),
+        )
+        raw.payload["print"]["device"]["extruder"]["info"] = [
+            {"id": 0, "temp": 0xDC00DC},
+            {"id": 1, "temp": 0xC800C3},
+        ]
+        db.add(raw)
+        db.commit()
+
+        first = backfill_dual_nozzle_metric_samples(db)
+        db.commit()
+        db.delete(db.get(AppSetting, DUAL_NOZZLE_METRIC_BACKFILL_SETTING))
+        db.commit()
+        second = backfill_dual_nozzle_metric_samples(db)
+        db.commit()
+
+        assert first["inserted"] == 4
+        assert second["inserted"] == 0
+        rows = db.query(DeviceMetricSample).filter(DeviceMetricSample.raw_message_id == raw.id).all()
+        assert sorted(row.metric for row in rows) == [
+            "temperature.left_hotend",
+            "temperature.left_hotend_target",
+            "temperature.right_hotend",
+            "temperature.right_hotend_target",
+        ]
+    finally:
+        db.close()
 
 
 def test_ams_ht_dry_status_is_derived_from_remaining_time(api_client, printer_payload) -> None:
