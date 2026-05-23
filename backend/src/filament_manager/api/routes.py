@@ -3,11 +3,12 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 import mimetypes
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -28,6 +29,7 @@ from filament_manager.db.models import (
     NotificationDelivery,
     NotificationRule,
     NotificationTarget,
+    RawMqttArchive,
     RawMqttMessage,
     TimelapseNote,
 )
@@ -100,6 +102,7 @@ from filament_manager.schemas import (
     PrinterStateRead,
     PrinterStorageFileRead,
     PrinterUpdate,
+    RawMqttArchiveRead,
     RawMqttMessageRead,
     SlotBindRequest,
     StorageSummaryRead,
@@ -225,6 +228,8 @@ from filament_manager.services.local_records import (
 )
 from filament_manager.services.database_retention import (
     database_retention_status,
+    enforce_raw_mqtt_retention,
+    list_raw_mqtt_archives,
     schedule_raw_mqtt_retention_check,
     set_raw_mqtt_db_limit,
 )
@@ -1071,8 +1076,31 @@ def api_update_database_retention(
 
 @router.post("/debug/database-retention/enforce", response_model=DatabaseRetentionStatusRead)
 def api_enforce_database_retention(db: Session = Depends(get_db)) -> dict[str, Any]:
-    schedule_raw_mqtt_retention_check(throttled=False)
+    enforce_raw_mqtt_retention(db)
     return database_retention_status(db)
+
+
+@router.get("/debug/raw-mqtt-archives", response_model=list[RawMqttArchiveRead])
+def api_list_raw_mqtt_archives(
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db),
+) -> list[RawMqttArchive]:
+    return list_raw_mqtt_archives(db, limit=limit)
+
+
+@router.get("/debug/raw-mqtt-archives/{archive_id}/download")
+def api_download_raw_mqtt_archive(archive_id: int, db: Session = Depends(get_db)) -> FileResponse:
+    archive = db.get(RawMqttArchive, archive_id)
+    if archive is None:
+        raise HTTPException(status_code=404, detail="Raw MQTT archive not found")
+    path = Path(archive.file_path)
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="Raw MQTT archive file not found")
+    return FileResponse(
+        path,
+        media_type="application/zip",
+        filename=path.name,
+    )
 
 
 @router.get("/debug/events", response_model=list[PrinterEventRead])

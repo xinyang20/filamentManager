@@ -98,6 +98,7 @@ const {
   inventoryDialogSkuLabel,
   inventoryDialogSpoolLabel,
   isFilamentSpoolPendingConfirm,
+  isFilamentSpoolOperationPending,
   loading,
   locationAdjustForm,
   locationPrinterOptions,
@@ -309,6 +310,7 @@ const {
             v-if="selectedFilamentSpool.status !== 'empty' && selectedFilamentSpool.status !== 'archived'"
             class="secondary"
             type="button"
+            :disabled="isFilamentSpoolOperationPending(selectedFilamentSpool)"
             @click="updateFilamentSpoolStatus(selectedFilamentSpool, 'empty')"
           >
             {{ t("inventory.markEmpty") }}
@@ -317,6 +319,7 @@ const {
             v-if="selectedFilamentSpool.status !== 'archived'"
             class="secondary"
             type="button"
+            :disabled="isFilamentSpoolOperationPending(selectedFilamentSpool)"
             @click="updateFilamentSpoolStatus(selectedFilamentSpool, 'archived')"
           >
             {{ t("inventory.archiveSpool") }}
@@ -325,6 +328,7 @@ const {
             v-if="selectedFilamentSpool.status === 'empty' || selectedFilamentSpool.status === 'archived'"
             class="primary"
             type="button"
+            :disabled="isFilamentSpoolOperationPending(selectedFilamentSpool)"
             @click="updateFilamentSpoolStatus(selectedFilamentSpool, 'opened_in_storage')"
           >
             <CheckCircle2 :size="17" />{{ t("inventory.restoreOpened") }}
@@ -339,7 +343,7 @@ const {
               <label class="field-label"><span>{{ t("inventory.source") }}</span><AppSelect v-model="quantityAdjustForm.source" :options="quantityAdjustSourceOptions" /></label>
               <label class="field-label"><span>{{ t("form.note") }}</span><input v-model="quantityAdjustForm.note" :placeholder="t('form.note')" /></label>
             </div>
-            <div class="modal-actions"><button class="primary" type="submit"><Save :size="17" />{{ t("common.save") }}</button></div>
+            <div class="modal-actions"><button class="primary" type="submit" :disabled="isFilamentSpoolOperationPending(selectedFilamentSpool)"><Save :size="17" />{{ t("common.save") }}</button></div>
           </form>
           <form class="modal-subform" @submit.prevent="updateSelectedFilamentLocation">
             <h4>{{ t("inventory.locationAdjust") }}</h4>
@@ -350,7 +354,7 @@ const {
               <label class="field-label"><span>{{ t("inventory.manualLocation") }}</span><input v-model="locationAdjustForm.manual_location" :placeholder="t('inventory.manualLocation')" /></label>
               <label class="field-label"><span>{{ t("form.note") }}</span><input v-model="locationAdjustForm.note" :placeholder="t('form.note')" /></label>
             </div>
-            <div class="modal-actions"><button class="primary" type="submit"><Save :size="17" />{{ t("common.save") }}</button></div>
+            <div class="modal-actions"><button class="primary" type="submit" :disabled="isFilamentSpoolOperationPending(selectedFilamentSpool)"><Save :size="17" />{{ t("common.save") }}</button></div>
           </form>
         </div>
       </section>

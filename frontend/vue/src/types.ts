@@ -269,6 +269,12 @@ export interface DatabaseRetentionCleanup {
   trigger_threshold_bytes?: number | null;
   database_size_before_bytes?: number | null;
   database_size_after_bytes?: number | null;
+  raw_mqtt_hot_retention_hours?: number | null;
+  archive_enabled?: boolean | null;
+  archive_count?: number;
+  archived_rows?: number;
+  archive_bytes?: number;
+  archive_ids?: number[];
   deleted_rows: number;
   nullified_device_metric_samples: number;
   nullified_ams_slot_history_samples: number;
@@ -286,13 +292,37 @@ export interface DatabaseRetentionStatus {
   sqlite: boolean;
   enforcement_supported: boolean;
   is_over_threshold: boolean;
+  raw_mqtt_hot_retention_hours: number;
+  raw_mqtt_archive_enabled: boolean;
   raw_mqtt_row_count: number;
   raw_mqtt_payload_bytes_estimate: number;
   raw_mqtt_oldest_received_at?: string | null;
   raw_mqtt_newest_received_at?: string | null;
+  raw_mqtt_archive_count: number;
+  raw_mqtt_archive_row_count: number;
+  raw_mqtt_archive_compressed_bytes: number;
+  raw_mqtt_archive_oldest_received_at?: string | null;
+  raw_mqtt_archive_newest_received_at?: string | null;
+  raw_mqtt_archive_last_created_at?: string | null;
   retention_running: boolean;
   retention_running_since?: string | null;
   last_cleanup?: DatabaseRetentionCleanup | null;
+}
+
+export interface RawMqttArchive {
+  id: number;
+  file_path: string;
+  file_format: string;
+  row_count: number;
+  compressed_size_bytes: number;
+  first_raw_message_id?: number | null;
+  last_raw_message_id?: number | null;
+  first_received_at?: string | null;
+  last_received_at?: string | null;
+  printer_ids: number[];
+  command_counts: Record<string, number>;
+  sha256: string;
+  created_at: string;
 }
 
 export interface MetricSample {

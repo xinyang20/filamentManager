@@ -67,6 +67,24 @@ class RawMqttMessage(Base):
     printer: Mapped[Printer] = relationship(back_populates="raw_messages")
 
 
+class RawMqttArchive(Base):
+    __tablename__ = "raw_mqtt_archives"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    file_path: Mapped[str] = mapped_column(Text)
+    file_format: Mapped[str] = mapped_column(String(20), default="zip")
+    row_count: Mapped[int] = mapped_column(Integer)
+    compressed_size_bytes: Mapped[int] = mapped_column(Integer)
+    first_raw_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_raw_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    first_received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    last_received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    printer_ids: Mapped[list[int]] = mapped_column(JSON, default=list)
+    command_counts: Mapped[dict[str, int]] = mapped_column(JSON, default=dict)
+    sha256: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+
 class PrinterStateSnapshot(Base):
     __tablename__ = "printer_state_snapshots"
     __table_args__ = (UniqueConstraint("printer_id", name="uq_printer_state_snapshot_printer"),)

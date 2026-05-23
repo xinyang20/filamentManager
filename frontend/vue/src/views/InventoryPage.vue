@@ -95,6 +95,7 @@ const {
   inventoryTypePieStyle,
   isFilamentSpoolPendingConfirm,
   isFilamentSpoolSkuReviewDeferred,
+  isFilamentSpoolOperationPending,
   jumpToInventorySection,
   openConfirmFilamentSpoolSku,
   openCreateFilamentSpoolDialog,
@@ -368,7 +369,7 @@ const {
                   <td>{{ formatCell(spool.note) }}</td>
                   <td class="inventory-inline-action">
                     <button class="icon-button compact" type="button" :title="t('common.edit')" @click="openFilamentSpoolDialog(spool)"><PencilLine :size="15" /></button>
-                    <button class="text-action compact" type="button" @click="updateFilamentSpoolStatus(spool, 'opened_in_storage')">{{ t("inventory.restoreOpened") }}</button>
+                    <button class="text-action compact" type="button" :disabled="isFilamentSpoolOperationPending(spool)" @click="updateFilamentSpoolStatus(spool, 'opened_in_storage')">{{ t("inventory.restoreOpened") }}</button>
                   </td>
                 </tr>
               </tbody>

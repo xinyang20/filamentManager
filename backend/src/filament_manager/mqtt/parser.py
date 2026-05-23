@@ -63,6 +63,21 @@ AMS_STATUS_TRANSITION_WITHOUT_PAYLOAD = {
     AMS_STATUS_RFID_IDENTIFYING,
 }
 
+STABLE_TRAY_FILAMENT_PAYLOAD_FIELDS = (
+    "tray_type",
+    "tray_sub_brands",
+    "tray_id_name",
+    "tray_info_idx",
+    "filament_name",
+    "tray_color_name",
+    "color_name",
+    "filament_color_name",
+    "color_display_name",
+)
+
+TRAY_COLOR_PAYLOAD_FIELDS = ("tray_color", "color")
+AMS_PLACEHOLDER_COLOR_VALUES = {"FFFFFF00"}
+
 
 @dataclass(frozen=True)
 class SpoolIdentity:
@@ -160,6 +175,25 @@ def is_transition_state_without_payload(value: Any) -> bool:
     if state in AMS_TRANSITION_WITHOUT_PAYLOAD_STATES:
         return True
     return any(marker in state for marker in AMS_TRANSITION_STATE_MARKERS)
+
+
+def is_placeholder_ams_color_frame(tray: dict[str, Any]) -> bool:
+    color_values = _tray_color_payload_values(tray)
+    if not color_values or any(value not in AMS_PLACEHOLDER_COLOR_VALUES for value in color_values):
+        return False
+    if any(clean_text(tray.get(field)) for field in STABLE_TRAY_FILAMENT_PAYLOAD_FIELDS):
+        return False
+    if as_int(tray.get("remain")) != -1:
+        return False
+    return not (is_valid_identity_value(tray.get("tray_uuid")) or is_valid_identity_value(tray.get("tag_uid")))
+
+
+def has_stable_tray_filament_payload(tray: dict[str, Any]) -> bool:
+    if is_placeholder_ams_color_frame(tray):
+        return False
+    if any(clean_text(tray.get(field)) for field in STABLE_TRAY_FILAMENT_PAYLOAD_FIELDS):
+        return True
+    return bool(_tray_color_payload_values(tray))
 
 
 def identify_tray(tray: dict[str, Any]) -> SpoolIdentity:
@@ -302,23 +336,36 @@ def _slot_is_reading(
 
 
 def _tray_has_filament_payload(tray: dict[str, Any]) -> bool:
-    fields = (
-        "tray_type",
-        "tray_sub_brands",
-        "tray_color",
-        "color",
-        "tray_id_name",
-        "tray_info_idx",
-        "filament_name",
-        "tray_color_name",
-        "color_name",
-        "filament_color_name",
-        "color_display_name",
-    )
-    if any(clean_text(tray.get(field)) for field in fields):
-        return True
+    return has_stable_tray_filament_payload(tray)
+
+
+def _tray_color_payload_values(tray: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for field in TRAY_COLOR_PAYLOAD_FIELDS:
+        value = _normalize_tray_color_payload_value(tray.get(field))
+        if value is not None:
+            values.append(value)
     cols = tray.get("cols")
-    return isinstance(cols, list) and any(clean_text(value) for value in cols)
+    if isinstance(cols, list):
+        for item in cols:
+            if isinstance(item, dict):
+                for field in TRAY_COLOR_PAYLOAD_FIELDS:
+                    value = _normalize_tray_color_payload_value(item.get(field))
+                    if value is not None:
+                        values.append(value)
+            else:
+                value = _normalize_tray_color_payload_value(item)
+                if value is not None:
+                    values.append(value)
+    return values
+
+
+def _normalize_tray_color_payload_value(value: Any) -> str | None:
+    text = clean_text(value)
+    if text is None:
+        return None
+    normalized = text.lstrip("#").upper()
+    return normalized or None
 
 
 def _slot_state(tray: dict[str, Any]) -> str | None:

@@ -41,6 +41,7 @@ from filament_manager.services.bambu_filament_catalog import list_bambu_official
 from filament_manager.services.inventory import (
     DuplicateFilamentSkuError,
     FilamentSpoolUidConflictError,
+    StaleFilamentSpoolUpdateError,
     adjust_sku_stock,
     bind_slot_to_filament_spool,
     build_inventory_summary,
@@ -437,7 +438,15 @@ def api_update_filament_spool_status(
     if spool is None:
         raise HTTPException(status_code=404, detail="Filament spool not found")
     try:
-        updated = update_filament_status(db, spool, status=data.status, note=data.note)
+        updated = update_filament_status(
+            db,
+            spool,
+            status=data.status,
+            note=data.note,
+            expected_updated_at=data.expected_updated_at,
+        )
+    except StaleFilamentSpoolUpdateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return filament_spool_to_read(updated)
@@ -493,6 +502,8 @@ def api_update_filament_spool_weight(
         raise HTTPException(status_code=404, detail="Filament spool not found")
     try:
         updated = update_filament_weight(db, spool, data)
+    except StaleFilamentSpoolUpdateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return filament_spool_to_read(updated)
@@ -507,7 +518,10 @@ def api_update_filament_spool_location(
     spool = get_filament_spool(db, spool_id)
     if spool is None:
         raise HTTPException(status_code=404, detail="Filament spool not found")
-    return filament_spool_to_read(update_filament_location(db, spool, data))
+    try:
+        return filament_spool_to_read(update_filament_location(db, spool, data))
+    except StaleFilamentSpoolUpdateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/ams/slots/{slot_id}/bind", response_model=AmsSlotRead)

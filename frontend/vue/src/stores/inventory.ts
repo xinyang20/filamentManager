@@ -58,6 +58,8 @@ export const useInventoryStore = defineStore("inventory", () => {
 
   const filamentInventorySummary = ref<FilamentInventorySummary | null>(null);
 
+  const pendingFilamentSpoolOperationIds = ref<number[]>([]);
+
   const inventoryTab = ref<"skus" | "spools" | "ams" | "detail">("skus");
 
   const selectedFilamentSpoolId = ref<number | null>(null);
@@ -67,6 +69,8 @@ export const useInventoryStore = defineStore("inventory", () => {
   const inventoryAmsOverviews = ref<Record<string, AmsOverview>>({});
 
   const inventoryPrinterStates = ref<Record<string, Record<string, any> | null>>({});
+
+  let inventoryOperationalRefreshSeq = 0;
 
   const inventoryDialog = reactive<{
     key: InventoryDialogKey | null;
@@ -763,6 +767,87 @@ export const useInventoryStore = defineStore("inventory", () => {
   }
 
 
+  function applyFilamentSpoolUpdate(updated: FilamentSpool) {
+    const index = filamentSpools.value.findIndex((spool) => spool.id === updated.id);
+    const next = index >= 0 ? [...filamentSpools.value] : [updated, ...filamentSpools.value];
+    if (index >= 0) next[index] = updated;
+    applyFilamentSpools(next);
+  }
+
+
+  function patchFilamentSpool(spoolId: number, patch: Partial<FilamentSpool>): FilamentSpool | null {
+    const previous = filamentSpools.value.find((spool) => spool.id === spoolId) || null;
+    if (!previous) return null;
+    applyFilamentSpoolUpdate({
+      ...previous,
+      ...patch,
+      id: spoolId,
+      updated_at: new Date().toISOString(),
+    });
+    return previous;
+  }
+
+
+  function isFilamentSpoolOperationPending(spool: FilamentSpool | Record<string, any> | number | null | undefined) {
+    const spoolId = typeof spool === "number" ? spool : numeric(spool && typeof spool === "object" ? spool.id : null);
+    return spoolId !== null && pendingFilamentSpoolOperationIds.value.includes(Math.round(spoolId));
+  }
+
+
+  function beginFilamentSpoolOperation(spoolId: number) {
+    inventoryOperationalRefreshSeq += 1;
+    if (!pendingFilamentSpoolOperationIds.value.includes(spoolId)) {
+      pendingFilamentSpoolOperationIds.value = [...pendingFilamentSpoolOperationIds.value, spoolId];
+    }
+  }
+
+
+  function finishFilamentSpoolOperation(spoolId: number) {
+    pendingFilamentSpoolOperationIds.value = pendingFilamentSpoolOperationIds.value.filter((id) => id !== spoolId);
+  }
+
+
+  async function refreshInventoryOperationalData(
+    spoolId: number | null = selectedFilamentSpoolId.value,
+    options: { includeAms?: boolean } = {},
+  ) {
+    const refreshSeq = ++inventoryOperationalRefreshSeq;
+    const includeAms = options.includeAms !== false;
+    const amsPromise = includeAms
+      ? loadInventoryAmsGlobal()
+      : Promise.resolve({
+        slots: amsStore().amsSlots,
+        overviews: inventoryAmsOverviews.value,
+        states: inventoryPrinterStates.value,
+      });
+    const [spoolResult, summaryResult, inventoryAmsResult, eventResult] = await Promise.all([
+      apiRequest<FilamentSpool[]>("/filament/spools"),
+      apiRequest<FilamentInventorySummary>("/filament/inventory/summary"),
+      amsPromise,
+      spoolId ? apiRequest<FilamentSpoolEvents>(`/filament/spools/${spoolId}/events`) : Promise.resolve(null),
+    ]);
+    if (refreshSeq !== inventoryOperationalRefreshSeq) return;
+    filamentInventorySummary.value = summaryResult;
+    applyFilamentSpools(spoolResult);
+    if (includeAms) {
+      amsStore().amsSlots = inventoryAmsResult.slots;
+      inventoryAmsOverviews.value = inventoryAmsResult.overviews;
+      inventoryPrinterStates.value = inventoryAmsResult.states;
+    }
+    if (eventResult) selectedFilamentSpoolEvents.value = eventResult;
+  }
+
+
+  function refreshInventoryOperationalDataInBackground(
+    spoolId: number | null = selectedFilamentSpoolId.value,
+    options: { includeAms?: boolean } = {},
+  ) {
+    void refreshInventoryOperationalData(spoolId, options).catch((err) => {
+      error.value = err instanceof Error ? err.message : String(err);
+    });
+  }
+
+
   async function loadInventoryAmsGlobal(): Promise<{
     slots: Record<string, any>[];
     overviews: Record<string, AmsOverview>;
@@ -1391,12 +1476,15 @@ export const useInventoryStore = defineStore("inventory", () => {
 
 
   async function adjustSelectedFilamentQuantity() {
-    if (!selectedFilamentSpool.value) return;
+    const spool = selectedFilamentSpool.value;
+    if (!spool) return;
+    const spoolId = Number(spool.id);
+    if (!Number.isFinite(spoolId) || isFilamentSpoolOperationPending(spoolId)) return;
     let actualWeight = presentationStore().optionalNumber(quantityAdjustForm.current_remaining_g);
     if (actualWeight === null) {
       const percent = presentationStore().optionalNumber(quantityAdjustForm.remain_percent);
       const nominal = numeric(
-        selectedFilamentSpool.value.nominal_weight_g ?? selectedFilamentSpool.value.initial_net_weight_g,
+        spool.nominal_weight_g ?? spool.initial_net_weight_g,
       );
       if (percent !== null && nominal !== null && nominal > 0) {
         actualWeight = (nominal * percent) / 100;
@@ -1406,58 +1494,122 @@ export const useInventoryStore = defineStore("inventory", () => {
       error.value = t("inventory.remainingWeightRequired");
       return;
     }
-    await withLoading(async () => {
-      await apiRequest<FilamentSpool>(`/filament/spools/${selectedFilamentSpool.value!.id}/weight`, {
+    const note = quantityAdjustForm.note || null;
+    const previous = patchFilamentSpool(spoolId, {
+      actual_weight_g: actualWeight,
+      current_remaining_g: actualWeight,
+      status: actualWeight === 0 ? "empty" : spool.status,
+      last_ams_remain_percent: actualWeight === 0 ? 0 : spool.last_ams_remain_percent,
+    });
+    selectedFilamentSpoolId.value = spoolId;
+    quantityAdjustForm.note = "";
+    closeInventoryDialog();
+    beginFilamentSpoolOperation(spoolId);
+    try {
+      const updated = await apiRequest<FilamentSpool>(`/filament/spools/${spoolId}/weight`, {
         method: "POST",
         body: JSON.stringify({
           actual_weight_g: actualWeight,
-          note: quantityAdjustForm.note || null,
+          note,
+          expected_updated_at: spool.updated_at,
         }),
       });
-      quantityAdjustForm.note = "";
-      closeInventoryDialog();
-      await loadInventory();
+      selectedFilamentSpoolId.value = updated.id;
+      applyFilamentSpoolUpdate(updated);
+      refreshInventoryOperationalDataInBackground(updated.id, { includeAms: false });
       message.value = t("inventory.quantityAdjusted");
-    });
+    } catch (err) {
+      if (previous) applyFilamentSpoolUpdate(previous);
+      error.value = err instanceof Error ? err.message : String(err);
+    } finally {
+      finishFilamentSpoolOperation(spoolId);
+    }
   }
 
 
   async function updateSelectedFilamentLocation() {
-    if (!selectedFilamentSpool.value) return;
-    await withLoading(async () => {
-      await apiRequest<FilamentSpool>(`/filament/spools/${selectedFilamentSpool.value!.id}/location`, {
-        method: "POST",
-        body: JSON.stringify({
-          printer_id: presentationStore().optionalNumber(locationAdjustForm.printer_id),
-          ams_id: locationAdjustForm.ams_id || null,
-          tray_id: locationAdjustForm.tray_id || null,
-          storage_location: locationAdjustForm.manual_location || null,
-          note: locationAdjustForm.note || null,
-        }),
-      });
-      locationAdjustForm.note = "";
-      closeInventoryDialog();
-      await loadInventory();
-      message.value = t("inventory.locationSaved");
+    const spool = selectedFilamentSpool.value;
+    if (!spool) return;
+    const spoolId = Number(spool.id);
+    if (!Number.isFinite(spoolId) || isFilamentSpoolOperationPending(spoolId)) return;
+    const payload = {
+      printer_id: presentationStore().optionalNumber(locationAdjustForm.printer_id),
+      ams_id: locationAdjustForm.ams_id || null,
+      tray_id: locationAdjustForm.tray_id || null,
+      storage_location: locationAdjustForm.manual_location || null,
+      note: locationAdjustForm.note || null,
+      expected_updated_at: spool.updated_at,
+    };
+    const nextStatus = payload.printer_id && payload.ams_id && payload.tray_id
+      ? "loaded_in_ams"
+      : payload.storage_location
+        ? spool.status === "empty" ? spool.status : "opened_in_storage"
+        : spool.status === "loaded_in_ams" ? "needs_location" : spool.status;
+    const includeAms = Boolean(spool.current_ams_id || payload.ams_id || spool.current_printer_id || payload.printer_id);
+    const previous = patchFilamentSpool(spoolId, {
+      current_printer_id: payload.printer_id,
+      current_ams_id: payload.ams_id,
+      current_tray_id: payload.tray_id,
+      storage_location: payload.storage_location,
+      status: nextStatus,
     });
+    selectedFilamentSpoolId.value = spoolId;
+    locationAdjustForm.note = "";
+    closeInventoryDialog();
+    beginFilamentSpoolOperation(spoolId);
+    try {
+      const updated = await apiRequest<FilamentSpool>(`/filament/spools/${spoolId}/location`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      selectedFilamentSpoolId.value = updated.id;
+      applyFilamentSpoolUpdate(updated);
+      refreshInventoryOperationalDataInBackground(updated.id, { includeAms });
+      message.value = t("inventory.locationSaved");
+    } catch (err) {
+      if (previous) applyFilamentSpoolUpdate(previous);
+      error.value = err instanceof Error ? err.message : String(err);
+    } finally {
+      finishFilamentSpoolOperation(spoolId);
+    }
   }
 
 
   async function updateFilamentSpoolStatus(spool: FilamentSpool | Record<string, any>, status: string) {
     const spoolId = Number(spool.id);
-    if (!Number.isFinite(spoolId)) return;
+    if (!Number.isFinite(spoolId) || isFilamentSpoolOperationPending(spoolId)) return;
     const confirmed = window.confirm(t(`inventory.confirmStatus.${status}`, { id: spoolId }));
     if (!confirmed) return;
-    await withLoading(async () => {
+    const previousSpool = filamentSpools.value.find((item) => item.id === spoolId) || spool as FilamentSpool;
+    const historical = ["empty", "archived"].includes(status);
+    const nextPatch: Partial<FilamentSpool> = {
+      status,
+      current_printer_id: historical || ["opened_in_storage", "needs_location", "unknown"].includes(status) ? null : previousSpool.current_printer_id,
+      current_ams_id: historical || ["opened_in_storage", "needs_location", "unknown"].includes(status) ? null : previousSpool.current_ams_id,
+      current_tray_id: historical || ["opened_in_storage", "needs_location", "unknown"].includes(status) ? null : previousSpool.current_tray_id,
+      actual_weight_g: status === "empty" ? 0 : previousSpool.actual_weight_g,
+      current_remaining_g: status === "empty" ? 0 : previousSpool.current_remaining_g,
+      last_ams_remain_percent: status === "empty" ? 0 : previousSpool.last_ams_remain_percent,
+    };
+    const previous = patchFilamentSpool(spoolId, nextPatch);
+    selectedFilamentSpoolId.value = spoolId;
+    closeInventoryDialog();
+    beginFilamentSpoolOperation(spoolId);
+    try {
       const updated = await apiRequest<FilamentSpool>(`/filament/spools/${spoolId}/status`, {
         method: "POST",
-        body: JSON.stringify({ status }),
+        body: JSON.stringify({ status, expected_updated_at: previousSpool.updated_at }),
       });
       selectedFilamentSpoolId.value = updated.id;
-      closeInventoryDialog();
-      await loadInventory();
+      applyFilamentSpoolUpdate(updated);
+      refreshInventoryOperationalDataInBackground(updated.id, { includeAms: true });
       message.value = t(`inventory.statusUpdated.${status}`);
-    });
+    } catch (err) {
+      if (previous) applyFilamentSpoolUpdate(previous);
+      error.value = err instanceof Error ? err.message : String(err);
+    } finally {
+      finishFilamentSpoolOperation(spoolId);
+    }
   }
 
 
@@ -2134,6 +2286,7 @@ export const useInventoryStore = defineStore("inventory", () => {
     filamentSkus,
     filamentSpools,
     filamentInventorySummary,
+    pendingFilamentSpoolOperationIds,
     inventoryTab,
     selectedFilamentSpoolId,
     selectedFilamentSpoolEvents,
@@ -2253,6 +2406,7 @@ export const useInventoryStore = defineStore("inventory", () => {
     createFilamentSpool,
     openFilamentSpoolDialog,
     selectFilamentSpool,
+    isFilamentSpoolOperationPending,
     adjustSelectedFilamentQuantity,
     updateSelectedFilamentLocation,
     updateFilamentSpoolStatus,

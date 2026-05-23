@@ -140,6 +140,31 @@ def _ingest(api_client, printer_id: int, payload: dict) -> None:
     assert response.status_code == 200, response.text
 
 
+def _placeholder_color_payload(*, ams_id: str = "129", tray_id: str = "0", state: int = 27) -> dict:
+    return {
+        "print": {
+            "command": "push_status",
+            "ams": {
+                "ams": [
+                    {
+                        "id": ams_id,
+                        "tray": [
+                            {
+                                "id": tray_id,
+                                "state": state,
+                                "tray_color": "FFFFFF00",
+                                "tray_uuid": "000000000000000000000000",
+                                "tag_uid": "0000000000000000",
+                                "remain": -1,
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+    }
+
+
 def test_brand_type_series_sku_crud_and_stats(api_client) -> None:
     brand = _brand(api_client)
     assert brand["aliases"] == []
@@ -360,6 +385,31 @@ def test_spool_unique_uid_location_weight_events_and_delete_rule(api_client) -> 
     assert delete_rejected.status_code == 409
     api_client.patch(f"/api/filament/spools/{spool['id']}", json={"status": "archived"})
     assert api_client.delete(f"/api/filament/spools/{spool['id']}").status_code == 204
+
+
+def test_stale_spool_operational_update_is_rejected(api_client) -> None:
+    _, _, sku = _inventory_tree(api_client)
+    created = api_client.post(
+        "/api/filament/spools",
+        json={"sku_id": sku["id"], "status": "opened_in_storage", "storage_location": "Shelf 1"},
+    )
+    assert created.status_code == 201, created.text
+    spool = created.json()
+
+    first = api_client.post(
+        f"/api/filament/spools/{spool['id']}/location",
+        json={"storage_location": "Shelf 2", "expected_updated_at": spool["updated_at"]},
+    )
+    assert first.status_code == 200, first.text
+
+    stale = api_client.post(
+        f"/api/filament/spools/{spool['id']}/location",
+        json={"storage_location": "Shelf 3", "expected_updated_at": spool["updated_at"]},
+    )
+    assert stale.status_code == 409
+
+    current = api_client.get(f"/api/filament/spools/{spool['id']}").json()
+    assert current["storage_location"] == "Shelf 2"
 
 
 def test_color_mapping_crud_and_sku_gaps(api_client) -> None:
@@ -962,6 +1012,46 @@ def test_ams_empty_exist_bit_unloads_slot_instead_of_staying_transitioning(api_c
     assert unloaded["current_tray_id"] is None
 
 
+def test_placeholder_color_transition_frame_does_not_create_spool_or_sku(api_client, printer_payload) -> None:
+    printer = _printer(api_client, printer_payload)
+    sku_count = len(api_client.get("/api/filament/skus").json())
+
+    _ingest(api_client, printer["id"], _placeholder_color_payload())
+
+    assert len(api_client.get("/api/filament/skus").json()) == sku_count
+    assert api_client.get("/api/filament/spools").json() == []
+    slots = api_client.get(f"/api/printers/{printer['id']}/ams/slots").json()
+    assert slots[0]["ams_id"] == "129"
+    assert slots[0]["tray_id"] == "0"
+    assert slots[0]["is_transitioning"] is True
+    assert slots[0]["filament_spool_id"] is None
+    debug_events = api_client.get("/api/debug/events").json()
+    assert not any(
+        item["event_type"] in {"spool.discovered", "spool.unidentified", "filament.spool.pending_confirmation"}
+        for item in debug_events
+    )
+
+
+def test_placeholder_color_then_real_rfid_creates_only_real_spool(api_client, printer_payload, fixture_dir) -> None:
+    printer = _printer(api_client, printer_payload)
+    petg_sku = _bambu_catalog_sku(api_client, material="PETG", series="Basic", color_hex="FFFFFF", tray_info_idx="GFG00")
+    _adjust_stock(api_client, petg_sku["id"], 1)
+    sku_count = len(api_client.get("/api/filament/skus").json())
+
+    _ingest(api_client, printer["id"], _placeholder_color_payload(ams_id="128"))
+    payload = json.loads((fixture_dir / "push_status_remain_unavailable.json").read_text())
+    _ingest(api_client, printer["id"], payload)
+
+    assert len(api_client.get("/api/filament/skus").json()) == sku_count
+    spools = api_client.get("/api/filament/spools").json()
+    assert len(spools) == 1
+    assert spools[0]["official_spool_uid"] == "C27BF5A592BD43898492BD61E354E427"
+    assert spools[0]["sku_id"] == petg_sku["id"]
+    assert spools[0]["current_ams_id"] == "128"
+    assert spools[0]["current_tray_id"] == "0"
+    assert spools[0]["config"].get("auto_created_sku_id") is None
+
+
 def test_ams_ht_transition_states_without_payload_do_not_create_phantom_spool(api_client, printer_payload, fixture_dir) -> None:
     printer = _printer(api_client, printer_payload)
 
@@ -1000,3 +1090,26 @@ def test_historical_ams_ht_transition_phantom_spools_are_hidden(api_client) -> N
     assert api_client.get("/api/filament/spools").json() == []
     for spool_id in spool_ids:
         assert api_client.get(f"/api/filament/spools/{spool_id}").status_code == 404
+
+
+def test_historical_placeholder_color_auto_created_phantom_spools_are_hidden(api_client) -> None:
+    _, _, sku = _inventory_tree(api_client)
+    raw = _placeholder_color_payload()["print"]["ams"]["ams"][0]["tray"][0]
+    response = api_client.post(
+        "/api/filament/spools",
+        json={
+            "sku_id": sku["id"],
+            "identity_source": "manual",
+            "status": "needs_location",
+            "config": {
+                "auto_created_sku_id": sku["id"],
+                "needs_sku_review": True,
+                "ams_raw": raw,
+            },
+        },
+    )
+    assert response.status_code == 201, response.text
+    spool_id = response.json()["id"]
+
+    assert api_client.get("/api/filament/spools").json() == []
+    assert api_client.get(f"/api/filament/spools/{spool_id}").status_code == 404

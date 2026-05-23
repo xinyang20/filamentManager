@@ -45,6 +45,7 @@ const {
   checkboxChecked,
   displayCell,
   downloadExport,
+  downloadRawMqttArchive,
   downloadSupportBundle,
   enforceDatabaseRetention,
   eventMessage,
@@ -68,6 +69,7 @@ const {
   databaseRetentionLastCleanupLabel,
   pendingRawMqttDbLimit,
   rawMqtt,
+  rawMqttArchives,
   rawMqttDbLimitOptions,
   recentEvents,
   saveRawMqttDbLimit,
@@ -120,10 +122,16 @@ const {
               <span>{{ t("debug.retentionThreshold") }}</span>
               <strong>{{ databaseRetention?.trigger_threshold_bytes ? formatBytes(databaseRetention.trigger_threshold_bytes) : "—" }}</strong>
             </div>
+            <div class="network-info-item"><span>{{ t("debug.hotRetention") }}</span><strong>{{ databaseRetention?.raw_mqtt_hot_retention_hours || 24 }}h</strong></div>
+            <div class="network-info-item"><span>{{ t("debug.archiveStatus") }}</span><strong>{{ databaseRetention?.raw_mqtt_archive_enabled ? t("common.on") : t("common.off") }}</strong></div>
             <div class="network-info-item"><span>{{ t("debug.rawMqttRows") }}</span><strong>{{ databaseRetention?.raw_mqtt_row_count || 0 }}</strong></div>
             <div class="network-info-item"><span>{{ t("debug.rawPayloadSize") }}</span><strong>{{ formatBytes(databaseRetention?.raw_mqtt_payload_bytes_estimate || 0) }}</strong></div>
             <div class="network-info-item"><span>{{ t("debug.rawMqttOldest") }}</span><strong>{{ formatCell(databaseRetention?.raw_mqtt_oldest_received_at) }}</strong></div>
             <div class="network-info-item"><span>{{ t("debug.rawMqttNewest") }}</span><strong>{{ formatCell(databaseRetention?.raw_mqtt_newest_received_at) }}</strong></div>
+            <div class="network-info-item"><span>{{ t("debug.archiveCount") }}</span><strong>{{ databaseRetention?.raw_mqtt_archive_count || 0 }}</strong></div>
+            <div class="network-info-item"><span>{{ t("debug.archiveSize") }}</span><strong>{{ formatBytes(databaseRetention?.raw_mqtt_archive_compressed_bytes || 0) }}</strong></div>
+            <div class="network-info-item"><span>{{ t("debug.archiveOldest") }}</span><strong>{{ formatCell(databaseRetention?.raw_mqtt_archive_oldest_received_at) }}</strong></div>
+            <div class="network-info-item"><span>{{ t("debug.archiveNewest") }}</span><strong>{{ formatCell(databaseRetention?.raw_mqtt_archive_newest_received_at) }}</strong></div>
             <div class="network-info-item"><span>{{ t("debug.retentionSupported") }}</span><strong>{{ databaseRetention?.enforcement_supported ? t("common.yes") : t("common.no") }}</strong></div>
             <div class="network-info-item">
               <span>{{ t("debug.retentionLastCleanup") }}</span>
@@ -193,6 +201,25 @@ const {
           </section>
           <section class="panel debug-card">
             <div class="panel-header"><h3>{{ t("debug.rawMqtt") }}</h3><Database :size="18" /></div>
+            <p class="panel-subtitle">{{ t("debug.rawMqttHotArchiveHint") }}</p>
+            <div v-if="rawMqttArchives.length" class="table-wrap debug-scroll">
+              <table>
+                <thead><tr><th>{{ t("table.time") }}</th><th>{{ t("debug.archiveRows") }}</th><th>{{ t("debug.archiveSize") }}</th><th>{{ t("table.printer") }}</th><th>{{ t("table.actions") }}</th></tr></thead>
+                <tbody>
+                  <tr v-for="archive in rawMqttArchives" :key="archive.id">
+                    <td>{{ formatCell(archive.first_received_at) }} - {{ formatCell(archive.last_received_at) }}</td>
+                    <td>{{ archive.row_count }}</td>
+                    <td>{{ formatBytes(archive.compressed_size_bytes) }}</td>
+                    <td>{{ archive.printer_ids.join(", ") || "—" }}</td>
+                    <td>
+                      <button class="icon-button" type="button" :title="t('debug.downloadArchive')" @click="downloadRawMqttArchive(archive)">
+                        <Download :size="16" />
+                      </button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
             <pre class="json-block debug-scroll">{{ JSON.stringify(rawMqtt, null, 2) }}</pre>
           </section>
         </div>

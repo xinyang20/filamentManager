@@ -96,6 +96,38 @@ def test_state_ten_without_filament_payload_is_transition() -> None:
     assert slot.identity.identity_source == "manual_required"
 
 
+def test_state_twenty_seven_placeholder_color_without_identity_is_transition() -> None:
+    units = parse_ams_units(
+        {
+            "print": {
+                "ams": {
+                    "ams": [
+                        {
+                            "id": "129",
+                            "tray": [
+                                {
+                                    "id": "0",
+                                    "state": 27,
+                                    "tray_color": "FFFFFF00",
+                                    "tray_uuid": "000000000000000000000000",
+                                    "tag_uid": "0000000000000000",
+                                    "remain": -1,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        }
+    )
+
+    slot = units[0].slots[0]
+    assert slot.color == "FFFFFF00"
+    assert slot.identity.identity_source == "manual_required"
+    assert slot.is_transitioning is True
+    assert "remain_unavailable" in (slot.identity.identity_warning or "")
+
+
 def test_empty_tray_exist_bit_overrides_transition_signals() -> None:
     units = parse_ams_units(
         {

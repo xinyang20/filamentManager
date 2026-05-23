@@ -8,6 +8,8 @@ class Settings(BaseSettings):
     mqtt_keepalive_seconds: int = 30
     prometheus_enabled: bool = False
     prometheus_bearer_token: str | None = None
+    raw_mqtt_hot_retention_hours: int = 24
+    raw_mqtt_archive_enabled: bool = True
 
     model_config = SettingsConfigDict(
         env_prefix="FILAMENT_MANAGER_",

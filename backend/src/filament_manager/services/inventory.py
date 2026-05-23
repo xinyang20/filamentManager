@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import func, select
@@ -16,7 +17,13 @@ from filament_manager.db.models import (
     FilamentTypeSeries,
     utc_now,
 )
-from filament_manager.mqtt.parser import ParsedAmsSlot, is_transition_state_without_payload, is_valid_identity_value
+from filament_manager.mqtt.parser import (
+    ParsedAmsSlot,
+    has_stable_tray_filament_payload,
+    is_placeholder_ams_color_frame,
+    is_transition_state_without_payload,
+    is_valid_identity_value,
+)
 from filament_manager.services.bambu_filament_catalog import (
     BambuOfficialMatch,
     official_color_effective_mapping,
@@ -68,6 +75,10 @@ class DuplicateFilamentSkuError(ValueError):
 
 
 class FilamentSpoolUidConflictError(ValueError):
+    pass
+
+
+class StaleFilamentSpoolUpdateError(ValueError):
     pass
 
 
@@ -480,11 +491,32 @@ def delete_filament_spool(db: Session, spool: FilamentSpool) -> None:
     db.commit()
 
 
+def _assert_spool_update_is_current(
+    db: Session,
+    spool: FilamentSpool,
+    expected_updated_at: datetime | None,
+) -> None:
+    if expected_updated_at is None:
+        return
+    db.refresh(spool)
+    current = _datetime_to_utc(spool.updated_at)
+    expected = _datetime_to_utc(expected_updated_at)
+    if current != expected:
+        raise StaleFilamentSpoolUpdateError("Filament spool was updated by another request; refresh and try again")
+
+
+def _datetime_to_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def update_filament_location(
     db: Session,
     spool: FilamentSpool,
     data: FilamentSpoolLocationUpdate,
 ) -> FilamentSpool:
+    _assert_spool_update_is_current(db, spool, data.expected_updated_at)
     previous = _location_snapshot(spool)
     spool.current_printer_id = data.printer_id
     spool.current_ams_id = data.ams_id
@@ -519,6 +551,7 @@ def update_filament_weight(
     spool: FilamentSpool,
     data: FilamentSpoolWeightUpdate,
 ) -> FilamentSpool:
+    _assert_spool_update_is_current(db, spool, data.expected_updated_at)
     previous = _spool_snapshot(spool)
     if data.actual_weight_g == 0:
         if spool.status not in HISTORICAL_SPOOL_STATUSES:
@@ -558,9 +591,11 @@ def update_filament_status(
     *,
     status: str,
     note: str | None = None,
+    expected_updated_at: datetime | None = None,
 ) -> FilamentSpool:
     if status not in REAL_SPOOL_STATUSES:
         raise ValueError("Unsupported filament spool status")
+    _assert_spool_update_is_current(db, spool, expected_updated_at)
     previous = _spool_snapshot(spool)
     _apply_filament_status_change(db, spool, status=status)
     db.add(spool)
@@ -2351,43 +2386,31 @@ def _slot_match_context(slot: ParsedAmsSlot) -> dict[str, Any]:
 
 def _slot_has_filament_payload(slot: ParsedAmsSlot) -> bool:
     raw = slot.raw if isinstance(slot.raw, dict) else {}
+    if raw:
+        return _raw_has_filament_payload(raw)
     fields = (slot.material, slot.series, slot.color, slot.color_name)
     if any(_clean_text(value) for value in fields):
-        return True
-    return _raw_has_filament_payload(raw)
-
-
-def _raw_has_filament_payload(raw: dict[str, Any]) -> bool:
-    fields = (
-        raw.get("tray_type"),
-        raw.get("tray_sub_brands"),
-        raw.get("tray_color"),
-        raw.get("color"),
-        raw.get("tray_id_name"),
-        raw.get("tray_info_idx"),
-        raw.get("filament_name"),
-        raw.get("tray_color_name"),
-        raw.get("color_name"),
-        raw.get("filament_color_name"),
-        raw.get("color_display_name"),
-    )
-    if any(_clean_text(value) for value in fields):
-        return True
-    cols = raw.get("cols")
-    if isinstance(cols, list) and any(_clean_text(value) for value in cols):
         return True
     return False
 
 
+def _raw_has_filament_payload(raw: dict[str, Any]) -> bool:
+    return has_stable_tray_filament_payload(raw)
+
+
 def _is_phantom_ams_spool(spool: FilamentSpool) -> bool:
-    if spool.sku_id is not None or spool.official_spool_uid:
+    if spool.official_spool_uid:
         return False
     if spool.status not in {"unknown", "needs_location"}:
         return False
     config = spool.config if isinstance(spool.config, dict) else {}
+    if spool.sku_id is not None and config.get("auto_created_sku_id") != spool.sku_id:
+        return False
     raw = config.get("ams_raw")
     if not isinstance(raw, dict) or _raw_has_filament_payload(raw):
         return False
+    if is_placeholder_ams_color_frame(raw):
+        return True
     state = (
         _clean_text(raw.get("tray_state"))
         or _clean_text(raw.get("slot_state"))

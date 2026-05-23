@@ -1,11 +1,56 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { nextTick } from "vue";
 import { useInventoryStore } from "./inventory";
 import { useI18nStore } from "./i18n";
-import { mockApi, requestPaths, resetStoreTest } from "./testHelpers";
+import { usePrintersStore } from "./printers";
+import { useUiStore } from "./ui";
+import { mockApi, printerFixture, requestPaths, resetStoreTest } from "./testHelpers";
 
 describe("useInventoryStore", () => {
   beforeEach(resetStoreTest);
+
+  const baseSpool = {
+    id: 1,
+    sku_id: 1,
+    sku_label: "Bambu PLA White",
+    brand_name: "Bambu",
+    material: "PLA",
+    series: "Basic",
+    color_name: "White",
+    color_value: "FFFFFF",
+    identity_source: "manual",
+    status: "opened_in_storage",
+    used_weight_g: 0,
+    manual_quantity_protected: false,
+    created_at: "2026-05-06T00:00:00Z",
+    updated_at: "2026-05-06T00:00:00Z",
+  };
+
+  function seedSelectedSpool(store: ReturnType<typeof useInventoryStore>, spool: Record<string, any> = baseSpool) {
+    store.filamentSpools = [spool as any];
+    store.selectedFilamentSpoolId = Number(spool.id);
+    usePrintersStore().printers = [printerFixture];
+  }
+
+  function handleOperationalRefresh(path: string, updatedSpool: Record<string, any>) {
+    if (path === "/filament/spools") return [updatedSpool];
+    if (path === "/filament/inventory/summary") return { totals: { spools: 1 }, skus: [], sealed_stock: [], opened_spools: [updatedSpool], ams_spools: [], needs_location_spools: [], history_spools: [] };
+    if (path === "/filament/spools/1/events") return { events: [{ id: 1, spool_id: 1, event_type: "updated", message: "updated", created_at: "2026-05-06T00:00:00Z" }] };
+    if (path === "/printers/1/ams/slots") return [];
+    if (path === "/printers/1/ams/overview") return { summary: { ams_count: 0, slot_count: 0, loaded_count: 0, empty_count: 0, transitioning_count: 0, unknown_type_count: 0 }, units: [] };
+    if (path === "/printers/1/state") return null;
+    return undefined;
+  }
+
+  function expectNoCatalogRefresh(paths: string[]) {
+    expect(paths).not.toContain("/filament/brands");
+    expect(paths).not.toContain("/filament/type-series");
+    expect(paths).not.toContain("/filament/color-mappings");
+    expect(paths).not.toContain("/filament/effective-color-mappings");
+    expect(paths).not.toContain("/filament/bambu-official-color-mappings");
+    expect(paths).not.toContain("/filament/color-mapping-gaps");
+    expect(paths).not.toContain("/filament/skus");
+  }
 
   it("loads filament catalog, stock summary and selected spool events", async () => {
     const fetchMock = mockApi((path) => {
@@ -31,6 +76,118 @@ describe("useInventoryStore", () => {
     expect(store.selectedFilamentSpoolId).toBe(1);
     expect(store.selectedFilamentSpoolEvents?.events).toHaveLength(1);
     expect(requestPaths(fetchMock)).toContain("/filament/inventory/summary");
+  });
+
+  it("updates selected spool location locally and refreshes only operational inventory data", async () => {
+    const store = useInventoryStore();
+    seedSelectedSpool(store);
+    store.locationAdjustForm.manual_location = "Drybox A";
+    const updatedSpool = { ...baseSpool, storage_location: "Drybox A", updated_at: "2026-05-06T00:05:00Z" };
+
+    const fetchMock = mockApi((path, init) => {
+      if (path === "/filament/spools/1/location") {
+        expect(init.method).toBe("POST");
+        expect(JSON.parse(String(init.body))).toMatchObject({
+          storage_location: "Drybox A",
+          expected_updated_at: baseSpool.updated_at,
+        });
+        return updatedSpool;
+      }
+      const refresh = handleOperationalRefresh(path, updatedSpool);
+      if (refresh !== undefined) return refresh;
+      throw new Error(`Unexpected request: ${path}`);
+    });
+
+    await store.updateSelectedFilamentLocation();
+    await nextTick();
+
+    expect(store.filamentSpools[0].storage_location).toBe("Drybox A");
+    const paths = requestPaths(fetchMock);
+    expect(paths).toContain("/filament/spools");
+    expect(paths).toContain("/filament/inventory/summary");
+    expect(paths).toContain("/filament/spools/1/events");
+    expect(paths.some((path) => path.includes("/ams/"))).toBe(false);
+    expectNoCatalogRefresh(paths);
+  });
+
+  it("adjusts selected spool quantity locally and refreshes only operational inventory data", async () => {
+    const store = useInventoryStore();
+    seedSelectedSpool(store);
+    store.quantityAdjustForm.current_remaining_g = 650;
+    const updatedSpool = { ...baseSpool, actual_weight_g: 650, current_remaining_g: 650, updated_at: "2026-05-06T00:05:00Z" };
+
+    const fetchMock = mockApi((path, init) => {
+      if (path === "/filament/spools/1/weight") {
+        expect(init.method).toBe("POST");
+        expect(JSON.parse(String(init.body))).toMatchObject({
+          actual_weight_g: 650,
+          expected_updated_at: baseSpool.updated_at,
+        });
+        return updatedSpool;
+      }
+      const refresh = handleOperationalRefresh(path, updatedSpool);
+      if (refresh !== undefined) return refresh;
+      throw new Error(`Unexpected request: ${path}`);
+    });
+
+    await store.adjustSelectedFilamentQuantity();
+    await nextTick();
+
+    expect(store.filamentSpools[0].actual_weight_g).toBe(650);
+    const paths = requestPaths(fetchMock);
+    expect(paths).toContain("/filament/spools");
+    expect(paths).toContain("/filament/inventory/summary");
+    expect(paths).toContain("/filament/spools/1/events");
+    expect(paths.some((path) => path.includes("/ams/"))).toBe(false);
+    expectNoCatalogRefresh(paths);
+  });
+
+  it("updates spool status locally and refreshes only operational inventory data", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const store = useInventoryStore();
+    seedSelectedSpool(store);
+    const updatedSpool = { ...baseSpool, status: "empty", empty_at: "2026-05-06T00:05:00Z", updated_at: "2026-05-06T00:05:00Z" };
+
+    const fetchMock = mockApi((path, init) => {
+      if (path === "/filament/spools/1/status") {
+        expect(init.method).toBe("POST");
+        expect(JSON.parse(String(init.body))).toEqual({
+          status: "empty",
+          expected_updated_at: baseSpool.updated_at,
+        });
+        return updatedSpool;
+      }
+      const refresh = handleOperationalRefresh(path, updatedSpool);
+      if (refresh !== undefined) return refresh;
+      throw new Error(`Unexpected request: ${path}`);
+    });
+
+    await store.updateFilamentSpoolStatus(baseSpool, "empty");
+    await nextTick();
+
+    expect(store.filamentSpools[0].status).toBe("empty");
+    const paths = requestPaths(fetchMock);
+    expect(paths).toContain("/filament/spools");
+    expect(paths).toContain("/filament/inventory/summary");
+    expect(paths).toContain("/filament/spools/1/events");
+    expect(paths).toContain("/printers/1/state");
+    expectNoCatalogRefresh(paths);
+  });
+
+  it("does not trigger global loading for spool operational updates", async () => {
+    const store = useInventoryStore();
+    seedSelectedSpool(store);
+    store.quantityAdjustForm.current_remaining_g = 500;
+    mockApi((path) => {
+      if (path === "/filament/spools/1/weight") return { ...baseSpool, actual_weight_g: 500, current_remaining_g: 500 };
+      const refresh = handleOperationalRefresh(path, { ...baseSpool, actual_weight_g: 500, current_remaining_g: 500 });
+      if (refresh !== undefined) return refresh;
+      throw new Error(`Unexpected request: ${path}`);
+    });
+
+    await store.adjustSelectedFilamentQuantity();
+
+    expect(useUiStore().loading).toBe(false);
   });
 
   it("sorts SKU brand and type-series selectors and filters type-series by brand", async () => {

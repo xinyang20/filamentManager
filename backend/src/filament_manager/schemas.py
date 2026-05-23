@@ -421,6 +421,7 @@ class FilamentSpoolUpdate(BaseModel):
 class FilamentSpoolWeightUpdate(BaseModel):
     actual_weight_g: float = Field(ge=0)
     note: str | None = None
+    expected_updated_at: datetime | None = None
 
 
 class FilamentSpoolLocationUpdate(BaseModel):
@@ -429,11 +430,13 @@ class FilamentSpoolLocationUpdate(BaseModel):
     tray_id: str | None = Field(default=None, max_length=40)
     storage_location: str | None = None
     note: str | None = None
+    expected_updated_at: datetime | None = None
 
 
 class FilamentSpoolStatusUpdate(BaseModel):
     status: str = Field(pattern="^(opened_in_storage|loaded_in_ams|needs_location|empty|archived|unknown)$")
     note: str | None = None
+    expected_updated_at: datetime | None = None
 
 
 class FilamentSpoolUidConflictResolve(BaseModel):
@@ -598,6 +601,24 @@ class RawMqttMessageRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class RawMqttArchiveRead(BaseModel):
+    id: int
+    file_path: str
+    file_format: str
+    row_count: int
+    compressed_size_bytes: int
+    first_raw_message_id: int | None = None
+    last_raw_message_id: int | None = None
+    first_received_at: datetime | None = None
+    last_received_at: datetime | None = None
+    printer_ids: list[int] = Field(default_factory=list)
+    command_counts: dict[str, int] = Field(default_factory=dict)
+    sha256: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class DatabaseRetentionCleanupRead(BaseModel):
     started_at: datetime
     finished_at: datetime
@@ -606,6 +627,12 @@ class DatabaseRetentionCleanupRead(BaseModel):
     trigger_threshold_bytes: int | None = None
     database_size_before_bytes: int | None = None
     database_size_after_bytes: int | None = None
+    raw_mqtt_hot_retention_hours: int | None = None
+    archive_enabled: bool | None = None
+    archive_count: int = 0
+    archived_rows: int = 0
+    archive_bytes: int = 0
+    archive_ids: list[int] = Field(default_factory=list)
     deleted_rows: int = 0
     nullified_device_metric_samples: int = 0
     nullified_ams_slot_history_samples: int = 0
@@ -623,10 +650,18 @@ class DatabaseRetentionStatusRead(BaseModel):
     sqlite: bool
     enforcement_supported: bool
     is_over_threshold: bool
+    raw_mqtt_hot_retention_hours: int
+    raw_mqtt_archive_enabled: bool
     raw_mqtt_row_count: int
     raw_mqtt_payload_bytes_estimate: int
     raw_mqtt_oldest_received_at: datetime | None = None
     raw_mqtt_newest_received_at: datetime | None = None
+    raw_mqtt_archive_count: int = 0
+    raw_mqtt_archive_row_count: int = 0
+    raw_mqtt_archive_compressed_bytes: int = 0
+    raw_mqtt_archive_oldest_received_at: datetime | None = None
+    raw_mqtt_archive_newest_received_at: datetime | None = None
+    raw_mqtt_archive_last_created_at: datetime | None = None
     retention_running: bool
     retention_running_since: datetime | None = None
     last_cleanup: DatabaseRetentionCleanupRead | None = None

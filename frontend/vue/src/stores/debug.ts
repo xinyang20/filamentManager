@@ -1,7 +1,7 @@
 import { computed, reactive, ref } from "vue";
 import { acceptHMRUpdate, defineStore, storeToRefs } from "pinia";
 import { API_BASE, apiRequest } from "../api";
-import type { DatabaseRetentionStatus, RawMqttDbLimit, SystemInfo, UnifiedEvent } from "../types";
+import type { DatabaseRetentionStatus, RawMqttArchive, RawMqttDbLimit, SystemInfo, UnifiedEvent } from "../types";
 import { useEventsStore } from "./events";
 import { useI18nStore } from "./i18n";
 import { useNavigationStore } from "./navigation";
@@ -22,6 +22,7 @@ export const useDebugStore = defineStore("debug", () => {
   const presentationStore = () => usePresentationStore();
 
   const rawMqtt = ref<Record<string, any>[]>([]);
+  const rawMqttArchives = ref<RawMqttArchive[]>([]);
 
   const systemInfo = ref<SystemInfo | null>(null);
   const databaseRetention = ref<DatabaseRetentionStatus | null>(null);
@@ -66,7 +67,7 @@ export const useDebugStore = defineStore("debug", () => {
     if (cleanup.error) return t("debug.retentionCleanupError");
     if (cleanup.blocked_non_raw_size) return t("debug.retentionCleanupBlocked");
     if (cleanup.skipped_reason) return t("debug.retentionCleanupSkipped", { reason: cleanup.skipped_reason });
-    return t("debug.retentionCleanupDeleted", { count: cleanup.deleted_rows });
+    return t("debug.retentionCleanupArchived", { count: cleanup.archived_rows ?? cleanup.deleted_rows });
   });
 
 
@@ -90,13 +91,15 @@ export const useDebugStore = defineStore("debug", () => {
   ]);
 
   async function loadDebug() {
-    const [raw, eventResult, infoResult, retentionResult] = await Promise.all([
+    const [raw, archiveResult, eventResult, infoResult, retentionResult] = await Promise.all([
       apiRequest<Record<string, any>[]>("/debug/raw-mqtt?limit=20"),
+      apiRequest<RawMqttArchive[]>("/debug/raw-mqtt-archives?limit=20"),
       apiRequest<UnifiedEvent[]>("/events?limit=80"),
       apiRequest<SystemInfo>("/system/info"),
       apiRequest<DatabaseRetentionStatus>("/debug/database-retention"),
     ]);
     rawMqtt.value = raw;
+    rawMqttArchives.value = archiveResult;
     eventsStore().events = eventResult;
     systemInfo.value = infoResult;
     updateDatabaseRetention(retentionResult);
@@ -128,6 +131,23 @@ export const useDebugStore = defineStore("debug", () => {
     await withLoading(async () => {
       const result = await apiRequest<DatabaseRetentionStatus>("/debug/database-retention/enforce", { method: "POST" });
       updateDatabaseRetention(result);
+      rawMqttArchives.value = await apiRequest<RawMqttArchive[]>("/debug/raw-mqtt-archives?limit=20");
+      rawMqtt.value = await apiRequest<Record<string, any>[]>("/debug/raw-mqtt?limit=20");
+    });
+  }
+
+
+  async function downloadRawMqttArchive(archive: RawMqttArchive) {
+    await withLoading(async () => {
+      const response = await fetch(`${API_BASE}/debug/raw-mqtt-archives/${archive.id}/download`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = archive.file_path.split("/").pop() || `raw-mqtt-archive-${archive.id}.zip`;
+      link.click();
+      URL.revokeObjectURL(url);
     });
   }
 
@@ -226,6 +246,7 @@ export const useDebugStore = defineStore("debug", () => {
 
   return {
     rawMqtt,
+    rawMqttArchives,
     systemInfo,
     databaseRetention,
     pendingRawMqttDbLimit,
@@ -240,6 +261,7 @@ export const useDebugStore = defineStore("debug", () => {
     loadDebug,
     saveRawMqttDbLimit,
     enforceDatabaseRetention,
+    downloadRawMqttArchive,
     downloadSupportBundle,
     downloadExport,
     importBackupFile,

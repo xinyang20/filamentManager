@@ -130,6 +130,9 @@ def _apply_sqlite_additive_migrations(db_engine: Engine) -> None:
                 for name, ddl in missing_sku_columns:
                     connection.execute(text(f"ALTER TABLE filament_skus ADD COLUMN {name} {ddl}"))
 
+    if "raw_mqtt_archives" not in table_names:
+        Base.metadata.tables["raw_mqtt_archives"].create(bind=db_engine, checkfirst=True)
+
     if "device_status_snapshots" not in table_names:
         return
     existing = {column["name"] for column in inspector.get_columns("device_status_snapshots")}
