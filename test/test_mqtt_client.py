@@ -15,8 +15,10 @@ from filament_manager.mqtt.client import (
     build_pushall_request,
 )
 from filament_manager.api import routes
+from filament_manager.api import helpers as api_helpers
 from filament_manager.db import session as db_session
 from filament_manager.db.models import Printer
+from filament_manager.services.events import _sse_type
 
 
 def test_connect_rejects_plaintext_on_bambu_tls_port(api_client, printer_payload) -> None:
@@ -247,6 +249,62 @@ def test_printer_list_reconciles_stale_connected_status(api_client, printer_payl
 
     assert refreshed["connection_status"] == "disconnected"
     assert "reconnect required" in refreshed["last_error"]
+
+
+def test_printer_list_reconciles_runtime_connected_status(api_client, printer_payload, monkeypatch) -> None:
+    printer = api_client.post("/api/printers", json=printer_payload).json()
+
+    assert db_session.SessionLocal is not None
+    with db_session.SessionLocal() as db:
+        stored = db.get(Printer, printer["id"])
+        assert stored is not None
+        stored.connection_status = "connecting"
+        stored.last_error = "pending handshake"
+        db.add(stored)
+        db.commit()
+
+    monkeypatch.setattr(mqtt_client_module.mqtt_manager, "is_connected", lambda printer_id: printer_id == printer["id"])
+
+    body = api_client.get("/api/printers").json()
+    refreshed = next(item for item in body if item["id"] == printer["id"])
+
+    assert refreshed["connection_status"] == "connected"
+    assert refreshed["last_sync_at"] is not None
+    assert refreshed["last_error"] is None
+
+
+def test_connection_events_refresh_status_over_sse() -> None:
+    assert _sse_type({"type": "printer.connection.restored"}) == "printer.status.updated"
+    assert _sse_type({"type": "printer.connection.disconnected"}) == "printer.status.updated"
+
+
+def test_runtime_connection_status_sync_ignores_sqlite_lock(monkeypatch) -> None:
+    printer = SimpleNamespace(id=1, connection_status="connecting", last_sync_at=None, last_error="pending")
+
+    class FakeWriteDb:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback) -> bool:
+            return False
+
+        def get(self, _model, _printer_id):
+            return SimpleNamespace(id=1, connection_status="connecting", last_sync_at=None, last_error="pending")
+
+        def add(self, _value) -> None:
+            pass
+
+        def commit(self) -> None:
+            raise OperationalError("UPDATE printers", {}, Exception("database is locked"))
+
+    monkeypatch.setattr(api_helpers.mqtt_manager, "is_connected", lambda printer_id: printer_id == printer.id)
+    monkeypatch.setattr(api_helpers.db_session, "SessionLocal", lambda: FakeWriteDb())
+
+    api_helpers.sync_runtime_connection_status(None, printer)
+
+    assert printer.connection_status == "connected"
+    assert printer.last_sync_at is not None
+    assert printer.last_error is None
 
 
 def test_full_refresh_reconnects_stale_runtime_session(api_client, printer_payload, monkeypatch) -> None:

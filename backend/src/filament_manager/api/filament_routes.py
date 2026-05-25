@@ -390,7 +390,8 @@ def api_list_filament_spools(db: Session = Depends(get_db)) -> list[dict[str, An
 @router.post("/filament/spools", response_model=FilamentSpoolRead, status_code=status.HTTP_201_CREATED)
 def api_create_filament_spool(data: FilamentSpoolCreate, db: Session = Depends(get_db)) -> dict[str, Any]:
     try:
-        spool = create_filament_spool(db, data)
+        with db_session.sqlite_write_lock:
+            spool = create_filament_spool(db, data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return filament_spool_to_read(spool)
@@ -410,11 +411,12 @@ def api_update_filament_spool(
     data: FilamentSpoolUpdate,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    spool = get_filament_spool(db, spool_id)
-    if spool is None:
-        raise HTTPException(status_code=404, detail="Filament spool not found")
     try:
-        updated = update_filament_spool(db, spool, data)
+        with db_session.sqlite_write_lock:
+            spool = get_filament_spool(db, spool_id)
+            if spool is None:
+                raise HTTPException(status_code=404, detail="Filament spool not found")
+            updated = update_filament_spool(db, spool, data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return filament_spool_to_read(updated)
@@ -422,10 +424,11 @@ def api_update_filament_spool(
 
 @router.post("/filament/spools/{spool_id}/confirm-sku", response_model=FilamentSpoolRead)
 def api_confirm_filament_spool_sku(spool_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
-    spool = get_filament_spool(db, spool_id)
-    if spool is None:
-        raise HTTPException(status_code=404, detail="Filament spool not found")
-    return filament_spool_to_read(confirm_filament_spool_sku_review(db, spool))
+    with db_session.sqlite_write_lock:
+        spool = get_filament_spool(db, spool_id)
+        if spool is None:
+            raise HTTPException(status_code=404, detail="Filament spool not found")
+        return filament_spool_to_read(confirm_filament_spool_sku_review(db, spool))
 
 
 @router.post("/filament/spools/{spool_id}/status", response_model=FilamentSpoolRead)
@@ -434,17 +437,18 @@ def api_update_filament_spool_status(
     data: FilamentSpoolStatusUpdate,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    spool = get_filament_spool(db, spool_id)
-    if spool is None:
-        raise HTTPException(status_code=404, detail="Filament spool not found")
     try:
-        updated = update_filament_status(
-            db,
-            spool,
-            status=data.status,
-            note=data.note,
-            expected_updated_at=data.expected_updated_at,
-        )
+        with db_session.sqlite_write_lock:
+            spool = get_filament_spool(db, spool_id)
+            if spool is None:
+                raise HTTPException(status_code=404, detail="Filament spool not found")
+            updated = update_filament_status(
+                db,
+                spool,
+                status=data.status,
+                note=data.note,
+                expected_updated_at=data.expected_updated_at,
+            )
     except StaleFilamentSpoolUpdateError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
@@ -458,11 +462,12 @@ def api_resolve_filament_spool_uid_conflict(
     data: FilamentSpoolUidConflictResolve,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    spool = get_filament_spool(db, spool_id)
-    if spool is None:
-        raise HTTPException(status_code=404, detail="Filament spool not found")
     try:
-        resolved = resolve_reappeared_uid_conflict(db, spool, action=data.action, note=data.note)
+        with db_session.sqlite_write_lock:
+            spool = get_filament_spool(db, spool_id)
+            if spool is None:
+                raise HTTPException(status_code=404, detail="Filament spool not found")
+            resolved = resolve_reappeared_uid_conflict(db, spool, action=data.action, note=data.note)
     except FilamentSpoolUidConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
@@ -474,11 +479,12 @@ def api_resolve_filament_spool_uid_conflict(
 
 @router.delete("/filament/spools/{spool_id}", status_code=status.HTTP_204_NO_CONTENT)
 def api_delete_filament_spool(spool_id: int, db: Session = Depends(get_db)) -> Response:
-    spool = get_filament_spool(db, spool_id)
-    if spool is None:
-        raise HTTPException(status_code=404, detail="Filament spool not found")
     try:
-        delete_filament_spool(db, spool)
+        with db_session.sqlite_write_lock:
+            spool = get_filament_spool(db, spool_id)
+            if spool is None:
+                raise HTTPException(status_code=404, detail="Filament spool not found")
+            delete_filament_spool(db, spool)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -497,11 +503,12 @@ def api_update_filament_spool_weight(
     data: FilamentSpoolWeightUpdate,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    spool = get_filament_spool(db, spool_id)
-    if spool is None:
-        raise HTTPException(status_code=404, detail="Filament spool not found")
     try:
-        updated = update_filament_weight(db, spool, data)
+        with db_session.sqlite_write_lock:
+            spool = get_filament_spool(db, spool_id)
+            if spool is None:
+                raise HTTPException(status_code=404, detail="Filament spool not found")
+            updated = update_filament_weight(db, spool, data)
     except StaleFilamentSpoolUpdateError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
@@ -515,24 +522,26 @@ def api_update_filament_spool_location(
     data: FilamentSpoolLocationUpdate,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    spool = get_filament_spool(db, spool_id)
-    if spool is None:
-        raise HTTPException(status_code=404, detail="Filament spool not found")
     try:
-        return filament_spool_to_read(update_filament_location(db, spool, data))
+        with db_session.sqlite_write_lock:
+            spool = get_filament_spool(db, spool_id)
+            if spool is None:
+                raise HTTPException(status_code=404, detail="Filament spool not found")
+            return filament_spool_to_read(update_filament_location(db, spool, data))
     except StaleFilamentSpoolUpdateError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/ams/slots/{slot_id}/bind", response_model=AmsSlotRead)
 def api_bind_slot(slot_id: int, data: SlotBindRequest, db: Session = Depends(get_db)) -> AmsSlot:
-    slot = db.get(AmsSlot, slot_id)
-    if slot is None:
-        raise HTTPException(status_code=404, detail="AMS slot not found")
-    filament_spool = get_filament_spool(db, data.spool_id)
-    if filament_spool is None:
-        raise HTTPException(status_code=404, detail="Filament spool not found")
-    return bind_slot_to_filament_spool(db, slot, filament_spool)
+    with db_session.sqlite_write_lock:
+        slot = db.get(AmsSlot, slot_id)
+        if slot is None:
+            raise HTTPException(status_code=404, detail="AMS slot not found")
+        filament_spool = get_filament_spool(db, data.spool_id)
+        if filament_spool is None:
+            raise HTTPException(status_code=404, detail="Filament spool not found")
+        return bind_slot_to_filament_spool(db, slot, filament_spool)
 
 
 @router.api_route("/spools", methods=["GET", "POST", "PATCH", "DELETE"])

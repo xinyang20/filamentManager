@@ -110,6 +110,48 @@ describe("useInventoryStore", () => {
     expectNoCatalogRefresh(paths);
   });
 
+  it("keeps optimistic spool location during realtime inventory refresh", async () => {
+    const store = useInventoryStore();
+    seedSelectedSpool(store);
+    store.locationAdjustForm.manual_location = "Drybox A";
+    const updatedSpool = { ...baseSpool, storage_location: "Drybox A", updated_at: "2026-05-06T00:05:00Z" };
+    let serverSpool = baseSpool;
+    let resolveLocation: ((value: Record<string, any>) => void) | null = null;
+    const locationRequest = new Promise<Record<string, any>>((resolve) => {
+      resolveLocation = resolve;
+    });
+
+    mockApi((path, init) => {
+      if (path === "/filament/spools/1/location") {
+        expect(init.method).toBe("POST");
+        return locationRequest;
+      }
+      if (path === "/filament/brands") return [];
+      if (path === "/filament/type-series") return [];
+      if (path === "/filament/color-mappings") return [];
+      if (path === "/filament/effective-color-mappings") return [];
+      if (path === "/filament/bambu-official-color-mappings") return [];
+      if (path === "/filament/color-mapping-gaps") return [];
+      if (path === "/filament/skus") return [];
+      const refresh = handleOperationalRefresh(path, serverSpool);
+      if (refresh !== undefined) return refresh;
+      throw new Error(`Unexpected request: ${path}`);
+    });
+
+    const updatePromise = store.updateSelectedFilamentLocation();
+    await nextTick();
+    expect(store.filamentSpools[0].storage_location).toBe("Drybox A");
+
+    await store.loadInventory();
+    expect(store.filamentSpools[0].storage_location).toBe("Drybox A");
+
+    serverSpool = updatedSpool;
+    resolveLocation?.(updatedSpool);
+    await updatePromise;
+    await nextTick();
+    expect(store.filamentSpools[0].storage_location).toBe("Drybox A");
+  });
+
   it("adjusts selected spool quantity locally and refreshes only operational inventory data", async () => {
     const store = useInventoryStore();
     seedSelectedSpool(store);

@@ -20,6 +20,8 @@ SSE_EVENT_MAP = {
     "spool.unidentified": "ams.slot.updated",
     "spool.discovered": "ams.slot.updated",
     "spool.location_changed": "ams.slot.updated",
+    "printer.connection.restored": "printer.status.updated",
+    "printer.connection.disconnected": "printer.status.updated",
     "storage.scan": "storage.scan.finished",
     "storage.scan_failed": "storage.scan.failed",
     "print.started": "printer.status.updated",

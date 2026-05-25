@@ -2,14 +2,17 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from email.utils import format_datetime
+import logging
 import mimetypes
 from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from filament_manager.core.security import redact_sensitive
+from filament_manager.db import session as db_session
 from filament_manager.db.models import (
     AmsSlot,
     AmsUnit,
@@ -17,6 +20,7 @@ from filament_manager.db.models import (
     DeviceStatusSnapshot,
     NotificationRule,
     NotificationTarget,
+    Printer,
     PrinterStorageFile,
     PrinterStateSnapshot,
     PrintLogEntry,
@@ -103,6 +107,8 @@ def metric_sample_read(row: DeviceMetricSample) -> DeviceMetricSampleRead:
             "value_text": str(value_float) if value_float is not None else None,
         }
     )
+
+LOGGER = logging.getLogger(__name__)
 
 
 def canonical_metric_name(metric: str) -> str:
@@ -443,12 +449,72 @@ def sync_runtime_connection_status(db: Session, printer: Any) -> None:
     if printer.connection_status not in {"connected", "connecting"}:
         return
     if mqtt_manager.is_connected(printer.id):
+        if printer.connection_status != "connected":
+            _set_runtime_connection_status(
+                printer,
+                status="connected",
+                last_error=None,
+                last_sync_at=datetime.now(timezone.utc),
+            )
         return
-    printer.connection_status = "disconnected"
-    printer.last_error = "MQTT session is not active; reconnect required"
-    db.add(printer)
-    db.commit()
-    db.refresh(printer)
+    _set_runtime_connection_status(
+        printer,
+        status="disconnected",
+        last_error="MQTT session is not active; reconnect required",
+        last_sync_at=None,
+    )
+
+
+def _set_runtime_connection_status(
+    printer: Any,
+    *,
+    status: str,
+    last_error: str | None,
+    last_sync_at: datetime | None,
+) -> None:
+    printer.connection_status = status
+    printer.last_error = last_error
+    if last_sync_at is not None:
+        printer.last_sync_at = last_sync_at
+    _persist_runtime_connection_status_best_effort(
+        int(printer.id),
+        status=status,
+        last_error=last_error,
+        last_sync_at=last_sync_at,
+    )
+
+
+def _persist_runtime_connection_status_best_effort(
+    printer_id: int,
+    *,
+    status: str,
+    last_error: str | None,
+    last_sync_at: datetime | None,
+) -> None:
+    if db_session.SessionLocal is None:
+        return
+    try:
+        with db_session.sqlite_write_lock:
+            with db_session.SessionLocal() as write_db:
+                stored = write_db.get(Printer, printer_id)
+                if stored is None:
+                    return
+                stored.connection_status = status
+                stored.last_error = last_error
+                if last_sync_at is not None:
+                    stored.last_sync_at = last_sync_at
+                write_db.add(stored)
+                write_db.commit()
+    except OperationalError as exc:
+        if _is_sqlite_database_locked(exc):
+            LOGGER.warning("SQLite write lock while syncing printer connection status for printer id %s", printer_id)
+            return
+        raise
+
+
+def _is_sqlite_database_locked(value: object) -> bool:
+    text = str(value).lower()
+    return "database is locked" in text or "database is busy" in text
 
 
 def should_reconnect_for_refresh(printer: Any) -> bool:

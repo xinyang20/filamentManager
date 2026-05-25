@@ -70,6 +70,48 @@ describe("useDashboardStore", () => {
     expect(requestPaths(fetchMock)).toContain("/printers/1/dashboard");
   });
 
+  it("syncs selected printer status from dashboard payload", async () => {
+    const connectedPrinter = { ...printerFixture, connection_status: "connected", last_sync_at: "2026-05-25T05:44:59Z" };
+    mockApi((path) => {
+      if (path === "/printers/1/dashboard") {
+        return {
+          printer: connectedPrinter,
+          state: {},
+          device_snapshot: { derived_status: {}, camera: {}, camera_options: {}, data_coverage: {}, print_status: {} },
+          recent_events: [],
+          recent_print_logs: [],
+        };
+      }
+      if (path === "/printers/1/capabilities") return { model_family: "x1", known: true, recommended_maintenance: [], visible_fields: [], evidence: {} };
+      if (path === "/printers/1/camera/capabilities") return { available: true, stream_path: "/camera/mjpeg" };
+      if (path === "/filament/effective-color-mappings") return [];
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    const printers = usePrintersStore();
+    printers.printers = [{ ...printerFixture, connection_status: "connecting" }];
+    printers.selectedPrinterId = 1;
+
+    await useDashboardStore().loadDashboard();
+
+    expect(printers.selectedPrinter?.connection_status).toBe("connected");
+    expect(printers.selectedPrinter?.last_sync_at).toBe("2026-05-25T05:44:59Z");
+  });
+
+  it("syncs printer status from overview summary payload", async () => {
+    const connectedPrinter = { ...printerFixture, connection_status: "connected", last_sync_at: "2026-05-25T05:44:59Z" };
+    mockApi((path) => {
+      if (path === "/dashboard/summary") return [{ printer: connectedPrinter, state: {}, device_snapshot: {} }];
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    const printers = usePrintersStore();
+    printers.printers = [{ ...printerFixture, connection_status: "connecting" }];
+    printers.selectedPrinterId = 1;
+
+    await useDashboardStore().loadOverview();
+
+    expect(printers.selectedPrinter?.connection_status).toBe("connected");
+  });
+
   it("builds dual hotend temperature rows from dashboard temperatures", async () => {
     mockApi((path) => {
       if (path === "/printers/1/dashboard") {

@@ -281,7 +281,10 @@ export const useDashboardStore = defineStore("dashboard", () => {
       })),
       apiRequest<FilamentColorMapping[]>("/filament/effective-color-mappings"),
     ]);
-    if (result) dashboard.value = result;
+    if (result) {
+      dashboard.value = result;
+      if (result.printer) printersStore().applyPrinterUpdate(result.printer);
+    }
     deviceCapabilities.value = capabilities;
     cameraCapabilities.value = cameraCapabilityResult;
     cameraStreamError.value = false;
@@ -336,6 +339,9 @@ export const useDashboardStore = defineStore("dashboard", () => {
   async function loadOverview() {
     const summaryResult = await apiRequest<DashboardSummaryItem[]>("/dashboard/summary");
     dashboardSummary.value = summaryResult;
+    for (const item of summaryResult) {
+      if (item.printer) printersStore().applyPrinterUpdate(item.printer);
+    }
     if (!printersStore().selectedPrinterId && dashboardSummary.value.length) {
       printersStore().selectedPrinterId = dashboardSummary.value[0].printer.id;
     }
@@ -968,6 +974,7 @@ export const useDashboardStore = defineStore("dashboard", () => {
       const next = await fetchDashboard();
       if (!next) return false;
       dashboard.value = next;
+      if (next.printer) printersStore().applyPrinterUpdate(next.printer);
       if (dashboardRefreshMarker(next) && dashboardRefreshMarker(next) !== previousMarker) return true;
     }
     return false;

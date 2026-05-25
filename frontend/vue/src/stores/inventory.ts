@@ -748,8 +748,22 @@ export const useInventoryStore = defineStore("inventory", () => {
 
 
   function applyFilamentSpools(spoolResult: FilamentSpool[]) {
-    filamentSpools.value = spoolResult;
-    spools.value = spoolResult.map((spool) => ({
+    const pendingById = new Map(
+      filamentSpools.value
+        .filter((spool) => isFilamentSpoolOperationPending(spool.id))
+        .map((spool) => [spool.id, spool] as const),
+    );
+    const nextSpools = pendingById.size
+      ? spoolResult.map((spool) => pendingById.get(spool.id) || spool)
+      : spoolResult;
+    if (pendingById.size) {
+      const nextIds = new Set(nextSpools.map((spool) => spool.id));
+      for (const spool of pendingById.values()) {
+        if (!nextIds.has(spool.id)) nextSpools.unshift(spool);
+      }
+    }
+    filamentSpools.value = nextSpools;
+    spools.value = nextSpools.map((spool) => ({
       id: spool.legacy_spool_id || spool.id,
       display_name: spool.sku_label || `${t("table.spool")} ${spool.id}`,
       material: spool.material,

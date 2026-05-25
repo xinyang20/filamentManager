@@ -412,6 +412,41 @@ def test_stale_spool_operational_update_is_rejected(api_client) -> None:
     assert current["storage_location"] == "Shelf 2"
 
 
+def test_spool_operational_updates_use_sqlite_write_lock(api_client, monkeypatch) -> None:
+    _, _, sku = _inventory_tree(api_client)
+    created = api_client.post(
+        "/api/filament/spools",
+        json={"sku_id": sku["id"], "status": "opened_in_storage", "storage_location": "Shelf 1"},
+    )
+    assert created.status_code == 201, created.text
+    spool = created.json()
+
+    class RecordingLock:
+        def __init__(self) -> None:
+            self.enter_count = 0
+
+        def __enter__(self):
+            self.enter_count += 1
+            return self
+
+        def __exit__(self, exc_type, exc, traceback) -> bool:
+            return False
+
+    lock = RecordingLock()
+    monkeypatch.setattr(db_session, "sqlite_write_lock", lock)
+
+    located = api_client.post(
+        f"/api/filament/spools/{spool['id']}/location",
+        json={"storage_location": "Shelf 2"},
+    )
+    assert located.status_code == 200, located.text
+    weighted = api_client.post(f"/api/filament/spools/{spool['id']}/weight", json={"actual_weight_g": 875})
+    assert weighted.status_code == 200, weighted.text
+    emptied = api_client.post(f"/api/filament/spools/{spool['id']}/status", json={"status": "empty"})
+    assert emptied.status_code == 200, emptied.text
+    assert lock.enter_count == 3
+
+
 def test_color_mapping_crud_and_sku_gaps(api_client) -> None:
     brand = _brand(api_client, "Generic")
     type_series = _type_series(api_client, brand["id"])

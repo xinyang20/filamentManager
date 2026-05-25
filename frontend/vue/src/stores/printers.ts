@@ -93,6 +93,17 @@ export const usePrintersStore = defineStore("printers", () => {
   }
 
 
+  function applyPrinterUpdate(updated: Printer) {
+    const existing = printers.value.find((printer) => printer.id === updated.id);
+    if (existing) {
+      Object.assign(existing, updated);
+    } else {
+      printers.value = [...printers.value, updated];
+    }
+    if (!selectedPrinterId.value) selectedPrinterId.value = updated.id;
+  }
+
+
   async function savePrinter() {
     await withLoading(async () => {
       const editingId = editingPrinterId.value;
@@ -318,6 +329,7 @@ export const usePrintersStore = defineStore("printers", () => {
     scanProgressWidth,
     printerStatusTone,
     refreshPrinters,
+    applyPrinterUpdate,
     savePrinter,
     handlePrinterSelectionChanged,
     populatePrinterForm,

@@ -147,7 +147,7 @@ export const useNavigationStore = defineStore("navigation", () => {
     };
     for (const name of [
       "printer.status.updated",
-      "device.dashboardStore().snapshot.updated",
+      "device.snapshot.updated",
       "hms.error.active",
       "hms.error.recovered",
       "ams.unit.updated",
